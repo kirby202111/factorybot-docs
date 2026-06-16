@@ -22,6 +22,10 @@
 | 返修域 | [返修域.md](./返修域.md) | 返修子流程的状态机、返修规则、再入点规则、报废判定 | 第4章 | ReworkState, ReworkRule, ReentryPoint, ScrapDecision |
 | 数据采集域 | [数据采集域.md](./数据采集域.md) | 四层采集架构、设备/事件/环境数据采集Schema、数据质量管控、存储策略 | 第5章 | DataSchema, CollectionPoint, TraceabilityModel, DataQuality |
 | 物料域 | [物料域.md](./物料域.md) | 物料主数据与分类、BOM结构、替代料、MSD管理、物料追溯、防错校验、库存与移动 | 第6章 | Material, MaterialLot, MSDLevel, ShelfLife, BOMMapping, MaterialTraceability |
+| 设备工装台账域 | [设备工装台账域.md](./设备管理服务/设备工装台账域.md) | 设备/工装/计量器具的入账、赋码、建档、状态流转、位置归属、可用性投影、报废审批 | 第5章(设备部分) | Asset, Equipment, Fixture, MeasuringInstrument, AvailabilityProjection, ScrapApplication |
+| 点检保养域 | [点检保养域.md](./设备管理服务/点检保养域.md) | 预防性运维：点检/保养规则定义、计划生成、任务调度、执行签核、超期检测、工装寿命判定 | 新增 | InspectionRule, MaintenanceRule, InspectionPlan, MaintenancePlan, InspectionTask, MaintenanceTask, FixtureLifeExceeded |
+| 维修域 | [维修域.md](./设备管理服务/维修域.md) | 纠正性运维：故障报告、派工、诊断、维修执行、备件消耗、验证关单、升级外协、报废建议 | 新增 | MalfunctionReport, RepairOrder, FaultDiagnosis, RepairAction, PartsConsumption, ScrapRecommendation |
+| 计量检定域 | [计量检定域.md](./设备管理服务/计量检定域.md) | 计量器具检定：规则定义、周期检定计划、送检/收回、证书管理、过期预警 | 新增 | CalibrationRule, CalibrationPlan, CalibrationTask, CalibrationCertificate, CalibrationExpired |
 
 ### 通用域（Generic Domain）
 
@@ -63,6 +67,12 @@ graph TB
     INTEGRATION[系统集成域] --> ENTITY
     INTEGRATION --> MATERIAL
 
+    ASSET[设备工装台账域] --> PM[点检保养域]
+    ASSET --> REPAIR[维修域]
+    ASSET --> CAL[计量检定域]
+    PM --> REPAIR
+    REPAIR --> PM
+
     AGENT[Agent域] --> ENTITY
     AGENT --> STEP
     AGENT --> ROUTE
@@ -78,6 +88,10 @@ graph TB
     style REWORK fill:#7b68ee,color:#fff
     style DATA fill:#7b68ee,color:#fff
     style MATERIAL fill:#7b68ee,color:#fff
+    style ASSET fill:#7b68ee,color:#fff
+    style PM fill:#7b68ee,color:#fff
+    style REPAIR fill:#7b68ee,color:#fff
+    style CAL fill:#7b68ee,color:#fff
     style EXCEPTION fill:#6b8e23,color:#fff
     style INTEGRATION fill:#6b8e23,color:#fff
     style AGENT fill:#6b8e23,color:#fff
@@ -96,4 +110,8 @@ graph TB
 | 返修完成回流 | 返修域 | 制造实体域、质量域 | 返修域验证通过 → 实体域恢复在制品流转 → 质量域复检 |
 | 物料上料防错 | 物料域 | 制造实体域 | 物料域校验通过 → 实体域允许工序进入READY |
 | 异常停线 | 异常处理域 | 制造实体域、质量域 | 异常域触发停线 → 实体域冻结在制品 → 质量域评估影响范围 |
+| 设备点检保养 | 点检保养域 | 设备工装台账域 | 台账域发布度量值 → 点检保养域阈值判定触发 → 生成计划执行 → 结果事件回写台账域 |
+| 设备故障维修 | 维修域 | 设备工装台账域、异常处理域 | 故障上报 → 维修域创建工单 → 台账域停用资产 → 维修完成恢复资产 |
+| 计量器具检定 | 计量检定域 | 设备工装台账域 | 检定到期 → 送检暂停使用 → 检定完成签发证书 → 台账域更新有效期恢复资产 |
+| 维修不经济报废 | 维修域 | 设备工装台账域 | 维修域发布报废建议 → 台账域发起报废审批 → 审批通过后资产退役 |
 | Agent查询 | Agent域 | 所有领域 | Agent域按三级检索策略跨领域检索组合答案 |
