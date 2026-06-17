@@ -3,7 +3,6 @@
 > **限界上下文**：Agent域  
 > **统一语言**：KnowledgeBase, QueryPattern, RetrievalStrategy, ResponseTemplate, IntentMapping  
 > **核心关注**：定义Agent知识库的文档检索结构、编码/名称/语义三级检索策略、查询模式映射和标准化响应模板  
-> **原始章节**：第14章（Agent知识库设计）
 
 ---
 
