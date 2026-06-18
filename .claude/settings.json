@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(git mv *)",
-      "Edit(/.claude/skills/event-storming/**)"
+      "Edit(/.claude/skills/event-storming/**)",
+      "Bash(cd \"e:/factorybot-docs/工艺管理\" && sed -n '30,569p' \"PCBA工艺流程详细设计文档.md\" > /tmp/ch1.txt && echo \"Ch1 extracted: $\\(wc -l < /tmp/ch1.txt\\) lines\")",
+      "Bash(cd \"e:/factorybot-docs\" && mkdir -p \"MES领域模型/制造资源服务/基础台账域\" \"MES领域模型/制造资源服务/工艺管理域\" \"MES领域模型/设备管理服务\" \"MES领域模型/生产执行服务\" \"MES领域模型/跨服务\")"
     ]
   }
 }
