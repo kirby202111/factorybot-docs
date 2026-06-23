@@ -68,7 +68,7 @@ description: 在本仓库（factorybot-docs，PCBA + 整机组装混合型车间
 
 | 领域建模元素（源） | 代码实现对应（产物） | 落实要点 |
 |--------------------|--------------------|----------|
-| 聚合根 / 实体 / 值对象（§1、§2） | 领域层类（§3） | POJO，不依赖任何框架；值对象不可变；状态机用枚举 + 方法守卫 |
+| 聚合根 / 实体 / 值对象（§1、§2） | 领域层类（§3） | 纯 POJO，表映射用原生 MyBatis XML Mapper / `@Select` 注解 SQL（写在 `infrastructure/persistence`）；禁止基础设施行为耦合；值对象不可变；状态机用枚举 + 方法守卫 |
 | 领域事件（§5） | 领域事件类 + Envelope（§3） | 事件名与领域建模逐字一致；Envelope 字段对齐 [消息处理实现说明](../../../实现说明/业务事件/消息处理实现说明.md) |
 | 命令应用服务（§4） | 应用层服务 + **主动适配器**（§4、§5） | 每个 `XxxCommandService` 方法 → 一个 REST Controller 端点或 CLI 入口；事务边界在应用层 |
 | 事件消费应用服务（§4） | **主动适配器** Kafka Listener + 应用层 handler（§5） | 每个订阅主题 → 一个 `@KafkaListener`；幂等走 [MySQL配置说明](../../../实现说明/业务事件/MySQL配置说明.md) 的 `consumed_event` |
@@ -108,7 +108,7 @@ description: 在本仓库（factorybot-docs，PCBA + 整机组装混合型车间
 ┌──────────────────────────────────────────────────────────────┐
 │                          领域层                                │
 │   聚合根 · 实体 · 值对象 · 领域服务 · 领域事件                  │
-│   职责：业务规则 · 不变式 · 不依赖任何框架与基础设施             │
+│   职责：业务规则 · 不变式 · 不耦合基础设施行为                  │
 └──────────────────────────┬───────────────────────────────────┘
                            │ 依赖接口（端口）
                            ▼
@@ -121,7 +121,7 @@ description: 在本仓库（factorybot-docs，PCBA + 整机组装混合型车间
 
 **依赖方向铁律**（CLAUDE.md 低耦合/高内聚 + SOLID 的 DIP）：
 
-- 领域层**不依赖**任何适配器、框架、中间件。聚合根里禁止出现 `@Entity` / `@Table` / `KafkaTemplate` / `@Transactional` / `ApplicationContext`。
+- 领域层**不耦合基础设施行为**。聚合根/实体/领域服务方法内**禁止**直接调用 `KafkaTemplate` / `RestTemplate` / 数据访问层（`Mapper`/`SqlSession`），**禁止** `@Transactional`（事务归应用层）。表映射用原生 MyBatis（XML Mapper 或 Mapper 接口上的 `@Select`/`@Insert` 注解 SQL），写在 `infrastructure/persistence`，领域对象保持纯 POJO；领域服务允许 `@Component` + 构造器注入端口接口。判断标准：注解是装配提示则放行，引入运行时外部副作用则禁止。
 - 应用层只依赖领域层 + 端口接口；`@Transactional` 只出现在应用层。
 - 主动适配器依赖应用层；被动适配器实现领域层端口（依赖倒置）。
 - 换掉 HTTP→gRPC、MySQL→Postgres、Kafka→RabbitMQ，**只改适配器层，领域层与应用层一行不动**——这是验收分层是否正确的口诀。
@@ -160,7 +160,7 @@ src/main/java/com/company/mes/<svc>/
   application/                 # 应用层（事务边界、编排，@Transactional）
     service/                   #   应用服务（命令 / 查询 / 事件消费统一放此）
     port/                      #   出站端口接口（Repository 以外的 ACL、Publisher）
-  domain/                      # 领域层（纯 POJO，零框架依赖）
+  domain/                      # 领域层（允许映射/DI 注解；禁止基础设施行为耦合，见 §6 第 1 条）
     model/                     #   聚合根、实体、值对象
     event/                     #   领域事件
     service/                   #   领域服务
@@ -453,13 +453,16 @@ suspendAsset 命令 = 一个本地事务
 
 ## 6. 写作规范（关键）
 
-1. **领域层零框架依赖**（CLAUDE.md OOD + DIP）：聚合根/值对象/领域服务/事件里**禁止**任何 Spring/JPA/MyBatis/Kafka 注解。这是分层的命门。
+1. **领域层按耦合性质分档**（CLAUDE.md OOD + DIP，技术栈为原生 MyBatis，不用 MyBatis-Plus）：
+   - **表映射在 Mapper 侧**：聚合根/实体/值对象保持**纯 POJO**，不带任何映射注解；表映射用原生 MyBatis XML Mapper（`mapper/**/*.xml`）或 Mapper 接口上的 `@Select`/`@Insert`/`@Update`/`@Delete` 注解 SQL，统一写在 `infrastructure/persistence`。领域对象不认识 Mapper，Mapper 认识领域对象。
+   - **允许（DI 注解）**：领域服务上的 `@Component`/`@Service` + **构造器注入端口接口**（禁止字段 `@Autowired`）。注解仅作装配提示，测试时仍可 new 并传 mock。
+   - **禁止（基础设施行为耦合）**：聚合根/实体/领域服务方法内直接调用 `KafkaTemplate`/`RestTemplate`/`Mapper`/`SqlSession`，或带 `@Transactional`。引入运行时外部副作用、破坏可测性与事务一致性的，一概禁止。判断标准：**装配提示注解可留，运行时外部副作用一律禁止。**
 2. **依赖倒置（DIP）**：Repository / Gateway / Publisher 端口接口在领域层或应用层，实现在 `infrastructure`（`persistence` / `acl` / `messaging`）。应用层依赖接口，不依赖实现。
 3. **事务边界只在应用层**：`@Transactional` 只出现在应用服务；事务内只写本地 DB（业务表 + outbox），**禁止** `@Transactional` 方法内直接 `kafkaTemplate.send()`（见 [消息处理实现说明 §7.1](../业务事件/消息处理实现说明.md)）。
 4. **每个适配器对应一个领域建模端口**：禁止出现没有业务语义的"技术适配器"。Controller 必须能指到某个命令应用服务方法；Listener 必须能指到某个事件消费方法。
 5. **事件名与领域建模逐字一致**：类名、eventType、topic、partition_key 都不改。要改先改领域建模，再改实现，并在变更说明里记一笔。
 6. **INV 必须可指到落地点**：每条不变式要么是聚合根方法守卫，要么是 DDL 唯一索引，要么是领域服务 + 唯一索引，要么是去重表。指不到=没实现。
-7. **PO 与领域对象分离**：持久化对象（PO）带 `@TableName` 等注解，领域聚合根不带；两者用 mapper 双向转换。禁止让领域对象直接映射表。
+7. **PO 与领域对象可合一**：聚合根/实体可直接带 `@TableName` 等映射注解映射表（见第 1 条），不强制 PO↔领域对象双模型。若聚合有复杂嵌套或需隔离框架细节，仍可单独建 PO + 转换器，由实现文档按上下文取舍。
 8. **ACL 隔离外部模型**：调相邻上下文或外部系统时，经防腐层翻译为本上下文值对象，外部模型不渗透进领域层（CLAUDE.md 低耦合）。
 9. **复用横向基础设施文档**：outbox DDL、producer/consumer 参数、幂等表、Envelope 字段——只引用 [实现说明/业务事件/](../../../实现说明/业务事件/) 下既有文档，**不重复**。本文只写本上下文特有的 topic、表、类。
 10. **代码示例是 Java + Spring Boot**：与既有实现说明文档技术栈一致；示例要可直接落地，不是伪代码。
@@ -473,7 +476,7 @@ suspendAsset 命令 = 一个本地事务
 | 反模式 | 为什么不行 | 改怎么写 |
 |--------|-----------|---------|
 | 没有领域建模就直接写实现 | 端口/适配器失去业务语义根基 | 先走 domain-modeling skill |
-| 聚合根带 `@Entity`/`@Table`/`@Component` | 领域层耦合框架，换技术就废 | PO 与领域对象分离，注解只在 PO |
+| 聚合根方法里调 `KafkaTemplate`/`Mapper`/带 `@Transactional` | 基础设施行为混入领域，破坏可测性与事务一致性 | 映射/DI 注解可留；副作用下沉到应用层或适配器（见第 1 条三档） |
 | `@Transactional` 方法内直接 `kafkaTemplate.send()` | 崩溃窗口丢事件（见消息处理说明） | 走 Outbox，事务内只写 DB |
 | Repository 实现在领域层 | 依赖方向反了 | 接口在领域层，实现在 `infrastructure/persistence` |
 | 出现没有业务语义的"技术适配器" | 分层混乱，无法追溯 | 每个适配器对应一个领域建模端口 |
@@ -525,7 +528,7 @@ suspendAsset 命令 = 一个本地事务
 - [ ] §0 分层图列出本上下文所有主动/被动适配器具体类名
 
 **分层与依赖**
-- [ ] 领域层**零框架注解**（无 `@Entity/@Table/@Component/@Transactional/KafkaTemplate`）
+- [ ] 领域层按三档：映射/DI 注解允许；方法内无 `KafkaTemplate`/`RestTemplate`/数据访问层调用、无 `@Transactional`
 - [ ] Repository / Gateway / Publisher 接口在领域层或应用层，实现在 `infrastructure`（`persistence`/`acl`/`messaging`）
 - [ ] `@Transactional` 只在应用层；事务内不直接 `kafkaTemplate.send()`
 - [ ] 每个适配器能对应到一个领域建模端口，无"技术适配器"
