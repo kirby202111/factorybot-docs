@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git mv *)",
       "Edit(/.claude/skills/event-storming/**)",
-      "Bash(cd \"e:/factorybot-docs/**\" && *)"
+      "Bash(cd \"e:/factorybot-docs/**\" && *)",
+      "Edit(/.claude/skills/implementation/**)"
     ]
   }
 }
