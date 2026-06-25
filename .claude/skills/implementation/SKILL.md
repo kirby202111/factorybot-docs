@@ -271,7 +271,7 @@ com.factorybot.<service>.<context>
 | `facade-impl` | FacadeImpl、输入解析/校验/转换、输出序列化 | 禁止承载 INV 业务判断；禁止直接调 Mapper |
 | `controller` | HTTP 入口、协议适配 | 只能调 facade 声明的方法；禁止写业务规则 |
 | `application` | 用例编排、事务、幂等、只读加载、事件/Outbox、安全、操作日志 | 禁止写仓储；禁止承载 INV 业务判断 |
-| `domain` | Model、VO、DomainService、DomainEvent、Repository/Client/FacadeClient 接口、Query、Factory | 禁止依赖 Spring / MyBatis / MQ |
+| `domain` | Model、VO、DomainService、DomainEvent、Repository/Client/FacadeClient 接口、Query、Factory | 禁止依赖 Spring / MyBatis / Kafka |
 | `repository` | RepositoryImpl、Mapper、DO、Model↔DO Converter | 禁止反向定义业务语义；DO 不得上抛领域层 |
 | `infrastructure` | ClientImpl、FacadeClientImpl、Configuration、Outbox、Kafka、Redis | 禁止承载业务规则 |
 | `utility` | 无业务语义工具类、全局 Exception | 必须无业务语义 |
@@ -616,7 +616,7 @@ OutboxPublisher 异步发布 Kafka
 3. **保留契约稳定性**：已对外发布的 Facade API、topic、eventType、表关键字段尽量不改。若必须改，顶部加**变更说明**（旧名 → 新名、影响下游、迁移方式）。
 4. **实现映射随领域模型同步**：领域建模新增/删除/改名的聚合、事件、INV，必须同步到 §12。
 5. **不变式编号延续**：沿用领域建模 INV 编号；废弃项不删映射，标“已废止（原因）”。
-6. **技术取舍变更要说明成本**：如 MyBatis 与 MyBatis-Plus 使用边界调整、直接 MQ 改 Outbox、同库读模型改独立读库，要说明迁移影响。
+6. **技术取舍变更要说明成本**：如 MyBatis 与 MyBatis-Plus 使用边界调整、直接 Kafka 改 Outbox、同库读模型改独立读库，要说明迁移影响。
 7. **diff 自检**：重点确认领域层未被框架污染、应用层未堆业务且未写仓储、写仓储在领域服务、事件发布仍有 Outbox/幂等保障、Converter 逐字段手写。
 
 ---
@@ -660,7 +660,7 @@ com.factorybot.resource.spareparts
 │   └── acl                 RepairFacadeClient 接口
 ├── repository        SparePartLotRepositoryImpl + SparePartLotMapper + SparePartLotBaseMapper
 │                     + SparePartLotDO + Model2DOConverter/DO2ModelConverter
-├── infrastructure    RepairFacadeClientImpl + Outbox/MQ/Redis + Configuration
+├── infrastructure    RepairFacadeClientImpl + Outbox/Kafka/Redis + Configuration
 └── utility           SparePartException
 ```
 
@@ -797,7 +797,7 @@ public class SparePartDomainService {
 
 **八层分层**
 - [ ] 包结构包含 `facade / facade-impl / controller / application / domain / repository / infrastructure / utility` 八层，职责清晰。
-- [ ] 领域层未依赖 Spring / MyBatis / MyBatis-Plus / MQ / HTTP。
+- [ ] 领域层未依赖 Spring / MyBatis / MyBatis-Plus / Kafka / HTTP。
 - [ ] 应用服务只编排事务、只读加载、幂等、Outbox，不写核心业务规则，**不写仓储**。
 - [ ] 写仓储调用发生在 `DomainService`，不在 `AppService`。
 - [ ] Controller / FacadeImpl 不直接调 Mapper 改状态；Controller 只调 facade 声明的方法。
