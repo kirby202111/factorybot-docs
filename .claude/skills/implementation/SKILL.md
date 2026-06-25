@@ -11,7 +11,7 @@ description: 在本仓库（factorybot-docs，PCBA + 整机组装混合型车间
 - **可编码**：给出八层包结构、类职责、接口、事务边界、持久化映射、事件发布、测试切面与关键代码骨架。
 - **守规范**：分层、POJO 后缀、Bean 命名、方法前缀、Converter 写法严格遵循本目录附属 [编码规范.md](编码规范.md)。
 - **不过度设计**：吸收大厂 DDD 工程经验（事务 Outbox / CQRS 读写分离 / 防腐层），但按 MES 场景取舍，不把示例做成框架秀。
-- **边界清晰**：领域层保持业务表达，Spring / MyBatis / MQ / HTTP 等技术细节停留在 facade-impl / application / repository / infrastructure。
+- **边界清晰**：领域层保持业务表达，Spring / MyBatis / Kafka / HTTP 等技术细节停留在 facade-impl / application / repository / infrastructure。
 
 > **前置纪律（来自项目 CLAUDE.md）**：当用户指定要做某个模块时，**只读该模块自身文档与其直接对接的领域（domain），不把其它模块杂糅进来**。实现设计只承载本限界上下文的代码落地，不代写相邻限界上下文的实现。
 
@@ -91,17 +91,17 @@ controller     HTTP 入口（可选，微服务一般由网关提供；只调 fa
 application    AppService + Info + 事务控制 + 只读查询仓储 + 领域事件触发监听 + 操作日志 + 安全认证 + 幂等
 domain         Model(聚合根充血/实体可贫血) + VO值对象 + DomainService + DomainEvent + Repository接口(读写) + Query + Client接口(中间件ACL) + FacadeClient接口(RPC ACL) + Factory
 repository     RepositoryImpl + Mapper(extends BaseMapper) + DO + Model↔DO Converter
-infrastructure ClientImpl + FacadeClientImpl + Configuration + Outbox/MQ/Redis/OSS/设备接口实现
+infrastructure ClientImpl + FacadeClientImpl + Configuration + Outbox/Kafka/Redis/OSS/设备接口实现
 utility        无业务语义工具类 + 全局 Exception
 ```
 
 调用流向：`testsuites / main` → `controller` / `facade` → `facade-impl` → `application` → `domain`；`domain` 定义接口（Repository / Client / FacadeClient），由 `repository` / `infrastructure` 倒置实现（DIP）。`application` 虚线依赖 `repository` / `infrastructure`，但必须经 `domain` 声明的接口访问，不得直接使用 Mapper / ClientImpl 等实现。
 
 **强制边界（对齐规范）**：
-- `domain` 不依赖 Spring / MyBatis / MQ / HTTP / Redis；只定义接口，由下层实现。
+- `domain` 不依赖 Spring / MyBatis / Kafka / HTTP / Redis；只定义接口，由下层实现。
 - `application` **只查询仓储，不写仓储**（写仓储是领域层的能力）；使用中间件须经 `domain` 声明的接口。
 - `repository` 仅做数据持久化，`DO` 只存在于本层，经 Converter 转 `Model` 供上层。
-- `infrastructure` 实现 `domain` 的 `Client` / `FacadeClient` 接口 + 中间件集成 + Outbox。
+- `infrastructure` 实现 `domain` 的 `Client` / `FacadeClient` 接口 + 中间件集成 + Outbox / Kafka。
 - `utility` 无业务语义，被各层直接或间接依赖。
 - `controller` 依赖 `facade-impl` 但**只能调用 `facade` 中声明的方法**，防止业务逻辑从 facade-impl 泄露到 controller。
 
@@ -135,7 +135,8 @@ utility        无业务语义工具类 + 全局 Exception
 
 - 聚合内强一致：单事务内完成。
 - 跨聚合协作：领域服务 + 应用服务编排；跨上下文协作通过集成事件 / Saga / 流程编排。
-- 对外事件发布：默认采用**事务 Outbox**，避免“数据库提交成功但 MQ 发送失败”。
+- 对外事件发布：默认采用**事务 Outbox + Kafka**，避免“数据库提交成功但 Kafka 发送失败”。
+- 消息队列技术选型强制使用 **Kafka**；实现设计文档中不得写成可替换的 `<MQ>`，也不得引入 RabbitMQ / RocketMQ 等其它消息队列作为默认方案。
 - 消费外部事件：必须有幂等键、去重表或消费日志；通过 ACL（`FacadeClient` / `Client`）翻译为本上下文命令或值对象。
 - 不默认做分布式事务；MES 现场系统以可恢复、可补偿、可追溯为优先。
 
@@ -176,7 +177,7 @@ utility        无业务语义工具类 + 全局 Exception
 | 转换器 | `XXAA2BBConverter`（逐字段手写） | `Model2DOConverter`/`DO2ModelConverter`(repository)；`Model2DTOConverter`/`DTO2ModelConverter`(facade-impl)；`Model2InfoConverter`/`Info2ModelConverter`(application) |
 | 配置 | `<XXConfiguration>` | 各层各自配置：DataSourceConfiguration→repository；WebConfiguration→controller 等 |
 | 不变规则 INV | 聚合方法 / DomainService / DB 约束 / 幂等表 / Saga | 每条 INV 说明由哪一层保证，不能只写“代码校验” |
-| 上下文外事件消费 | MQ Listener + ACL(`FacadeClient`/`Client`) + AppService | 外部事件不得直接进领域；先翻译成本上下文命令/值对象 |
+| 上下文外事件消费 | Kafka Listener + ACL(`FacadeClient`/`Client`) + AppService | 外部事件不得直接进领域；先翻译成本上下文命令/值对象 |
 | 热点 / 暂缓项 | 实现风险 / 暂缓设计 | 不确定点不得静默消失；列出推荐取舍与后续扩展点 |
 
 > **可追溯性硬约束**：实现设计文档 §12“与领域建模的映射”必须给出一张**领域模型元素 → 实现元素**的对位表，让读者能从任何一个聚合、方法、事件、INV 查到它将落到哪个包、哪个类、哪个方法、哪种技术机制。这是本 skill 的验收门槛之一。
@@ -215,7 +216,7 @@ utility        无业务语义工具类 + 全局 Exception
 > **限界上下文**：<XX>
 > **所属服务**：<制造资源服务 / 生产执行服务 / 设备管理服务>
 > **实现依据**：[领域建模 — <XX>上下文](../领域建模/<XX>上下文.md)
-> **技术栈取舍**：Java 17+ / Spring Boot 3.x / MyBatis 或 MyBatis-Plus / Outbox / <MQ>
+> **技术栈取舍**：Java 17+ / Spring Boot 3.x / MyBatis 或 MyBatis-Plus / Outbox / Kafka
 
 ---
 
@@ -233,7 +234,7 @@ facade / controller  ->  facade-impl  ->  application  ->  domain
 ```
 
 **本实现坚持**：
-- 领域层不依赖 Spring / MyBatis / MQ。
+- 领域层不依赖 Spring / MyBatis / Kafka。
 - 应用服务负责编排与事务、只读加载、事件收集与 Outbox，不写仓储，不写业务规则。
 - 领域服务负责跨聚合规则、加载聚合、调用行为、写仓储持久化。
 - 仓储层 / 基础设施层实现 Repository、Outbox、ACL、Query。
@@ -258,7 +259,7 @@ com.factorybot.<service>.<context>
 │   ├── repository          XXRepository 接口 + XXQuery
 │   └── acl                 XXClient 接口 + XXFacadeClient 接口
 ├── repository        XXRepositoryImpl + XXMapper + XXBaseMapper + XXDO + Model2DOConverter/DO2ModelConverter
-├── infrastructure    XXClientImpl + XXFacadeClientImpl + Configuration + Outbox/MQ/Redis/OSS/设备接口
+├── infrastructure    XXClientImpl + XXFacadeClientImpl + Configuration + Outbox/Kafka/Redis/OSS/设备接口
 └── utility           Utils + 全局 Exception
 ```
 
@@ -272,7 +273,7 @@ com.factorybot.<service>.<context>
 | `application` | 用例编排、事务、幂等、只读加载、事件/Outbox、安全、操作日志 | 禁止写仓储；禁止承载 INV 业务判断 |
 | `domain` | Model、VO、DomainService、DomainEvent、Repository/Client/FacadeClient 接口、Query、Factory | 禁止依赖 Spring / MyBatis / MQ |
 | `repository` | RepositoryImpl、Mapper、DO、Model↔DO Converter | 禁止反向定义业务语义；DO 不得上抛领域层 |
-| `infrastructure` | ClientImpl、FacadeClientImpl、Configuration、Outbox、MQ、Redis | 禁止承载业务规则 |
+| `infrastructure` | ClientImpl、FacadeClientImpl、Configuration、Outbox、Kafka、Redis | 禁止承载业务规则 |
 | `utility` | 无业务语义工具类、全局 Exception | 必须无业务语义 |
 
 ---
@@ -412,7 +413,7 @@ public class <XX>DomainService {
 }
 ```
 
-> 领域服务可以依赖 Repository 接口或其它领域端口（Client / FacadeClient），但不直接依赖 Mapper、MQ Client、REST Client 实现。**写仓储调用发生在领域服务**。
+> 领域服务可以依赖 Repository 接口或其它领域端口（Client / FacadeClient），但不直接依赖 Mapper、Kafka Client、REST Client 实现。**写仓储调用发生在领域服务**。
 
 ---
 
@@ -433,7 +434,7 @@ DomainService 调用聚合行为 + 写仓储，返回事件
         ↓
 应用服务收集事件，同事务写 outbox_event
         ↓
-OutboxPublisher 异步发布 MQ
+OutboxPublisher 异步发布 Kafka
         ↓
 消费成功标记 published
 ```
@@ -462,7 +463,7 @@ OutboxPublisher 异步发布 MQ
 
 > Controller 只调 facade 声明的方法；FacadeImpl 完成 DTO↔Info/Model 转换后调 AppService。
 
-### 8.2 MQ 事件消费入口
+### 8.2 Kafka 事件消费入口
 
 | 订阅主题 | 外部事件 | Listener | ACL 转换（FacadeClient/Client） | 本上下文命令/Info | 幂等键 |
 |----------|----------|----------|---------------------------------|-------------------|--------|
@@ -471,7 +472,7 @@ OutboxPublisher 异步发布 MQ
 **ACL 原则**：
 - 外部事件 / DTO 不直接进入领域层。
 - `FacadeClient` / `Client` 接口定义在领域层，实现在基础设施层；ACL 把外部模型翻译为本上下文统一语言。
-- 消费外部事件必须记录幂等，避免设备重复上报、MQ 重投导致重复过账。
+- 消费外部事件必须记录幂等，避免设备重复上报、Kafka 重投导致重复过账。
 
 ---
 
@@ -550,11 +551,12 @@ OutboxPublisher 异步发布 MQ
 7. **Bean 命名严格按规范**：`Controller` / `Facade`(`Impl`) / `AppService`(`Write`/`Read`) / `DomainService` / `Repository`(`Impl`) / `Mapper`(`BaseMapper`) / `Client`(`Impl`) / `FacadeClient`(`Impl`) / `Configuration`。
 8. **值对象不可变且有语义**：ID、编码、数量、状态、工位、设备号等不要全用裸 String/Long；用 `XXVO` 承载校验与语言。
 9. **领域事件在聚合行为中产生**：状态改变的方法必须记录领域事件；DomainService 返回事件，应用服务收集并写 Outbox，不在 Controller / FacadeImpl 里拼事件。
-10. **Outbox 默认优先于直接发 MQ**：只要事件与数据库状态必须一致，默认使用事务 Outbox；直接发 MQ 需要说明为什么可接受。
-11. **跨上下文只走 ACL**：外部 DTO / Event / RPC 不进入 domain；经 `FacadeClient` / `Client` 翻译成本上下文命令、值对象或领域端口结果。
+10. **消息队列统一使用 Kafka**：实现设计中的事件发布、事件消费、Outbox Publisher、Listener 均按 Kafka 设计；不得把消息队列写成 `<MQ>` 占位，也不得默认引入 RabbitMQ / RocketMQ 等其它消息队列。
+11. **Outbox 默认优先于直接发 Kafka**：只要事件与数据库状态必须一致，默认使用事务 Outbox；直接发 Kafka 需要说明为什么可接受。
+12. **跨上下文只走 ACL**：外部 DTO / Event / RPC 不进入 domain；经 `FacadeClient` / `Client` 翻译成本上下文命令、值对象或领域端口结果。
 12. **Converter 逐字段手写**：禁止 `BeanUtils.copyProperties` / `MapStruct`；字段变更须在编译期可见。
 13. **方法前缀按规范**：Repository / Mapper / Client / DAO 用 `query/list/page/count/insert/delete/update`；聚合根行为用业务动词。
-14. **幂等是一等设计**：MES 场景的扫码、设备数据、MQ 消费、ERP 回调都可能重复；必须说明幂等键与去重位置。
+14. **幂等是一等设计**：MES 场景的扫码、设备数据、Kafka 消费、ERP 回调都可能重复；必须说明幂等键与去重位置。
 15. **并发控制要落到机制**：只写“保证并发安全”不合格；要说明乐观锁 version、唯一索引、悲观锁、串行队列或业务锁。
 16. **不变式必须能定位实现层**：每条 INV 都要对应聚合方法、领域服务、数据库约束、幂等表、Saga 或补偿任务之一。
 17. **接口 DTO 不等于领域对象**：Request/DTO/Info 可贫血，领域 Model 不可贫血（聚合根充血）；Converter 职责要明确。
@@ -577,7 +579,7 @@ OutboxPublisher 异步发布 MQ
 | Repository 为每张表建一套 | 破坏聚合边界，实体被外部随意修改 | Repository 以聚合根为单位 |
 | 为所有对象都建 DomainService | 领域服务滥用，模型失去内聚 | 单聚合规则放聚合根，跨聚合才建领域服务 |
 | 直接把外部事件 / DTO 传进领域方法 | 上下文边界塌陷 | Listener → FacadeClient/Client + Converter → Info/VO |
-| 事务内直接发 MQ | DB 成功 MQ 失败会丢事件 | 同事务写 Outbox，异步发布 |
+| 事务内直接发 Kafka | DB 成功 Kafka 失败会丢事件 | 同事务写 Outbox，异步发布 Kafka |
 | 所有查询都加载聚合再拼 DTO | 性能差，读写职责混淆 | ReadAppService + 投影 / SQL |
 | 只写“使用乐观锁”但不说明 version | 无法编码与测试 | 写清 version 字段、冲突异常、重试/拒绝策略 |
 | INV 只出现在文档，不映射代码 | 不可验证，设计无法落地 | 在 §12 映射到类/方法/索引/幂等表 |
@@ -820,7 +822,7 @@ public class SparePartDomainService {
 
 **事件与集成**
 - [ ] 领域事件名与领域建模逐字一致。
-- [ ] 对外发布事件默认通过 Outbox；若直接 MQ，已说明理由。
+- [ ] 对外发布事件默认通过 Outbox；若直接 Kafka，已说明理由。
 - [ ] Outbox 字段、发布流程、失败重试或补偿策略清楚。
 - [ ] 外部事件消费经 `FacadeClient`/`Client` + Converter 翻译，不直接把外部 DTO 传入领域层。
 - [ ] 消费外部事件有幂等键与去重位置。
