@@ -4,7 +4,8 @@
       "Bash(git mv *)",
       "Edit(/.claude/skills/event-storming/**)",
       "Bash(cd \"e:/factorybot-docs/**\" && *)",
-      "Edit(/.claude/skills/implementation/**)"
+      "Edit(/.claude/skills/implementation/**)",
+      "Bash(sort -t- -k2 -n -u)"
     ]
   }
 }
