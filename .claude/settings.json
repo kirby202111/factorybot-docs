@@ -7,7 +7,11 @@
       "Edit(/.claude/skills/implementation/**)",
       "Bash(sort -t- -k2 -n -u)",
       "Edit(/.claude/skills/domain-modeling/**)",
-      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)"
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(python -c ' *)",
+      "Bash(py -c \"import sys; f=open\\(r'd:\\\\Code\\\\factorybot-docs\\\\.claude\\\\skills\\\\event-storming\\\\SKILL.md',encoding='utf-8'\\); lines=f.readlines\\(\\); print\\(repr\\(lines[63]\\)\\); print\\(repr\\(lines[156]\\)\\)\")",
+      "Bash(python -c \"print\\(1\\)\")",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }
