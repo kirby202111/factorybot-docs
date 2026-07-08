@@ -3,8 +3,6 @@
 > **限界上下文**：工艺管理
 > **统一语言**：Operation（工序）, ParameterTemplate（参数模板）, RouteVersion（工艺路线版本·聚合根，含步骤序列与生命周期）, RouteStep（路线步骤·RouteVersion 内实体）, AntiErrorItem（防错项·步骤配置）, QualityGateBinding（质量门禁绑定）, EquipmentSpecBinding（设备规格绑定）, FixtureMatchingBinding（工装匹配绑定）, ReentryPoint（再入点）, RealtimeDataCheckConfig（实时数据校验配置）, RouteVersionState（DRAFT/SUBMITTED/ACTIVATED/DEPRECATED/ARCHIVED）, SpecificationKey（规格键·引用台账能力规格）, RouteCache（工艺路线缓存·过点执行上下文本地投影）
 > **建模依据**：[事件风暴 — 工艺管理上下文](../事件风暴/工艺管理上下文.md)
->
-> **变更说明（2026-07-08）**：§6 不变式由主题式单段 `INV-XX` 拆为三段--聚合不变式 `INV-XX`（按聚合根分子节归位）、业务不变式 `BIZ-XX`（本上下文跨聚合 / 跨实例，最终一致）、跨上下文不变式 `INV-CX`（跨限界上下文）。旧 `INV-XX` 归类迁移：聚合内（INV-03/04/06/07/08）保留原号；跨聚合 / 跨实例（旧 INV-01/02）-> `BIZ-01..02`；跨上下文（旧 INV-09/10/11/12/13）-> `INV-CX-01..05`。正文内联引用同步更新。事件风暴侧已降级为无编号"已识别约束"清单，编号权威以本节 §6 为准。
 
 ---
 
@@ -12,7 +10,7 @@
 
 本域是制造资源服务下的**配置子域**，是 PCBA + 整机组装混合型车间所有"工艺路线与版本"的权威源。核心职责是管理**工序定义、参数模板、工艺路线编排、版本生命周期、步骤多维绑定、版本生效发布、再入点配置**——即"**工艺怎么定义、版本怎么生效发布、步骤绑定哪些防错/质量/设备/工装规则**"；**不负责**物料主数据与产品 BOM（归物料上下文，本上下文以 `product_id`/`bom_item_ref` 引用）、检验标准与质量门禁规则定义（归质量上下文，本上下文以 `quality_gate_rule_id` 引用）、设备/工装能力规格与匹配规则的事实源（归设备工装台账上下文，本上下文以 `spec_keys`/`fixture_matching_rule_id` 引用）、过点判定与路线推进执行（归过点执行上下文）、在制品位置投影（归在制品追踪上下文）。本上下文是**配置型主数据上下文**，写少读多，对外以"版本生效事件 + 只读规格读模型"为协作契约。
 
-本上下文与过点执行上下文虽分属不同服务（制造资源服务 vs 生产执行服务），但工艺对过点的协作采用"**本地缓存 + 降级查询**"解耦：版本生效后发布 `ProcessRouteActivated`（异步事件，过点执行上下文订阅刷新 `RouteCache`，非强防错阻塞）；过点时缓存未命中降级 REST 查询本上下文 `RouteVersionReadModel`（≤500ms，领域总览 §4.1/§5.1）。本上下文**不主动通知在制品**——在制品按其首次过点锁定的 `routeVersion` 继续（INV-CX-01），版本变更仅影响变更后首次过点的在制品。
+本上下文与过点执行上下文虽分属不同服务（制造资源服务 vs 生产执行服务），但工艺对过点的协作采用"**本地缓存 + 降级查询**"解耦：版本生效后发布 `ProcessRouteActivated`（异步事件，过点执行上下文订阅刷新 `RouteCache`，非强防错阻塞）；过点时缓存未命中降级 REST 查询本上下文 `RouteVersionReadModel`（≤500ms，领域总览 §4.1/§5.1）。本上下文**不主动通知在制品**——在制品按其首次过点锁定的 `routeVersion` 继续（INV-09），版本变更仅影响变更后首次过点的在制品。
 
 ### 聚合划分
 
@@ -84,8 +82,8 @@ Operation:
 ```
 
 **行为**：
-- `define(name, category, station_type, capability_keys, description, defined_by)` -> 发出 `OperationDefined`（前置：`operation_id` 全局唯一 BIZ-01；-> `ACTIVE`）
-- `update(changed_fields, updated_by)` -> 发出 `OperationUpdated`（前置：当前 `ACTIVE`；`category` 不可变更 BIZ-01；触发策略：`FlagAffectedDrafts` 标记引用该工序的 DRAFT 版本 `stale_reference`）
+- `define(name, category, station_type, capability_keys, description, defined_by)` -> 发出 `OperationDefined`（前置：`operation_id` 全局唯一 INV-01；-> `ACTIVE`）
+- `update(changed_fields, updated_by)` -> 发出 `OperationUpdated`（前置：当前 `ACTIVE`；`category` 不可变更 INV-01；触发策略：`FlagAffectedDrafts` 标记引用该工序的 DRAFT 版本 `stale_reference`）
 - `deprecate(reason, deprecated_by)` -> 发出 `OperationDeprecated`（前置：当前 `ACTIVE`；-> `DEPRECATED`；限制新草稿引用，已生效版本不受影响 INV-04）
 
 > 🔴 **热点：工序与产品/产线的耦合度**（事件风暴 §2.1）——工序是"通用类型"还是按产品族细分？建议立场已固化：**通用工序 + 步骤配置承载产品差异**，避免工序爆炸。`Operation` 只定义通用工序类型，产品差异由 `RouteStep` 的多维绑定承载。待与工艺工程团队确认工序粒度。
@@ -176,7 +174,7 @@ RouteVersion:
 - `bindParameterTemplate(step_no, template_id)` -> 发出 `ParameterTemplateBound`（前置：当前 `DRAFT`；template 非 DEPRECATED）
 - `configureReentryPoint(step_no, reentry_rules)` -> 发出 `ReentryPointConfigured`（前置：当前 `DRAFT`；`is_reentry_point=true`）
 - `submitReview(submitted_by)` -> 发出 `RouteReviewSubmitted`（前置：当前 `DRAFT`；至少 1 步且每步必填绑定满足 INV-06；-> `SUBMITTED`；经 `RouteValidationService` 预校验）
-- `activate(activated_by)` -> 发出 `ProcessRouteActivated`（前置：当前 `SUBMITTED`；引用校验全通过 INV-07/INV-08；-> `ACTIVATED`；设置 `effective_at`；生效后内容不可变 INV-04；同 `(route_id, route_type)` 唯一 ACTIVE BIZ-02，经 `RouteActivationService` 同事务弃用旧版本）
+- `activate(activated_by)` -> 发出 `ProcessRouteActivated`（前置：当前 `SUBMITTED`；引用校验全通过 INV-07/INV-08；-> `ACTIVATED`；设置 `effective_at`；生效后内容不可变 INV-04；同 `(route_id, route_type)` 唯一 ACTIVE INV-02，经 `RouteActivationService` 同事务弃用旧版本）
 - `rejectReview(rejection_notes, rejected_by)` -> 发出 `RouteReviewRejected`（前置：当前 `SUBMITTED`；-> `DRAFT`，携带 `rejection_notes`）
 - `rejectActivation(failed_refs[])` -> 发出 `ActivationRejected`（前置：当前 `SUBMITTED`；主管已批准但生效时引用校验失败；-> `DRAFT`，携带 `activation_blocked_reason`，🔴 事件风暴 §3 热点立场）
 - `rejectSubmission(failed_checks[])` -> 发出 `ReviewSubmissionRejected`（前置：当前 `SUBMITTED`；提交后预校验失败；-> `DRAFT`）
@@ -184,15 +182,15 @@ RouteVersion:
 - `archive()` -> 发出 `RouteVersionArchived`（前置：当前 `DEPRECATED` 或 `DRAFT`；-> `ARCHIVED`，终态 INV-03）
 - `abandonDraft()` -> 发出 `RouteVersionArchived`（前置：当前 `DRAFT`；-> `ARCHIVED`，终态；废弃草稿）
 
-> **唯一 ACTIVE 版本是跨实例不变式（BIZ-02）**：`RouteVersion` 聚合自身无法校验"同 `(route_id, route_type)` 仅一个 ACTIVATED"——这需查询其它版本实例。由 `RouteActivationService` 在生效时查询读模型 + 数据库唯一索引 `(route_id, route_type, status=ACTIVATED)` 共同保证，新版本生效同事务自动 Deprecate 旧版本（outbox）。
+> **唯一 ACTIVE 版本是跨实例不变式（INV-02）**：`RouteVersion` 聚合自身无法校验"同 `(route_id, route_type)` 仅一个 ACTIVATED"——这需查询其它版本实例。由 `RouteActivationService` 在生效时查询读模型 + 数据库唯一索引 `(route_id, route_type, status=ACTIVATED)` 共同保证，新版本生效同事务自动 Deprecate 旧版本（outbox）。
 
 > **生效后不可变（INV-04）**：`RouteVersion` 在 `ACTIVATED`/`DEPRECATED`/`ARCHIVED` 态拒收任何 `configureStep`/`bind*` 命令，保证过点执行上下文 `CheckpointRecord.route_version` 快照可永久回溯。步骤与绑定仅在 `DRAFT` 态可变更。
 
 > **审核驳回 vs 生效拒绝的语义区分**（事件风暴 §3）：`RouteReviewRejected`（主管审核环节否决，业务决策）与 `ActivationRejected`（主管已批准但生效时引用校验失败，技术校验）均回 `DRAFT`，但触发阶段与载荷不同。`ActivationRejected` 回 DRAFT 并带 `activation_blocked_reason`（🔴 事件风暴 §3 热点立场：回 DRAFT 而非留 SUBMITTED）。
 
-> 🔴 **热点：是否允许同 route 并存多个 ACTIVATED 版本**（事件风暴 §2.2）——建议立场已固化：**按 `(route_id, route_type)` 维度唯一 ACTIVE**，同一产品同一类型路线同时只能有一个生效版本；不同类型（PCBA/装配）可并存。BIZ-02。
+> 🔴 **热点：是否允许同 route 并存多个 ACTIVATED 版本**（事件风暴 §2.2）——建议立场已固化：**按 `(route_id, route_type)` 维度唯一 ACTIVE**，同一产品同一类型路线同时只能有一个生效版本；不同类型（PCBA/装配）可并存。INV-02。
 
-> 🔴 **热点：DEPRECATED -> ARCHIVED 是否要求无在制品引用**（事件风暴 §2.2）——建议立场已固化：**归档不依赖在制品状态**（版本不可变，归档只是标记不再用于新过点；已过点记录与在制品按其锁定的 routeVersion 继续，INV-04/INV-CX-01）。归档后读模型仍可查询。
+> 🔴 **热点：DEPRECATED -> ARCHIVED 是否要求无在制品引用**（事件风暴 §2.2）——建议立场已固化：**归档不依赖在制品状态**（版本不可变，归档只是标记不再用于新过点；已过点记录与在制品按其锁定的 routeVersion 继续，INV-04/INV-09）。归档后读模型仍可查询。
 
 ---
 
@@ -230,7 +228,7 @@ StationType:
   # （枚举随工序类型扩展，与 Operation 一一对应）
 ```
 
-> 不可变枚举。`OperationCategory` 一经确定不可变更（BIZ-01）。双段生产架构：同一产品可有 PCBA 路线与整机装配路线，由 `route_type` 区分；两段在过点执行上下文以单件 `routeVersion` 推进衔接，本上下文不感知段间拼接。
+> 不可变枚举。`OperationCategory` 一经确定不可变更（INV-01）。双段生产架构：同一产品可有 PCBA 路线与整机装配路线，由 `route_type` 区分；两段在过点执行上下文以单件 `routeVersion` 推进衔接，本上下文不感知段间拼接。
 
 ### 2.3 OperationState / ParameterTemplateState（基础对象状态）
 
@@ -300,7 +298,7 @@ RouteVersionState:
 **不变式**：
 - `-> DRAFT`（新建）：`create()`，产品存在、同 route 无冲突或显式升级
 - `DRAFT -> SUBMITTED`：`submitReview()`，前置 ≥1 步且每步必填绑定满足（INV-06）
-- `SUBMITTED -> ACTIVATED`：`activate()`，前置引用校验通过（INV-07/INV-08）；同 `(route_id, route_type)` 唯一 ACTIVE（BIZ-02，跨实例）
+- `SUBMITTED -> ACTIVATED`：`activate()`，前置引用校验通过（INV-07/INV-08）；同 `(route_id, route_type)` 唯一 ACTIVE（INV-02，跨实例）
 - `SUBMITTED -> DRAFT`：`rejectReview()`/`rejectActivation()`/`rejectSubmission()`，审核驳回/生效拒绝/提交预校验失败
 - `ACTIVATED -> DEPRECATED`：`deprecate()`，新版本生效自动触发（`superseded_by≠null`）或手动整体弃用（`superseded_by=null`）
 - `DEPRECATED -> ARCHIVED`：`archive()`，归档不依赖在制品状态（🔴 热点立场）
@@ -471,7 +469,7 @@ RouteValidationService:
 
 ### 3.2 RouteActivationService（路线版本生效服务）
 
-**职责**：编排版本生效——校验通过后激活版本、同事务弃用同路线旧版本（BIZ-02 跨实例）、通过事务发件箱发布 `ProcessRouteActivated` + `ProcessRouteDeprecated`（INV-CX-02）。
+**职责**：编排版本生效——校验通过后激活版本、同事务弃用同路线旧版本（INV-02 跨实例）、通过事务发件箱发布 `ProcessRouteActivated` + `ProcessRouteDeprecated`（INV-10）。
 
 ```yaml
 RouteActivationService:
@@ -480,21 +478,21 @@ RouteActivationService:
       # 1. 委托 RouteValidationService.validateOnActivate（INV-07/INV-08）
       #    失败 -> rejectActivation -> ActivationRejected（回 DRAFT）
       # 2. 加载 RouteVersion -> activate(activated_by) -> ProcessRouteActivated（-> ACTIVATED）
-      # 3. 跨实例唯一 ACTIVE 校验（BIZ-02）：
+      # 3. 跨实例唯一 ACTIVE 校验（INV-02）：
       #    查读模型同 (route_id, route_type) 的当前 ACTIVATED 版本
       #    + 数据库唯一索引 (route_id, route_type, status=ACTIVATED)
       # 4. 若存在旧 ACTIVATED 版本 -> 同事务 deprecate(superseded_by=新版本) -> ProcessRouteDeprecated
-      # 5. 事务发件箱（INV-CX-02）：ProcessRouteActivated + ProcessRouteDeprecated 与状态变更同事务 outbox
+      # 5. 事务发件箱（INV-10）：ProcessRouteActivated + ProcessRouteDeprecated 与状态变更同事务 outbox
       # 6. 发布到 process.route.lifecycle
       #    - 过点执行上下文订阅 ProcessRouteActivated -> RefreshProcessRouteCache
       #    - 过点执行上下文订阅 ProcessRouteDeprecated -> 标记旧版本不可用于新过点
 ```
 
-> **为什么不放在聚合根内**：唯一 ACTIVE 版本是跨实例不变式（BIZ-02），单条 `RouteVersion` 无权查询同 route 其它版本实例；自动弃用旧版本是跨聚合编排；事务发件箱发布是跨服务集成。归本服务 + 读模型查询 + 唯一索引共同保证。
+> **为什么不放在聚合根内**：唯一 ACTIVE 版本是跨实例不变式（INV-02），单条 `RouteVersion` 无权查询同 route 其它版本实例；自动弃用旧版本是跨聚合编排；事务发件箱发布是跨服务集成。归本服务 + 读模型查询 + 唯一索引共同保证。
 
 > 🔴 **热点：生效事件的载荷大小**（事件风暴 §2.4）——建议立场已固化：**事件载荷只含版本元数据 + 步骤摘要**，过点执行上下文刷新缓存时若需详情再 REST 查询本上下文 `RouteVersionReadModel`。避免长路线（几十步）载荷过大。
 
-> 🔴 **热点：生效发布的事务发件箱**（事件风暴 §2.4，INV-CX-02）——`ProcessRouteActivated` 的发布与 `RouteVersion` 状态变更（SUBMITTED->ACTIVATED）+ 旧版本 Deprecate 在同一数据库事务内通过 outbox 保证至少一次投递，消费端（过点执行上下文）幂等处理（source_event_id 去重）。本上下文不引入分布式事务。
+> 🔴 **热点：生效发布的事务发件箱**（事件风暴 §2.4，INV-10）——`ProcessRouteActivated` 的发布与 `RouteVersion` 状态变更（SUBMITTED->ACTIVATED）+ 旧版本 Deprecate 在同一数据库事务内通过 outbox 保证至少一次投递，消费端（过点执行上下文）幂等处理（source_event_id 去重）。本上下文不引入分布式事务。
 
 ---
 
@@ -544,7 +542,7 @@ ProcessCommandAppService:
     # ─── 工序与参数模板 ───
     defineOperation(cmd):
       # -> Operation.define -> 写仓储 -> Outbox
-      # 幂等：commandId；operation_id 唯一（BIZ-01）
+      # 幂等：commandId；operation_id 唯一（INV-01）
     updateOperation(cmd):
       # -> Operation.update -> FlagAffectedDrafts（RouteReferenceImpactService）
     deprecateOperation(cmd):
@@ -590,17 +588,17 @@ ProcessCommandAppService:
 
 | 用例 | 事务边界 | 调用领域对象 | 产出事件 | 幂等策略 |
 |------|----------|--------------|----------|----------|
-| 定义工序 | 单聚合事务 | `Operation.define` | `OperationDefined` | `commandId`；`operation_id` 唯一（BIZ-01） |
+| 定义工序 | 单聚合事务 | `Operation.define` | `OperationDefined` | `commandId`；`operation_id` 唯一（INV-01） |
 | 更新/弃用工序 | 单聚合事务 | `Operation.update`/`deprecate` | `OperationUpdated`/`Deprecated` | `commandId`；`version` |
 | 定义/更新参数模板 | 单聚合事务 | `ParameterTemplate.define`/`update` | `ParameterTemplateDefined`/`Updated` | `commandId` |
 | 创建路线版本 | 单聚合事务 | `RouteVersion.create` | `RouteVersionCreated` | `commandId`；产品存在性设计时校验 |
 | 配置步骤/绑定 | 单聚合事务 | `RouteVersion.configureStep`/`bind*` | `RouteStepConfigured`/`*Bound` | `commandId`；前置 DRAFT（INV-04） |
 | 提交审核 | 单聚合事务 | `RouteVersion.submitReview` + `RouteValidationService.precheckOnSubmit` | `RouteReviewSubmitted`/`ReviewSubmissionRejected` | `commandId`；INV-06 |
-| 生效版本 | 版本 + 旧版本同事务 | `RouteActivationService.activate` | `ProcessRouteActivated` + `ProcessRouteDeprecated`（旧版本） | `commandId`；BIZ-02/INV-07/INV-08/INV-CX-02 |
+| 生效版本 | 版本 + 旧版本同事务 | `RouteActivationService.activate` | `ProcessRouteActivated` + `ProcessRouteDeprecated`（旧版本） | `commandId`；INV-02/07/08/10 |
 | 审核驳回 | 单聚合事务 | `RouteVersion.rejectReview` | `RouteReviewRejected` | `commandId` |
 | 弃用/归档/废弃草稿 | 单聚合事务 | `RouteVersion.deprecate`/`archive`/`abandonDraft` | `ProcessRouteDeprecated`/`RouteVersionArchived` | `commandId`；终态拒收（INV-03） |
 
-> **生效版本用例的事务边界**扩展为「RouteVersion 状态变更 + 旧版本 Deprecate + Outbox 同事务」（BIZ-02/INV-CX-02）。校验失败（INV-07/INV-08）则 `rejectActivation` 回 DRAFT，不产生半成品状态。
+> **生效版本用例的事务边界**扩展为「RouteVersion 状态变更 + 旧版本 Deprecate + Outbox 同事务」（INV-02/INV-10）。校验失败（INV-07/INV-08）则 `rejectActivation` 回 DRAFT，不产生半成品状态。
 
 ### 4.2 ProcessEventConsumeAppService（事件消费应用服务）
 
@@ -618,7 +616,7 @@ ProcessEventConsumeAppService:
 
 > **不直接消费上下文外"修订"事件**（事件风暴 §8 热点立场）：规则修订（`QualityGateRuleActivated`，rule_id 不变）不通知本上下文，过点执行上下文读缓存自动反映最新逻辑；仅规则**弃用**（`superseded_by=null`）才标记 DRAFT。
 
-> **上下文外事件只消费不重发**（INV-CX-03）：本上下文将订阅事件包装为本上下文语义事件（如 `OperationDeprecated` 内部事件触发 `FlagAffectedDrafts`）后处理，下游凭主题前缀区分来源。
+> **上下文外事件只消费不重发**（INV-11）：本上下文将订阅事件包装为本上下文语义事件（如 `OperationDeprecated` 内部事件触发 `FlagAffectedDrafts`）后处理，下游凭主题前缀区分来源。
 
 > **主题命名约定**：本域**对外发布**使用 `process.*` 前缀。本域**订阅**使用各发布域实际前缀（`quality.*`），不重写。**设计时同步校验查询**（REST，非事件订阅）：产品/BOM 存在性 ← 物料上下文；质量门禁规则存在性 ← 质量上下文；spec_keys 可解析性 / fixture_matching_rule ← 台账上下文（`eam.*`）。
 
@@ -694,42 +692,34 @@ ProcessQueryAppService:
 
 ## 6. 不变规则（Invariants）
 
-不变规则是领域模型中**必须始终为真**的业务约束，无论经过何种操作序列。按**一致性边界**分为三段，**分别编号、不可混列**（编号在此首次诞生；事件风暴侧以无编号"已识别约束"清单对应，见 [事件风暴 - 工艺管理上下文](../事件风暴/工艺管理上下文.md#已识别约束)）：
+不变规则是领域模型中**必须始终为真**的业务约束，无论经过何种操作序列。
 
-- **聚合不变式（`INV-XX`）**：落在单一聚合的一致性边界内，事务内强一致、始终为真，由聚合根前置条件 / 状态机 / 规约守护，**按所属聚合根分子节归位**。
-- **业务不变式（`BIZ-XX`）**：本上下文内跨聚合 / 跨实例，一致性边界与任意单事务无法重合，最终一致，由领域服务 + 唯一索引 / 事件去重表 / Saga 守护，**禁止挂在聚合根上**。
-- **跨上下文不变式（`INV-CX`）**：跨限界上下文，最终一致，由事件订阅 + ACL + 跨服务协调守护（同服务部署时可走本地事务强一致，见各条说明）。
-
-### 6.1 聚合不变式（Aggregate Invariants）
-
-按所属聚合根分子节归位。Operation / ParameterTemplate 无聚合不变式（INV-01 已迁移至 BIZ-01）。
-
-#### 6.1.1 RouteVersion（工艺路线版本）
+### 6.1 工序与参数模板不变式
 
 | 编号 | 不变式 | 说明 |
 |------|--------|------|
+| INV-01 | `operation_id` 全局唯一；`OperationCategory` 一经确定不可变更；DEPRECATED 后新草稿不可引用，已生效版本引用不受影响（INV-04） | `Operation.define` 前置 + `category` 不可变；DEPRECATED 限制新草稿，不回写已生效版本 |
+
+### 6.2 路线版本状态不变式
+
+| 编号 | 不变式 | 说明 |
+|------|--------|------|
+| INV-02 | 同 `(route_id, route_type)` 同时仅一个 ACTIVATED 版本 | **跨实例**，由 `RouteActivationService` 在生效时查询读模型 + 数据库唯一索引 `(route_id, route_type, status=ACTIVATED)` 共同保证；新版本生效自动 Deprecate 旧版本（同事务 outbox） |
 | INV-03 | `ARCHIVED` 为终态，之后任何事件均拒收 | `RouteVersionState` 状态机；允许从 DEPRECATED / DRAFT 转入 |
 | INV-04 | ACTIVATED 后步骤内容与所有绑定不可变（保证过点记录 routeVersion 快照完整性） | `RouteVersion` 在 ACTIVATED/DEPRECATED/ARCHIVED 态拒收任何 `configureStep`/`bind*` 命令；保证过点执行上下文 `CheckpointRecord.route_version` 快照可永久回溯 |
 | INV-06 | 提交审核前置：至少 1 步且每步必填绑定满足（operation_id + 工位类型 + 必需防错项） | `RouteVersion.submitReview` 前置 + `RouteValidationService.precheckOnSubmit`（INV-06） |
 | INV-07 | 生效前置：所有 operation 非 DEPRECATED | `RouteValidationService.validateOnActivate`（查本上下文） |
 | INV-08 | 生效前置：所有上下文外引用（quality_gate_rule_id / spec_keys / fixture_matching_rule_id / template_id）可解析存在 | `RouteValidationService.validateOnActivate`（同步 REST 查询质量/台账上下文 + 本上下文），校验失败拒绝 ActivateRouteVersion，不产生半成品状态 |
 
-### 6.2 业务不变式（Business Invariants）
+### 6.3 跨上下文协作与一致性不变式
 
-| 编号 | 涉及聚合根 | 不变式 | 说明 |
-|------|-----------|--------|------|
-| BIZ-01 | Operation | `operation_id` 全局唯一；`OperationCategory` 一经确定不可变更；DEPRECATED 后新草稿不可引用，已生效版本引用不受影响（INV-04） | `Operation.define` 前置 + `category` 不可变；DEPRECATED 限制新草稿，不回写已生效版本；由数据库唯一索引 `(operation_id)` 保证全局唯一 |
-| BIZ-02 | RouteVersion | 同 `(route_id, route_type)` 同时仅一个 ACTIVATED 版本 | 由 `RouteActivationService` 在生效时查询读模型 + 数据库唯一索引 `(route_id, route_type, status=ACTIVATED)` 共同保证；新版本生效自动 Deprecate 旧版本（同事务 outbox） |
-
-### 6.3 跨上下文不变式（Cross-Context Invariants）
-
-| 编号 | 涉及聚合根 | 不变式 | 说明 |
-|------|-----------|--------|------|
-| INV-CX-01 | RouteVersion（本），过点执行上下文 | 版本一致性——工艺版本变更仅影响变更后首次过点的在制品；已过点的在制品按其 `CheckpointRecord.route_version` 继续推进，不受新版本影响（领域总览 §5.1） | 本上下文发布 `ProcessRouteActivated` + 过点执行上下文 `RouteCache` 投影 + `CheckpointRecord.route_version` 快照，由过点引擎在首次过点时固化版本保证（主责在过点执行上下文）。与物料上下文 INV-CX-01、质量上下文 INV-CX-01 跨上下文语义同构、统一编号 |
-| INV-CX-02 | RouteVersion（本），过点执行上下文 | 事务发件箱至少一次投递——`ProcessRouteActivated`/`ProcessRouteDeprecated` 的发布与 RouteVersion 状态变更 + 旧版本 Deprecate 在同一数据库事务内通过 outbox 保证，消费端幂等处理（领域总览 §5.4） | outbox 模式 + 消费端幂等（source_event_id 去重表，过点执行上下文侧保证）。与物料上下文 INV-CX-02、质量上下文 INV-CX-02 跨上下文语义同构、统一编号 |
-| INV-CX-03 | -（基础设施，各事件消费聚合） | 上下文外事件只消费不重发——本上下文将订阅事件包装为本上下文语义事件后处理，下游凭主题前缀区分来源 | `ProcessEventConsumeAppService` 包装处理；主题前缀 `process.*` vs `quality.*`/`material.*`/`eam.*`。本上下文以发布为主、消费为辅（仅消费 `QualityGateDeprecated`） |
-| INV-CX-04 | -（基础设施，各事件消费聚合） | 上下文外事件消费幂等——`consumed_event` 表 + 业务键去重 | `RouteReferenceImpactService` 按 `(rule_id, version)` 去重；通用 `consumed_event` 表保证 |
-| INV-CX-05 | RouteVersion（本），过点执行上下文 | 版本生效与过点执行经异步事件解耦 + 降级查询不引入分布式事务——本上下文发布 `ProcessRouteActivated` 后不直接调用过点执行上下文刷新接口；过点缓存未命中时 REST 查询 `RouteVersionReadModel`（≤500ms），校验/查询失败不阻塞过点主事务（领域总览 §5.3） | 区别于过点执行上下文内部同步门禁；配置型主数据写少读多，版本生效是独立发布事务，不在过点主事务内同步 |
+| 编号 | 不变式 | 说明 |
+|------|--------|------|
+| INV-09 | 版本一致性——工艺版本变更仅影响变更后首次过点的在制品；已过点的在制品按其 `CheckpointRecord.route_version` 继续推进，不受新版本影响（领域总览 §5.1） | 跨上下文，本上下文发布 `ProcessRouteActivated` + 过点执行上下文 `RouteCache` 投影 + `CheckpointRecord.route_version` 快照，由过点引擎在首次过点时固化版本保证（主责在过点执行上下文）。与物料上下文 INV-09、质量上下文 INV-09 跨上下文语义同构、统一编号 |
+| INV-10 | 事务发件箱至少一次投递——`ProcessRouteActivated`/`ProcessRouteDeprecated` 的发布与 RouteVersion 状态变更 + 旧版本 Deprecate 在同一数据库事务内通过 outbox 保证，消费端幂等处理（领域总览 §5.4） | outbox 模式 + 消费端幂等（source_event_id 去重表，过点执行上下文侧保证）。与物料上下文 INV-10、质量上下文 INV-10 跨上下文语义同构、统一编号 |
+| INV-11 | 上下文外事件只消费不重发——本上下文将订阅事件包装为本上下文语义事件后处理，下游凭主题前缀区分来源 | `ProcessEventConsumeAppService` 包装处理；主题前缀 `process.*` vs `quality.*`/`material.*`/`eam.*`。本上下文以发布为主、消费为辅（仅消费 `QualityGateDeprecated`） |
+| INV-12 | 上下文外事件消费幂等——`consumed_event` 表 + 业务键去重 | `RouteReferenceImpactService` 按 `(rule_id, version)` 去重；通用 `consumed_event` 表保证 |
+| INV-13 | 版本生效与过点执行经异步事件解耦 + 降级查询不引入分布式事务——本上下文发布 `ProcessRouteActivated` 后不直接调用过点执行上下文刷新接口；过点缓存未命中时 REST 查询 `RouteVersionReadModel`（≤500ms），校验/查询失败不阻塞过点主事务（领域总览 §5.3） | 区别于过点执行上下文内部同步门禁；配置型主数据写少读多，版本生效是独立发布事务，不在过点主事务内同步 |
 
 ---
 
@@ -739,7 +729,7 @@ ProcessQueryAppService:
 
 | 主题 | 事件 | 主消费方 |
 |------|------|----------|
-| `process.route.lifecycle` | RouteVersionCreated / RouteReviewSubmitted / **ProcessRouteActivated** / ProcessRouteDeprecated / RouteVersionArchived / ActivationRejected / ReviewSubmissionRejected / RouteReviewRejected | **过点执行上下文**（filter Activated/Deprecated 刷新 RouteCache, INV-CX-01）、在制品追踪上下文（路线版本感知）、数据应用上下文 |
+| `process.route.lifecycle` | RouteVersionCreated / RouteReviewSubmitted / **ProcessRouteActivated** / ProcessRouteDeprecated / RouteVersionArchived / ActivationRejected / ReviewSubmissionRejected / RouteReviewRejected | **过点执行上下文**（filter Activated/Deprecated 刷新 RouteCache, INV-09）、在制品追踪上下文（路线版本感知）、数据应用上下文 |
 | `process.operation.lifecycle` | OperationDefined / OperationUpdated / OperationDeprecated | 内部（路线设计引用校验）、数据应用上下文 |
 | `process.parameter.template` | ParameterTemplateDefined / ParameterTemplateUpdated | 内部（步骤配置引用） |
 
@@ -789,13 +779,13 @@ ProcessQueryAppService:
         └──────────────────────┬───────────────────────┘
                                | activate（RouteActivationService）
                                |  - 校验 INV-07/08
-                               |  - 唯一 ACTIVE BIZ-02（弃用旧版本）
-                               |  - outbox INV-CX-02
+                               |  - 唯一 ACTIVE INV-02（弃用旧版本）
+                               |  - outbox INV-10
                                v
                     ProcessRouteActivated / ProcessRouteDeprecated
                                |
                                v  process.route.lifecycle
-                   【外部:过点执行上下文】订阅 -> 刷新 RouteCache（INV-CX-01）
+                   【外部:过点执行上下文】订阅 -> 刷新 RouteCache（INV-09）
                    【外部:在制品追踪上下文】订阅（路线版本感知）
                    【外部:返修/返工上下文】REST 查询再入点配置
                    【外部:过点执行上下文】缓存未命中 -> REST 查询 RouteVersionReadModel（≤500ms）
@@ -816,7 +806,7 @@ ProcessQueryAppService:
 │                                                                      │
 │  消息消费 ───▶ ProcessEventConsumeAppService (应用服务)                │
 │                 └─ 翻译 quality.* 事件 -> 委托 RouteReferenceImpactService│
-│                   （包装为本上下文语义事件后处理，INV-CX-03）                │
+│                   （包装为本上下文语义事件后处理，INV-11）                │
 │                                                                      │
 │  查询请求 ───▶ ProcessQueryAppService (应用服务，读模型)               │
 │                 └─ 直接查询读模型投影（含过点降级查询 ≤500ms）          │
@@ -842,7 +832,7 @@ ProcessQueryAppService:
 - 领域服务封装跨聚合的业务规则，每个领域服务必答"为什么不放在聚合根内"
 - 聚合根内的业务逻辑由聚合根自身保证，行为是业务动词方法（非 `update/save` 流水账）
 - 不变式由聚合根 + 领域服务 + 唯一索引/事件去重表共同守护
-- 版本生效与过点执行经异步事件解耦 + 降级查询（INV-CX-05），不在过点主事务中引入分布式事务
+- 版本生效与过点执行经异步事件解耦 + 降级查询（INV-13），不在过点主事务中引入分布式事务
 
 ---
 
@@ -861,13 +851,13 @@ ProcessQueryAppService:
 | 【命令:绑定防错项/质量门禁/设备规格/工装匹配/参数模板 Bind*】 | `RouteVersion.bind*`（§1.3） |
 | 【命令:配置再入点 ConfigureReentryPoint】 | `RouteVersion.configureReentryPoint`（§1.3） |
 | 【命令:提交审核 SubmitRouteReview】 | `RouteVersion.submitReview` + `RouteValidationService.precheckOnSubmit`（INV-06） |
-| 【命令:生效工艺路线版本 ActivateRouteVersion】 | `RouteVersion.activate` + `RouteActivationService.activate`（BIZ-02/INV-07/INV-08/INV-CX-02） |
+| 【命令:生效工艺路线版本 ActivateRouteVersion】 | `RouteVersion.activate` + `RouteActivationService.activate`（INV-02/07/08/10） |
 | 【命令:审核驳回 RejectRouteReview】 | `RouteVersion.rejectReview`（§1.3） |
 | 【命令:弃用/归档/废弃草稿 Deprecate/Archive/AbandonDraft】 | `RouteVersion.deprecate`/`archive`/`abandonDraft`（§1.3） |
 | 【策略:工序定义后可挂参数模板】 | `ParameterTemplate.define` 前置关联 Operation（§1.2） |
 | 【策略:提交后自动预校验引用完整性】 | `RouteValidationService.precheckOnSubmit`（§3.1，INV-06） |
-| 【策略:版本生效后自动弃用同路线旧版本】 | `RouteActivationService.activate` 同事务 Deprecate 旧版本（§3.2，BIZ-02） |
-| 【策略:版本生效后通过事务发件箱发布】 | `RouteActivationService` + outbox（§3.2，INV-CX-02） |
+| 【策略:版本生效后自动弃用同路线旧版本】 | `RouteActivationService.activate` 同事务 Deprecate 旧版本（§3.2，INV-02） |
+| 【策略:版本生效后通过事务发件箱发布】 | `RouteActivationService` + outbox（§3.2，INV-10） |
 | 【策略:OperationDeprecated -> FlagAffectedDrafts】 | `RouteReferenceImpactService.onOperationDeprecated`（§3.3） |
 | 【策略:QualityGateDeprecated -> FlagAffectedDrafts】 | `RouteReferenceImpactService.onQualityGateDeprecated`（§3.3） |
 | 【事件:OperationDefined/Updated/Deprecated】 | §5.1 工序与参数模板事件 |
@@ -877,7 +867,7 @@ ProcessQueryAppService:
 | 【事件:ActivationRejected/ReviewSubmissionRejected】 | §5.2（生效拒绝/提交预校验失败，🔴 §3 热点立场） |
 | 【事件:RouteStepConfigured/AntiErrorItemBound/QualityGateBound/EquipmentSpecBound/FixtureMatchingRuleBound/ParameterTemplateBound/ReentryPointConfigured】 | §5.3 步骤配置与绑定事件 |
 | 【读模型】 | `RouteVersionReadModel` + `ProcessQueryAppService`（§2.11/§4.3） |
-| 【外部系统:过点执行上下文】 | 发布 `process.route.lifecycle`（ProcessRouteActivated 刷新 RouteCache）；降级被查询 RouteVersionReadModel（§7，INV-CX-01/INV-CX-05） |
+| 【外部系统:过点执行上下文】 | 发布 `process.route.lifecycle`（ProcessRouteActivated 刷新 RouteCache）；降级被查询 RouteVersionReadModel（§7，INV-09/13） |
 | 【外部系统:在制品追踪上下文】 | 订阅 process.route.lifecycle（路线版本感知，可选） |
 | 【外部系统:质量上下文】 | 订阅 `quality.gate.lifecycle`（QualityGateDeprecated 标记 DRAFT stale）；设计时校验规则存在性 |
 | 【外部系统:物料上下文】 | 设计时校验产品/BOM 存在性（REST） |
@@ -885,19 +875,19 @@ ProcessQueryAppService:
 | 【外部系统:返修/返工上下文】 | REST 查询再入点配置（ReentryPoint/ReentryRules） |
 | 【热点🔴:工序与产品/产线耦合度】 | 通用工序 + 步骤配置承载产品差异（§1.1，固化） |
 | 【热点🔴:参数模板与台账能力规格对齐】 | `SpecificationKey` 命名空间对齐待确认（§2.5） |
-| 【热点🔴:同 route 并存多个 ACTIVATED】 | 按 (route_id, route_type) 唯一 ACTIVE（BIZ-02，固化） |
+| 【热点🔴:同 route 并存多个 ACTIVATED】 | 按 (route_id, route_type) 唯一 ACTIVE（INV-02，固化） |
 | 【热点🔴:DEPRECATED->ARCHIVED 无在制品引用】 | 归档不依赖在制品状态（§1.3，固化） |
 | 【热点🔴:实时数据校验配置归属】 | 工艺参数类归本上下文 / 质量判定类归质量上下文（§2.6，固化） |
 | 【热点🔴:再入点规则完整定义】 | 本上下文定义合法再入点 + 缺陷->再入映射（§2.8，固化） |
 | 【热点🔴:生效事件载荷大小】 | 载荷只含元数据 + 步骤摘要（§3.2，固化） |
-| 【热点🔴:生效发布事务发件箱】 | outbox + 消费端幂等（INV-CX-02，固化） |
+| 【热点🔴:生效发布事务发件箱】 | outbox + 消费端幂等（INV-10，固化） |
 | 【热点🔴:缓存上下文外引用加速校验】 | 当前阶段不维护本地投影（§3.1，固化） |
 | 【热点🔴:已生效版本引用规则被弃用】 | 不回写已生效版本，过点时拦截+告警（§3.3，固化） |
 | 【热点🔴:规则修订 vs 弃用】 | 修订不通知（rule_id 不变）/ 弃用才标记 DRAFT（§3.3，固化） |
 | 【热点🔴:生效拒绝后状态流向】 | 回 DRAFT 带 activation_blocked_reason（§1.3，固化） |
 | 【热点🔴:主题前缀对齐】 | `process.*`（§7，已闭环） |
 | 【热点🔴:spec_key 命名空间对齐】 | `SpecificationKey` 共享命名空间，待台账确认字典（§2.5） |
-| 事件风暴 §聚合与不变式 BIZ-01..BIZ-02, INV-03..INV-08, INV-CX-01..INV-CX-02 | §6 不变规则 BIZ-01..BIZ-02, INV-03..INV-08, INV-CX-01..INV-CX-02（编号延续）+ INV-CX-03..INV-CX-05（新增） |
+| 事件风暴 §聚合与不变式 INV-01..INV-10 | §6 不变规则 INV-01..INV-10（编号延续）+ INV-11..INV-13（新增） |
 | 事件风暴 §对外契约 | §7 对外契约发布主题（`process.*` 前缀照搬） |
 | 事件风暴 §2.2 状态流转（版本状态机） | `RouteVersionState` 值对象 + 状态机（§2.4） |
 
