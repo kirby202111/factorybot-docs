@@ -39,10 +39,10 @@ description: 在本仓库（factorybot-docs，PCBA + 整机组装混合型车间
 **强前置**：本 skill **必须以已存在的领域建模文档为实现依据**。若该限界上下文的领域建模尚不存在，**先停止**，提示用户先走 [domain-modeling](../domain-modeling/SKILL.md) skill 落地领域模型，再回来做实现设计——领域建模是源，实现设计是派生，跳过领域建模直接写实现会导致类、方法、事件、不变式与业务语义脱节。
 
 不适用：
-- 纯事件风暴 / 纯领域建模 → 使用对应 skill。
-- 纯数据库建表脚本 → 只可作为实现设计的持久化章节补充，不单独用本 skill 生成散乱表结构。
-- 纯 API 文档 → 只可作为 facade 层入口章节补充，不能替代领域实现设计。
-- 直接写生产源码 → 本 skill 先产出实现设计；若用户明确要求编码，再按实现设计落代码。
+- 纯事件风暴 / 纯领域建模 -> 使用对应 skill。
+- 纯数据库建表脚本 -> 只可作为实现设计的持久化章节补充，不单独用本 skill 生成散乱表结构。
+- 纯 API 文档 -> 只可作为 facade 层入口章节补充，不能替代领域实现设计。
+- 直接写生产源码 -> 本 skill 先产出实现设计；若用户明确要求编码，再按实现设计落代码。
 
 ---
 
@@ -95,7 +95,7 @@ infrastructure ClientImpl + FacadeClientImpl + Configuration + Outbox/Kafka/Redi
 utility        无业务语义工具类 + 全局 Exception
 ```
 
-调用流向：`testsuites / main` → `controller` / `facade` → `facade-impl` → `application` → `domain`；`domain` 定义接口（Repository / Client / FacadeClient），由 `repository` / `infrastructure` 倒置实现（DIP）。`application` 虚线依赖 `repository` / `infrastructure`，但必须经 `domain` 声明的接口访问，不得直接使用 Mapper / ClientImpl 等实现。
+调用流向：`testsuites / main` -> `controller` / `facade` -> `facade-impl` -> `application` -> `domain`；`domain` 定义接口（Repository / Client / FacadeClient），由 `repository` / `infrastructure` 倒置实现（DIP）。`application` 虚线依赖 `repository` / `infrastructure`，但必须经 `domain` 声明的接口访问，不得直接使用 Mapper / ClientImpl 等实现。
 
 **强制边界（对齐规范）**：
 - `domain` 不依赖 Spring / MyBatis / Kafka / HTTP / Redis；只定义接口，由下层实现。
@@ -170,17 +170,17 @@ utility        无业务语义工具类 + 全局 Exception
 | 仓储实现 | `repository.<XXRepositoryImpl>` | 倒置依赖实现；装配聚合；调 Mapper |
 | 数据库模型 | `repository.<XXDO>` | 表字段平铺；只存在于仓储层 |
 | Mapper | `repository.<XXMapper> extends <XXBaseMapper>` | 最底层数据库操作；只允许仓储层调用 |
-| 中间件依赖（ACL） | `domain.acl.<XXClient>` → `infrastructure.<XXClientImpl>` | 防腐设计：接口在领域层，实现在基础设施层 |
-| RPC 服务依赖（ACL） | `domain.acl.<XXFacadeClient>` → `infrastructure.<XXFacadeClientImpl>` | 防腐设计：消费外部 RPC 服务 |
+| 中间件依赖（ACL） | `domain.acl.<XXClient>` -> `infrastructure.<XXClientImpl>` | 防腐设计：接口在领域层，实现在基础设施层 |
+| RPC 服务依赖（ACL） | `domain.acl.<XXFacadeClient>` -> `infrastructure.<XXFacadeClientImpl>` | 防腐设计：消费外部 RPC 服务 |
 | 领域事件 | `domain.event.<XXEvent>` | 聚合内 registerEvent；DomainService 返回；应用层收集写 Outbox；事件名与领域建模逐字一致 |
 | 对外契约主题 | Outbox / EventPublisher 配置 | topic、eventType、主消费方照搬领域建模 §对外契约 |
 | 转换器 | `XXAA2BBConverter`（逐字段手写） | `Model2DOConverter`/`DO2ModelConverter`(repository)；`Model2DTOConverter`/`DTO2ModelConverter`(facade-impl)；`Model2InfoConverter`/`Info2ModelConverter`(application) |
-| 配置 | `<XXConfiguration>` | 各层各自配置：DataSourceConfiguration→repository；WebConfiguration→controller 等 |
+| 配置 | `<XXConfiguration>` | 各层各自配置：DataSourceConfiguration->repository；WebConfiguration->controller 等 |
 | 不变规则 INV | 聚合方法 / DomainService / DB 约束 / 幂等表 / Saga | 每条 INV 说明由哪一层保证，不能只写“代码校验” |
 | 上下文外事件消费 | Kafka Listener + ACL(`FacadeClient`/`Client`) + AppService | 外部事件不得直接进领域；先翻译成本上下文命令/值对象 |
 | 热点 / 暂缓项 | 实现风险 / 暂缓设计 | 不确定点不得静默消失；列出推荐取舍与后续扩展点 |
 
-> **可追溯性硬约束**：实现设计文档 §12“与领域建模的映射”必须给出一张**领域模型元素 → 实现元素**的对位表，让读者能从任何一个聚合、方法、事件、INV 查到它将落到哪个包、哪个类、哪个方法、哪种技术机制。这是本 skill 的验收门槛之一。
+> **可追溯性硬约束**：实现设计文档 §12“与领域建模的映射”必须给出一张**领域模型元素 -> 实现元素**的对位表，让读者能从任何一个聚合、方法、事件、INV 查到它将落到哪个包、哪个类、哪个方法、哪种技术机制。这是本 skill 的验收门槛之一。
 
 > **反向一致性**：若实现设计过程中发现领域建模有遗漏（如某命令没有应用服务入口、某领域事件无发出者、某 INV 无保证机制），**先回去补领域建模**，再回来改实现设计——不要在实现设计里私自补业务概念。
 
@@ -459,7 +459,7 @@ OutboxPublisher 异步发布 Kafka
 
 | 接口 | Facade / Controller | 入参 (Request/DTO) | Info | AppService |
 |------|---------------------|--------------------|-----|------------|
-| POST /xxx | `XXController` → `XXFacade` | `XXRequest` / `XXDTO` | `XXInfo` | `XXWriteAppService` |
+| POST /xxx | `XXController` -> `XXFacade` | `XXRequest` / `XXDTO` | `XXInfo` | `XXWriteAppService` |
 
 > Controller 只调 facade 声明的方法；FacadeImpl 完成 DTO↔Info/Model 转换后调 AppService。
 
@@ -526,8 +526,8 @@ OutboxPublisher 异步发布 Kafka
 | INV-XX | 聚合方法 / 唯一索引 / 幂等表 | ... |
 | 领域服务 XXService | `domain.service.<XX>DomainService` | 写仓储在此层 |
 | 查询读模型 XXView | `application.service.<XX>ReadAppService` | ... |
-| 外部 RPC 依赖 | `domain.acl.<XX>FacadeClient` → `infrastructure.<XX>FacadeClientImpl` | ... |
-| 中间件依赖 | `domain.acl.<XX>Client` → `infrastructure.<XX>ClientImpl` | ... |
+| 外部 RPC 依赖 | `domain.acl.<XX>FacadeClient` -> `infrastructure.<XX>FacadeClientImpl` | ... |
+| 中间件依赖 | `domain.acl.<XX>Client` -> `infrastructure.<XX>ClientImpl` | ... |
 
 ---
 
@@ -571,14 +571,14 @@ OutboxPublisher 异步发布 Kafka
 |--------|------------|----------|
 | 没有领域建模就直接写实现 | 类与方法没有业务来源，容易退化成 CRUD | 先走 domain-modeling skill |
 | `ApplicationService` 直接调 Repository.insert/update | 违反“应用层不写仓储” | 写仓储下沉 `DomainService`，应用层只读加载 + 调 DomainService |
-| Controller / FacadeImpl 直接调 Mapper 改状态 | 绕过应用服务、领域服务与聚合不变式 | Controller → Facade → FacadeImpl → AppService → DomainService → Aggregate |
+| Controller / FacadeImpl 直接调 Mapper 改状态 | 绕过应用服务、领域服务与聚合不变式 | Controller -> Facade -> FacadeImpl -> AppService -> DomainService -> Aggregate |
 | AppService 里堆 if/else 业务规则 | 应用层变成过程脚本，领域贫血 | 规则下沉聚合根或领域服务 |
 | 聚合根只有 getter/setter（纯贫血） | 没有行为，无法保护不变式 | 聚合根充血，用业务方法表达命令和状态流转 |
 | 用 `BeanUtils.copyProperties` / `MapStruct` 转换 | 字段变更编译期不可见，易致生产事故 | Converter 逐字段手写 |
 | 自创 Command / PO / ViewObject 后缀 | 命名体系混乱，跨模块不可读 | 严格用 DO/Model/DTO/Info/VO/Query/Request/Converter |
 | Repository 为每张表建一套 | 破坏聚合边界，实体被外部随意修改 | Repository 以聚合根为单位 |
 | 为所有对象都建 DomainService | 领域服务滥用，模型失去内聚 | 单聚合规则放聚合根，跨聚合才建领域服务 |
-| 直接把外部事件 / DTO 传进领域方法 | 上下文边界塌陷 | Listener → FacadeClient/Client + Converter → Info/VO |
+| 直接把外部事件 / DTO 传进领域方法 | 上下文边界塌陷 | Listener -> FacadeClient/Client + Converter -> Info/VO |
 | 事务内直接发 Kafka | DB 成功 Kafka 失败会丢事件 | 同事务写 Outbox，异步发布 Kafka |
 | 所有查询都加载聚合再拼 DTO | 性能差，读写职责混淆 | ReadAppService + 投影 / SQL |
 | 只写“使用乐观锁”但不说明 version | 无法编码与测试 | 写清 version 字段、冲突异常、重试/拒绝策略 |
@@ -613,7 +613,7 @@ OutboxPublisher 异步发布 Kafka
 
 1. **先读旧实现设计 + 最新领域建模**：标出已发布的包名、类名、事件类名、topic、表名、INV 映射。
 2. **界定改动范围**：只动用户指定限界上下文；相邻上下文即使“顺手”也不代写。
-3. **保留契约稳定性**：已对外发布的 Facade API、topic、eventType、表关键字段尽量不改。若必须改，顶部加**变更说明**（旧名 → 新名、影响下游、迁移方式）。
+3. **保留契约稳定性**：已对外发布的 Facade API、topic、eventType、表关键字段尽量不改。若必须改，顶部加**变更说明**（旧名 -> 新名、影响下游、迁移方式）。
 4. **实现映射随领域模型同步**：领域建模新增/删除/改名的聚合、事件、INV，必须同步到 §12。
 5. **不变式编号延续**：沿用领域建模 INV 编号；废弃项不删映射，标“已废止（原因）”。
 6. **技术取舍变更要说明成本**：如 MyBatis 与 MyBatis-Plus 使用边界调整、直接 Kafka 改 Outbox、同库读模型改独立读库，要说明迁移影响。

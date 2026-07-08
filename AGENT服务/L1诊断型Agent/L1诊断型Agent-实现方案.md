@@ -12,12 +12,12 @@
 
 把 RAG 路线 A 的"追溯型检索"升级成**多步只读推理**：Agent 主动调用各限界上下文暴露的只读工具，自己决定下一步查什么，最终按 **5M1E** 给出根因假设排序 + 证据链。
 
-典型场景："某单件出现焊接不良" → Agent 自动串起：
+典型场景："某单件出现焊接不良" -> Agent 自动串起：
 
 1. 查该单件过点记录（过点执行上下文）
-2. 拿到 `routeVersion` → 查当时工艺版本（工艺管理上下文，§5.1 版本一致性）
+2. 拿到 `routeVersion` -> 查当时工艺版本（工艺管理上下文，§5.1 版本一致性）
 3. 查同批次锡膏批次（物料上下文）+ 贴片机当时参数（设备数据接入上下文）
-4. 查同批次其他单件不良率 → 给出 5M1E 假设排序
+4. 查同批次其他单件不良率 -> 给出 5M1E 假设排序
 
 ### 1.2 硬边界（一开口就要讲）
 
@@ -58,7 +58,7 @@
 
 ### 2.2 为什么选 LangGraph 而非裸 LangChain / 裸调模型 API
 
-- L1 的核心是**多步规划**：模型需根据上一步工具返回决定下一步。LangGraph 的 `StateGraph` 把"模型思考节点 → 工具执行节点 → 回模型"做成显式图，可对每条边加条件路由、超时、递归上限。
+- L1 的核心是**多步规划**：模型需根据上一步工具返回决定下一步。LangGraph 的 `StateGraph` 把"模型思考节点 -> 工具执行节点 -> 回模型"做成显式图，可对每条边加条件路由、超时、递归上限。
 - LangChain 的 `AgentExecutor` 是黑盒循环，难做细粒度权限拦截与 trace；裸调模型 API 要自己实现 tool-calling 循环、重试、参数校验，重复造轮子。
 - LangGraph 的 `recursion_limit` 直接对应"最大步数"红线，硬上限靠框架兜底。
 
@@ -93,7 +93,7 @@
 │                            │          │          │                   │
 │              ┌─────────────▼┐ ┌───────▼────────┐ ┌▼────────────┐    │
 │              │ ACL 适配层    │ │ ACL 适配层      │ │ RAG 检索     │    │
-│              │ (httpx→REST) │ │ (httpx→REST)   │ │ (httpx)      │    │
+│              │ (httpx->REST) │ │ (httpx->REST)   │ │ (httpx)      │    │
 │              └──────┬───────┘ └───────┬────────┘ └┬────────────┘    │
 └─────────────────────┼─────────────────┼───────────┼──────────────────┘
                       │                 │           │
@@ -168,19 +168,19 @@ class ToolDescriptor(BaseModel):
 ```text
 用户问题："单件 SN-001 焊接不良根因"
   ↓
-[model_node] 需要先拿到该单件的过点轨迹 → 产出 tool_call: query_pass_records
-[tool_node] 执行 → 返回过点记录列表，含 routeVersion=v3、assetId=...
+[model_node] 需要先拿到该单件的过点轨迹 -> 产出 tool_call: query_pass_records
+[tool_node] 执行 -> 返回过点记录列表，含 routeVersion=v3、assetId=...
   ↓
-[model_node] routeVersion=v3，查当时工艺 → tool_call: query_process_route(v3)
-[tool_node] 执行 → 返回工艺步骤，焊接站参数模板
+[model_node] routeVersion=v3，查当时工艺 -> tool_call: query_process_route(v3)
+[tool_node] 执行 -> 返回工艺步骤，焊接站参数模板
   ↓
-[model_node] 查同批次锡膏和贴片机参数 → tool_call: query_material_batch + query_device_params
-[tool_node] 执行 → 锡膏批次 B-77、贴片机参数偏移
+[model_node] 查同批次锡膏和贴片机参数 -> tool_call: query_material_batch + query_device_params
+[tool_node] 执行 -> 锡膏批次 B-77、贴片机参数偏移
   ↓
-[model_node] 查同批次不良率 → tool_call: query_defect_rate(B-77)
-[tool_node] 执行 → 同批次不良率 12%，高于基线
+[model_node] 查同批次不良率 -> tool_call: query_defect_rate(B-77)
+[tool_node] 执行 -> 同批次不良率 12%，高于基线
   ↓
-[model_node] 无更多 tool call → 输出 5M1E 假设排序 + 证据链
+[model_node] 无更多 tool call -> 输出 5M1E 假设排序 + 证据链
 ```
 
 - **最大步数限制**：`recursion_limit=20`（一次 model+tool 算 2 步，即最多 10 次工具调用），超过抛 `GraphRecursionError` 被捕获，返回"诊断未完成转人工"。
@@ -251,7 +251,7 @@ class DiagnosisReport(BaseModel):
 
 ```python
 class PassExecutionAclClient:
-    """过点执行上下文只读 ACL：调生产执行服务 REST，外部 DTO → 内部视图。"""
+    """过点执行上下文只读 ACL：调生产执行服务 REST，外部 DTO -> 内部视图。"""
 
     def __init__(self, rest_client: PassExecutionRestClient):
         self._rest = rest_client
@@ -262,7 +262,7 @@ class PassExecutionAclClient:
         # 1. 权限校验（tenant 在拦截器已做，此处二次确认）
         # 2. 调 REST，带 X-Tenant-* header
         dto = await self._rest.find_by_serial_no(serial_no, tenant)
-        # 3. 外部 DTO → 内部 PassRecordView（防腐层核心职责）
+        # 3. 外部 DTO -> 内部 PassRecordView（防腐层核心职责）
         return PassRecordMapper.to_view(dto)
 ```
 
@@ -376,7 +376,7 @@ class ToolRegistry:
 ```python
 # app/infrastructure/ai/tool_node.py
 class ToolNode:
-    """LangGraph 工具执行节点：权限校验 → 调 ACL → 落 trace。"""
+    """LangGraph 工具执行节点：权限校验 -> 调 ACL -> 落 trace。"""
 
     def __init__(
         self,
@@ -576,8 +576,8 @@ class DefectRateSpikeListener:
 
 ### 8.3 兜底
 
-- `confidence < 0.5` → 不展示给操作工，标记 `needs_human_review` 推工程师。
-- 工具连续失败 3 次 → 终止会话，转人工。
+- `confidence < 0.5` -> 不展示给操作工，标记 `needs_human_review` 推工程师。
+- 工具连续失败 3 次 -> 终止会话，转人工。
 - 所有报告带 `disclaimer`：辅助诊断假设，最终处置需工程师确认——与 MES 防错理念一致，宁可让人判。
 
 ---

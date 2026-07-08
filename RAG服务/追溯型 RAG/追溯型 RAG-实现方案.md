@@ -29,7 +29,7 @@
 
 > 追溯骨架的必经节点 `WipUnit`（在制品追踪）与 `WorkOrder`（工单管理）由过点执行投影**附带建立**（薄投影，§4.1），不作为 MVP 重点展开——它们是 5M1E 串联的种子与归属节点，但不独立做厚投影处理器。
 
-典型场景："单件 SN-001 焊接不良" → 系统自动按 5M1E 串起：
+典型场景："单件 SN-001 焊接不良" -> 系统自动按 5M1E 串起：
 
 1. **Man**：该单件每站过点记录的 `scanned_by`（过点执行上下文 `CheckpointRecord`）
 2. **Material**：该单件过点时消耗的锡膏批次 / 元件批次（物料上下文 `InventoryBatch`）、供应商、替代料规则、工单绑定的 `Bom` 版本
@@ -84,7 +84,7 @@
 
 ### 2.2 为什么是 GraphRAG 而非纯向量检索
 
-- 本 MES 的追溯链是**结构化关系**：`SN → 过点记录 → 设备 / 工艺版本 / 物料批次 / 测试结果`，这些是显式引用（`source_work_order_id`、`routeVersion`、`asset_id`、`batch_no`），不是文本相似度。向量检索只能找"语义相近的文档"，找不到"这条单件用了哪批锡膏、那批锡膏还进了哪些单件"。
+- 本 MES 的追溯链是**结构化关系**：`SN -> 过点记录 -> 设备 / 工艺版本 / 物料批次 / 测试结果`，这些是显式引用（`source_work_order_id`、`routeVersion`、`asset_id`、`batch_no`），不是文本相似度。向量检索只能找"语义相近的文档"，找不到"这条单件用了哪批锡膏、那批锡膏还进了哪些单件"。
 - GraphRAG 把跨上下文引用**显式建成图边**，5M1E 串联回退为一跳/两跳的 Cypher 扩展，准确率远高于向量近似匹配。
 - 向量在本文里只承担**语义入口**：把自然语言问题解析成图种子（SN / 批次 / 工单 / 设备），以及缺陷描述相似度——是图的补充，不是主体。这区别于 [RAG服务引入路线.md](../RAG服务引入路线.md) 路线 B（文档型 RAG，向量是主体）。
 
@@ -139,25 +139,25 @@ dependencies = [
 │                                                                    │
 │  ┌──────────────┐  ┌──────────────────────────────────────────┐  │
 │  │ FastAPI      │─▶│ TraceRetrievalService                      │  │
-│  │ /rag/trace/* │  │  种子解析 → 5M1E 子图扩展 → LLM 综合       │  │
+│  │ /rag/trace/* │  │  种子解析 -> 5M1E 子图扩展 -> LLM 综合       │  │
 │  └──────────────┘  └─────────────────┬────────────────────────┘  │
 │                                      │                            │
 │              ┌───────────────────────┼───────────────────────┐    │
 │              ▼                       ▼                       ▼    │
 │  ┌───────────────────┐  ┌─────────────────────┐  ┌──────────┐ │
 │  │ GraphProjector    │  │ GraphRetriever      │  │ LLM      │ │
-│  │ 事件 → 图增量写入  │  │ Cypher 5M1E 扩展    │  │ Synth    │ │
+│  │ 事件 -> 图增量写入  │  │ Cypher 5M1E 扩展    │  │ Synth    │ │
 │  │ (4 上下文投影器)   │  └──────────┬──────────┘  └──────────┘ │
 │  └────────┬──────────┘             │                            │
 │           │                        ▼                            │
 │  ┌────────▼────────┐        ┌──────────────────┐                │
 │  │ Neo4j Graph     │        │ SeedResolver     │                │
-│  │ (追溯图投影)     │◀──────▶│ (NL→种子, 向量)   │                │
+│  │ (追溯图投影)     │◀──────▶│ (NL->种子, 向量)   │                │
 │  └────────┬────────┘        └──────────────────┘                │
 │           │ event_id 幂等 / 位点                              │
 │  ┌────────▼────────┐  ┌─────────────────────┐  ┌───────────┐   │
 │  │ Idempotency     │  │ consumer offset     │  │ ACL 降级   │   │
-│  │ Table (MySQL)   │  │ (MySQL)             │  │ httpx→REST│   │
+│  │ Table (MySQL)   │  │ (MySQL)             │  │ httpx->REST│   │
 │  └─────────────────┘  └─────────────────────┘  └───────────┘   │
 └───────────────────────────────────┼──────────────────────────────┘
                                     │ 订阅领域事件（只读）
@@ -180,7 +180,7 @@ dependencies = [
 - **图即投影（CQRS 读模型）**：`GraphProjector` 是各上下文事件的读模型投影器，与过点执行上下文的本地缓存同构。事实源永远是 MES 服务的聚合根，图库崩溃不影响生产，重建即可（事件回放）。
 - **事件驱动增量 + 位点管理**：消费者维护 `consumer offset` 落 MySQL，重启从断点续跑；`event_id` 幂等表保证重复投递不产生重复边（§5.3）。
 - **检索与投影分离**：`GraphProjector`（写图）与 `GraphRetriever`（读图）解耦，投影滞后不阻塞检索——检索带 `as_of` 时间窗，滞后时段内低置信度兜底（§10.3）。
-- **ACL 防腐层**：降级查询各上下文 REST 时经 ACL 适配，外部 DTO → 内部视图（`TraceNode` / `ProcessVersionSnapshot`），外部 schema 变化不污染检索核心。符合 CLAUDE.md 的低耦合 / ACL 约束。
+- **ACL 防腐层**：降级查询各上下文 REST 时经 ACL 适配，外部 DTO -> 内部视图（`TraceNode` / `ProcessVersionSnapshot`），外部 schema 变化不污染检索核心。符合 CLAUDE.md 的低耦合 / ACL 约束。
 - **投影器按上下文隔离**：每个上下文一个 `ProjectionHandler`，互不干涉——与过点执行上下文 §2.7"只消费不重发、按主题前缀隔离"完全同构（ISP/SRP）。
 
 ---
@@ -212,41 +212,41 @@ dependencies = [
 | 追溯骨架 | `WipUnit` | WipUnit | sn, work_order_id, **route_version**, status, position | ✗ |
 | 追溯骨架 | `WorkOrder` | WorkOrder | work_order_id, status, target_qty, bom_id, route_id | ✗（绑定快照） |
 
-> **追溯骨架节点**：`WipUnit` / `WorkOrder` 不是 MVP 4 上下文之一，但它们是 5M1E 的种子与归属节点，由过点执行投影**附带 MERGE** 建立（`CheckpointRecord.FOR_UNIT → WipUnit`、`WipUnit.BELONGS_TO → WorkOrder`），不单独建厚投影处理器。`BINDS_BOM` / `BINDS_ROUTE` 边由工单管理投影建立（§11 扩展），MVP 阶段若未投影则 §6.2 对应 `OPTIONAL MATCH` 返回空，BOM/工艺绑定维度靠 ACL 降级补齐，不影响 Man/Material(批次)/Method(快照)/Measurement 四维闭环。在制品追踪 / 工单管理的完整投影在 §11 扩展。
+> **追溯骨架节点**：`WipUnit` / `WorkOrder` 不是 MVP 4 上下文之一，但它们是 5M1E 的种子与归属节点，由过点执行投影**附带 MERGE** 建立（`CheckpointRecord.FOR_UNIT -> WipUnit`、`WipUnit.BELONGS_TO -> WorkOrder`），不单独建厚投影处理器。`BINDS_BOM` / `BINDS_ROUTE` 边由工单管理投影建立（§11 扩展），MVP 阶段若未投影则 §6.2 对应 `OPTIONAL MATCH` 返回空，BOM/工艺绑定维度靠 ACL 降级补齐，不影响 Man/Material(批次)/Method(快照)/Measurement 四维闭环。在制品追踪 / 工单管理的完整投影在 §11 扩展。
 
 ### 4.2 边类型（MVP）
 
 **A. 引用边（聚合间显式引用，建图主干）**
 
-| 边类型 | 起点 → 终点 | 源字段 | 带版本属性 |
+| 边类型 | 起点 -> 终点 | 源字段 | 带版本属性 |
 |--------|------------|--------|-----------|
-| `BELONGS_TO` | WipUnit → WorkOrder | work_order_id | — |
-| `BINDS_BOM` | WorkOrder → Bom | bom_binding.bom_id | bom_version |
-| `BINDS_ROUTE` | WorkOrder → RouteVersion | route_binding.route_id | route_version |
-| `FOR_UNIT` | CheckpointRecord → WipUnit | sn + work_order_id | — |
-| `SNAPSHOT_OF_ROUTE` | CheckpointRecord → RouteVersion | route_version | route_version（INV-09） |
-| `PRODUCED_TESTRESULT` | CheckpointRecord → TestResult | 同事务 | — |
-| `JUDGED_BY` | TestResult → QualityVerdict | source_test_result_id | — |
-| `CITES_DEFECT` | QualityVerdict → DefectCatalog | defect_records[].defect_code | — |
-| `UNDER_RULE` | QualityVerdict → QualityGateRule | rule_id | rule_version |
-| `CONSUMED_BATCH` | WipUnit → InventoryBatch | 过点消耗（🔴 契约待对齐，§5.1） | — |
-| `SUPPLIED_BY` | InventoryBatch → Supplier | supplier_id | — |
-| `SUBSTITUTE_OF` | InventoryBatch → SubstituteRule | 替代料命中 | — |
+| `BELONGS_TO` | WipUnit -> WorkOrder | work_order_id | — |
+| `BINDS_BOM` | WorkOrder -> Bom | bom_binding.bom_id | bom_version |
+| `BINDS_ROUTE` | WorkOrder -> RouteVersion | route_binding.route_id | route_version |
+| `FOR_UNIT` | CheckpointRecord -> WipUnit | sn + work_order_id | — |
+| `SNAPSHOT_OF_ROUTE` | CheckpointRecord -> RouteVersion | route_version | route_version（INV-09） |
+| `PRODUCED_TESTRESULT` | CheckpointRecord -> TestResult | 同事务 | — |
+| `JUDGED_BY` | TestResult -> QualityVerdict | source_test_result_id | — |
+| `CITES_DEFECT` | QualityVerdict -> DefectCatalog | defect_records[].defect_code | — |
+| `UNDER_RULE` | QualityVerdict -> QualityGateRule | rule_id | rule_version |
+| `CONSUMED_BATCH` | WipUnit -> InventoryBatch | 过点消耗（🔴 契约待对齐，§5.1） | — |
+| `SUPPLIED_BY` | InventoryBatch -> Supplier | supplier_id | — |
+| `SUBSTITUTE_OF` | InventoryBatch -> SubstituteRule | 替代料命中 | — |
 
 **B. 时序边（追溯链骨干）**
 
-| 边类型 | 起点 → 终点 | 说明 |
+| 边类型 | 起点 -> 终点 | 说明 |
 |--------|------------|------|
-| `NEXT` | CheckpointRecord → CheckpointRecord | 同一 SN 按 `occurred_at` 排序的过点序列；5M1E Man 维度的骨架 |
+| `NEXT` | CheckpointRecord -> CheckpointRecord | 同一 SN 按 `occurred_at` 排序的过点序列；5M1E Man 维度的骨架 |
 
 **C. 配置绑定边（工艺/质量规则，版本化）**
 
-| 边类型 | 起点 → 终点 | 源字段 | 带版本属性 |
+| 边类型 | 起点 -> 终点 | 源字段 | 带版本属性 |
 |--------|------------|--------|-----------|
-| `HAS_STEP` | RouteVersion → RouteStep | 路线步骤序列 | route_version |
-| `USES_OPERATION` | RouteStep → Operation | operation_id | — |
-| `ENFORCES_GATE` | RouteStep → QualityGateRule | quality_gate_rule_id | rule_version |
-| `HAS_BOM_ITEM` | Bom → Material | BomItem.part_no | bom_version |
+| `HAS_STEP` | RouteVersion -> RouteStep | 路线步骤序列 | route_version |
+| `USES_OPERATION` | RouteStep -> Operation | operation_id | — |
+| `ENFORCES_GATE` | RouteStep -> QualityGateRule | quality_gate_rule_id | rule_version |
+| `HAS_BOM_ITEM` | Bom -> Material | BomItem.part_no | bom_version |
 
 > **所有边不可变**：边一旦写入不修改、不删除（与 `CheckpointRecord` INV-12 不可变一致）。工艺版本变更只新增 `RouteVersion` 节点与新 `BINDS_ROUTE` 边，**不改动历史 `SNAPSHOT_OF_ROUTE` 边**——这是版本一致性能兜住的根因（§4.4）。
 
@@ -292,18 +292,18 @@ graph LR
 
 | 5M1E | MVP 扩展路径（从种子 SN） | 命中上下文 | 状态 |
 |------|---------------------|-----------|------|
-| **Man** | `WipUnit → CheckpointRecord.scanned_by`、`NEXT` 过点序列 | 过点执行 | ✅ |
-| **Material** | `WipUnit → CONSUMED_BATCH → InventoryBatch → SUPPLIED_BY/SUBSTITUTE_OF`；`WorkOrder → BINDS_BOM → Bom → HAS_BOM_ITEM → Material` | 物料 | ✅（CONSUMED_BATCH 🔴） |
-| **Method** | `CheckpointRecord → SNAPSHOT_OF_ROUTE{route_version} → RouteVersion → HAS_STEP → RouteStep → ENFORCES_GATE` | 工艺管理 / 质量 | ✅ |
-| **Measurement** | `CheckpointRecord → PRODUCED_TESTRESULT → TestResult → JUDGED_BY → QualityVerdict → CITES_DEFECT/UNDER_RULE` | 过点执行 / 质量 | ✅ |
-| **Machine** | （`CheckpointRecord → USED_EQUIPMENT → Asset` 等，依赖台账/维修上下文） | 设备相关 | ⏳ §11 |
+| **Man** | `WipUnit -> CheckpointRecord.scanned_by`、`NEXT` 过点序列 | 过点执行 | ✅ |
+| **Material** | `WipUnit -> CONSUMED_BATCH -> InventoryBatch -> SUPPLIED_BY/SUBSTITUTE_OF`；`WorkOrder -> BINDS_BOM -> Bom -> HAS_BOM_ITEM -> Material` | 物料 | ✅（CONSUMED_BATCH 🔴） |
+| **Method** | `CheckpointRecord -> SNAPSHOT_OF_ROUTE{route_version} -> RouteVersion -> HAS_STEP -> RouteStep -> ENFORCES_GATE` | 工艺管理 / 质量 | ✅ |
+| **Measurement** | `CheckpointRecord -> PRODUCED_TESTRESULT -> TestResult -> JUDGED_BY -> QualityVerdict -> CITES_DEFECT/UNDER_RULE` | 过点执行 / 质量 | ✅ |
+| **Machine** | （`CheckpointRecord -> USED_EQUIPMENT -> Asset` 等，依赖台账/维修上下文） | 设备相关 | ⏳ §11 |
 | **Environment** | （`EquipmentChannel` 语义采样，依赖设备数据接入） | 设备数据接入 | ⏳ §11 |
 
 ### 4.4 版本快照节点（route_version / bom_version / rule_version）
 
 本 MES 的工艺路线、BOM、质量门禁规则都有**版本生命周期**（[领域总览.md](../../领域模型/领域总览.md) §5.1；工艺管理 `RouteVersionState`：DRAFT/SUBMITTED/ACTIVATED/DEPRECATED/ARCHIVED；物料 `BomActivated` 生效后旧版本 Deprecate，INV-02 同 product 同 bom_type 唯一 ACTIVE；质量 `QualityGateRuleActivated` 同理）。图谱对版本的处理是**版本即节点**，不覆盖：
 
-- `RouteVersion{route_id, route_version}` 是独立节点，`status` 属性标记 `ACTIVATED`/`DEPRECATED`。新版本生效（`ProcessRouteActivated`）→ 新增节点，旧节点 `status` 改 `DEPRECATED` 但**不删除**（工艺管理 INV-02）。
+- `RouteVersion{route_id, route_version}` 是独立节点，`status` 属性标记 `ACTIVATED`/`DEPRECATED`。新版本生效（`ProcessRouteActivated`）-> 新增节点，旧节点 `status` 改 `DEPRECATED` 但**不删除**（工艺管理 INV-02）。
 - `CheckpointRecord` 通过 `[:SNAPSHOT_OF_ROUTE {route_version}]` 边指向**当时生产用的版本**（INV-09）。工艺变更后，旧过点记录的边仍指向旧版本节点——历史追溯按当时版本回放，不受新版本影响。
 - `WorkOrder` 的 `BINDS_ROUTE` / `BINDS_BOM` 边携带 `route_version` / `bom_version` 属性，锁定的版本在工单下达时固化。
 - `QualityVerdict` 的 `UNDER_RULE` 边携带 `rule_version`，保证判定结果可回溯到当时生效的规则（质量 INV-09）。
@@ -352,24 +352,24 @@ CREATE VECTOR INDEX defect_name_idx IF NOT EXISTS
 
 ## 5. 索引构建：事件流驱动（4 上下文）
 
-图的写入完全由领域事件驱动，`GraphProjector` 是各上下文事件的**读模型投影器**。本节定义"事件 → 图增量"的投影规则，主题名严格对齐各上下文事件风暴的对外契约。
+图的写入完全由领域事件驱动，`GraphProjector` 是各上下文事件的**读模型投影器**。本节定义"事件 -> 图增量"的投影规则，主题名严格对齐各上下文事件风暴的对外契约。
 
-### 5.1 事件 → 图增量更新（投影规则）
+### 5.1 事件 -> 图增量更新（投影规则）
 
 | 领域事件 | 主题 | 投影动作（节点 + 边） | 幂等键 |
 |---------|------|----------------------|--------|
-| `CheckpointReleased` | `mes.checkpoint.lifecycle` | upsert `CheckpointRecord{route_version, decision}`；建 `FOR_UNIT` → `WipUnit`、`BELONGS_TO` → `WorkOrder`、`SNAPSHOT_OF_ROUTE{route_version}` → `RouteVersion`、`NEXT` → 上一条 `CheckpointRecord` | event_id |
-| `CheckpointBlocked` | `mes.checkpoint.lifecycle` | upsert `CheckpointRecord{decision=BLOCK}`；建 `FOR_UNIT` → `WipUnit`（拦截也入图，供追溯） | event_id |
+| `CheckpointReleased` | `mes.checkpoint.lifecycle` | upsert `CheckpointRecord{route_version, decision}`；建 `FOR_UNIT` -> `WipUnit`、`BELONGS_TO` -> `WorkOrder`、`SNAPSHOT_OF_ROUTE{route_version}` -> `RouteVersion`、`NEXT` -> 上一条 `CheckpointRecord` | event_id |
+| `CheckpointBlocked` | `mes.checkpoint.lifecycle` | upsert `CheckpointRecord{decision=BLOCK}`；建 `FOR_UNIT` -> `WipUnit`（拦截也入图，供追溯） | event_id |
 | `TestResultStructured` | `mes.testresult.structured` | upsert `TestResult{raw_verdict}`；建 `PRODUCED_TESTRESULT` ← `CheckpointRecord`（按 sn + station + source_ts 关联） | event_id |
-| `RoutingProgressed` | `mes.routing.progress` | upsert `RoutingProgress{current_step, route_version}`；建 `AT_STEP` → `RouteStep` | event_id |
-| `ProcessRouteActivated` | `process.route.lifecycle` | upsert `RouteVersion{route_version, status=ACTIVATED}`；旧版本节点 `status=DEPRECATED`（不删）；建 `HAS_STEP` → `RouteStep`、`ENFORCES_GATE` → `QualityGateRule` | event_id |
+| `RoutingProgressed` | `mes.routing.progress` | upsert `RoutingProgress{current_step, route_version}`；建 `AT_STEP` -> `RouteStep` | event_id |
+| `ProcessRouteActivated` | `process.route.lifecycle` | upsert `RouteVersion{route_version, status=ACTIVATED}`；旧版本节点 `status=DEPRECATED`（不删）；建 `HAS_STEP` -> `RouteStep`、`ENFORCES_GATE` -> `QualityGateRule` | event_id |
 | `ProcessRouteDeprecated` | `process.route.lifecycle` | 旧 `RouteVersion` 节点 `status=DEPRECATED`（不删历史 `SNAPSHOT_OF_ROUTE` 边） | event_id |
-| `BomActivated` | `material.bom.lifecycle` | upsert `Bom{bom_version, status=ACTIVATED}`；旧版本 `DEPRECATED`（不删）；建 `HAS_BOM_ITEM` → `Material` | event_id |
-| `InventoryChanged` | `material.inventory.changed` | upsert `InventoryBatch{available_qty}`；建 `SUPPLIED_BY` → `Supplier` | event_id |
+| `BomActivated` | `material.bom.lifecycle` | upsert `Bom{bom_version, status=ACTIVATED}`；旧版本 `DEPRECATED`（不删）；建 `HAS_BOM_ITEM` -> `Material` | event_id |
+| `InventoryChanged` | `material.inventory.changed` | upsert `InventoryBatch{available_qty}`；建 `SUPPLIED_BY` -> `Supplier` | event_id |
 | `SubstituteRuleActivated` | `material.substitute.lifecycle` | upsert `SubstituteRule`；建 `SUBSTITUTE_OF` ← `InventoryBatch`（命中时） | event_id |
-| `QualityVerdictIssued` | `quality.inspection.verdict` | upsert `QualityVerdict{rule_version}`；建 `JUDGED_BY` ← `TestResult`、`CITES_DEFECT` → `DefectCatalog`、`UNDER_RULE{rule_version}` → `QualityGateRule` | event_id |
+| `QualityVerdictIssued` | `quality.inspection.verdict` | upsert `QualityVerdict{rule_version}`；建 `JUDGED_BY` ← `TestResult`、`CITES_DEFECT` -> `DefectCatalog`、`UNDER_RULE{rule_version}` -> `QualityGateRule` | event_id |
 | `QualityGateRuleActivated` | `quality.gate.lifecycle` | upsert `QualityGateRule{rule_version, status=ACTIVATED}`；旧版本 `DEPRECATED`（不删） | event_id |
-| `BatchQualityAnomalyDetected` | `quality.anomaly.batch` | upsert `BatchQualityAnomaly`；建 `AFFECTS` → `WipUnit`（按 affected_sn_list） | event_id |
+| `BatchQualityAnomalyDetected` | `quality.anomaly.batch` | upsert `BatchQualityAnomaly`；建 `AFFECTS` -> `WipUnit`（按 affected_sn_list） | event_id |
 | `DefectCatalogDefined` | `quality.defect.catalog` | upsert `DefectCatalog{name, name_embedding}`（embedding 由 bge-m3 生成） | event_id |
 
 > 🔴 **契约待对齐：`CONSUMED_BATCH` 边的来源**。5M1E Material 维度需要"某 SN 过点时消耗了哪批料"。但物料上下文消费 `mes.checkpoint.lifecycle`(CheckpointReleased) 做的是 `ConsumeInventory`（按 BOM `consumption_rule` 扣减，INV-15 `(sn, work_order_id, source_event_id)` 去重），对外发布的是 `material.inventory.changed`(InventoryChanged，库存变更，不含 sn↔batch 明细)。**sn↔batch 消耗明细的事件契约尚不明确**（物料上下文 §2.6 留有热点）。
@@ -443,17 +443,17 @@ CREATE TABLE index_offset (
 用户问题："SN-001 昨天焊接不良，根因？"
         │
         ▼
-SeedResolver（NL → 种子）
+SeedResolver（NL -> 种子）
   ├─ 实体抽取：SN-001（正则命中 SN 规则）
   ├─ 意图识别：根因诊断（5M1E 扩展）
-  └─ 时间窗：昨天 → as_of = 今日 00:00
+  └─ 时间窗：昨天 -> as_of = 今日 00:00
         │
         ▼
 seed = {kind: "WipUnit", sn: "SN-001", as_of: <今日00:00>}
 ```
 
 - **实体抽取**优先规则匹配（SN / 工单号 / 批次号都有编码规则，正则即可），命中不了再走 LLM 抽取——降低对模型的依赖，提升确定性。
-- **语义兜底**：缺陷描述（"焊接不良"→ `defect_code=SW-001`）走 bge-m3 在 `DefectCatalog` 节点的 `name_embedding` 向量索引上近邻检索。
+- **语义兜底**：缺陷描述（"焊接不良"-> `defect_code=SW-001`）走 bge-m3 在 `DefectCatalog` 节点的 `name_embedding` 向量索引上近邻检索。
 - **多种子**：问题可能涉及批次（"B-77 这批锡膏进了哪些单件"），种子是 `InventoryBatch`，扩展方向反转（`CONSUMED_BATCH` 反向）。
 
 ### 6.2 5M1E 子图扩展（Cypher，聚焦 MVP 4 上下文）
@@ -559,7 +559,7 @@ class TraceAnswer(BaseModel):
 
 - **5M1E 分类固化在 Enum**，模型只能选枚举值，避免乱编类别（与 L1 Agent 一致）。
 - **证据强制引用 `node_id`**：每个假设必须引用子图节点，无证据的假设判失败重试。
-- **置信度阈值**：`confidence < 0.6` 或 `projection_lag_ms` 超阈值 → `needs_human_review=True`，不展示给操作工，只推工程师。
+- **置信度阈值**：`confidence < 0.6` 或 `projection_lag_ms` 超阈值 -> `needs_human_review=True`，不展示给操作工，只推工程师。
 - **系统提示词约束**：明确告诉模型"只能基于提供的 TraceSubgraph 推理，不得编造未在子图中出现的节点；查工艺必须带 `route_version`；输出严格遵循 TraceAnswer 结构"。
 
 ### 6.5 与文档型 RAG、L1 Agent 的协同
@@ -574,11 +574,11 @@ class TraceAnswer(BaseModel):
 
 ### 7.1 索引构建管线（GraphProjector）
 
-`GraphProjector` 是事件 → 图增量的投影器，按主题前缀分派到各上下文的 `ProjectionHandler`：
+`GraphProjector` 是事件 -> 图增量的投影器，按主题前缀分派到各上下文的 `ProjectionHandler`：
 
 ```python
 class ProjectionHandler(Protocol):
-    """一个上下文一个投影处理器，处理本上下文事件 → 图增量。"""
+    """一个上下文一个投影处理器，处理本上下文事件 -> 图增量。"""
     bounded_context: str
     async def handle(self, event: DomainEvent, tx: AsyncGraphTransaction) -> None: ...
 ```
@@ -600,7 +600,7 @@ class TraceRetrievalService:
     ) -> None: ...
 
     async def query(self, request: TraceQuery, tenant: TenantContext) -> TraceAnswer:
-        # 1. 种子解析（NL → seed，或直接用 request.seed）
+        # 1. 种子解析（NL -> seed，或直接用 request.seed）
         seed = await self._seed_resolver.resolve(request.question, tenant)
         # 2. 子图缓存（同种子 + as_of 命中即用）
         cached = await self._cache.get(seed, request.as_of, tenant)
@@ -706,7 +706,7 @@ rag_service/
       schemas.py               # Request / Response 模型
     application/               # 应用服务，编排检索
       trace_retrieval_service.py
-      seed_resolver.py         # NL → 种子（规则优先 + LLM 兜底）
+      seed_resolver.py         # NL -> 种子（规则优先 + LLM 兜底）
     domain/                    # RAG 领域模型
       subgraph.py              # TraceSubgraph / TraceNode / TraceEdge / FiveM1ECluster
       answer.py                # TraceAnswer / RootCauseHypothesis / FiveM1ECategory
@@ -812,7 +812,7 @@ class GraphProjector:
 ```python
 # app/infrastructure/neo4j/projections/checkpoint.py
 class CheckpointProjectionHandler:
-    """过点执行上下文事件 → 图增量。处理 mes.checkpoint.lifecycle / mes.testresult.structured / mes.routing.progress。"""
+    """过点执行上下文事件 -> 图增量。处理 mes.checkpoint.lifecycle / mes.testresult.structured / mes.routing.progress。"""
 
     bounded_context = "过点执行上下文"
 
@@ -897,7 +897,7 @@ class CheckpointProjectionHandler:
 ```python
 # app/infrastructure/neo4j/projections/process_route.py
 class ProcessRouteProjectionHandler:
-    """工艺管理上下文事件 → 图增量。处理 process.route.lifecycle。"""
+    """工艺管理上下文事件 -> 图增量。处理 process.route.lifecycle。"""
 
     bounded_context = "工艺管理上下文"
 
@@ -969,7 +969,7 @@ class ProcessRouteProjectionHandler:
 ```python
 # app/infrastructure/neo4j/projections/material.py
 class MaterialProjectionHandler:
-    """物料上下文事件 → 图增量。处理 material.bom.lifecycle / material.inventory.changed / material.substitute.lifecycle。"""
+    """物料上下文事件 -> 图增量。处理 material.bom.lifecycle / material.inventory.changed / material.substitute.lifecycle。"""
 
     bounded_context = "物料上下文"
 
@@ -1035,7 +1035,7 @@ class MaterialProjectionHandler:
 ```python
 # app/infrastructure/neo4j/projections/quality.py
 class QualityProjectionHandler:
-    """质量上下文事件 → 图增量。处理 quality.inspection.verdict / quality.gate.lifecycle / quality.defect.catalog。"""
+    """质量上下文事件 -> 图增量。处理 quality.inspection.verdict / quality.gate.lifecycle / quality.defect.catalog。"""
 
     bounded_context = "质量上下文"
 
@@ -1137,7 +1137,7 @@ WO_PATTERN = re.compile(r"WO[-_]?[A-Z0-9]+")
 BATCH_PATTERN = re.compile(r"[Bb][-_]?[0-9A-Z]{4,}")
 
 class SeedResolver:
-    """自然语言 → 图种子。规则优先（SN/工单/批次正则），LLM 兜底，Embedding 做缺陷描述匹配。"""
+    """自然语言 -> 图种子。规则优先（SN/工单/批次正则），LLM 兜底，Embedding 做缺陷描述匹配。"""
 
     def __init__(self, llm: BaseChatModel, embedder: BgeClient, graph: AsyncNeo4jDriver) -> None:
         self._llm = llm; self._embedder = embedder; self._graph = graph
@@ -1339,8 +1339,8 @@ volumes: { neo4j-data: {} }
 
 ### 10.3 兜底
 
-- **投影滞后兜底**：`projection_lag_ms` 超阈值（如 >30s）→ 检索置信度降权 + `needs_human_review`，并触发 ACL 降级查询补齐缺失节点。
-- **置信度兜底**：`confidence < 0.6` → 不展示给操作工，只推工程师；与 MES 防错理念一致，宁可拦下让人判。
+- **投影滞后兜底**：`projection_lag_ms` 超阈值（如 >30s）-> 检索置信度降权 + `needs_human_review`，并触发 ACL 降级查询补齐缺失节点。
+- **置信度兜底**：`confidence < 0.6` -> 不展示给操作工，只推工程师；与 MES 防错理念一致，宁可拦下让人判。
 - **LLM 输出兜底**：`TraceAnswer` 经 Pydantic 校验，不符合 schema 判失败重试；重试仍失败转人工，不硬答。
 - **图库故障兜底**：Neo4j 不可用时，`/rag/trace/query` 返回 503 + 降级提示，不阻塞 MES 生产；图可从 Kafka 事件回放重建（节点/边全不可变且由事件驱动）。
 
@@ -1354,14 +1354,14 @@ MVP 4 上下文跑通后，其余 10 上下文按**相同范式**扩展，无需
 |--------|---------|----------------|
 | 设备工装台账 | 新增 `Asset` / `AssetSpecProfile` 节点；订阅 `eam.*`；过点投影补 `USED_EQUIPMENT` / `USED_FIXTURE` 边 | Machine |
 | 设备数据接入 | 新增 `EquipmentChannel` 节点；**只订** `dc.identity.sn.minted` / `dc.equipment.runtime` / `dc.equipment.alarm.raw` 三个语义主题，不订原始流 | Environment |
-| 维修 | 新增 `RepairOrder` 节点；订阅 `repair.*`；建 `REPAIRS` → `Asset` | Machine |
-| 点检保养 | 新增 `MaintenanceTask` 节点；订阅 `pm.*`；建 `INSPECTS` → `Asset` | Machine |
-| 计量检定 | 新增 `CalibrationCert` 节点；订阅 `calibration.*`；建 `CERTIFIES` → `Asset` | Machine |
+| 维修 | 新增 `RepairOrder` 节点；订阅 `repair.*`；建 `REPAIRS` -> `Asset` | Machine |
+| 点检保养 | 新增 `MaintenanceTask` 节点；订阅 `pm.*`；建 `INSPECTS` -> `Asset` | Machine |
+| 计量检定 | 新增 `CalibrationCert` 节点；订阅 `calibration.*`；建 `CERTIFIES` -> `Asset` | Machine |
 | 在制品追踪 | `WipUnit` 投影加厚；订阅 `wip.*`；建 `KitStatus` | Man（齐套） |
 | 工单管理 | `WorkOrder` 投影加厚；订阅 `wo.*`；`WorkOrderProgress` 节点 | Man |
 | 首件处理 | 新增 `FirstArticle` 节点；订阅 `fai.*` | Man |
 | 返修 | 新增 `ReworkTask` 节点；订阅 `rework.*`；建 `ROUTES_FROM` / `REENTERS_AT` | Man |
-| 返工 | 新增 `BatchReworkOrder` 节点；订阅 `brework.*`；建 `REWORKS_FROM` → `WorkOrder` | Man |
+| 返工 | 新增 `BatchReworkOrder` 节点；订阅 `brework.*`；建 `REWORKS_FROM` -> `WorkOrder` | Man |
 
 **扩展步骤统一为四步**（OCP，不改检索核心）：
 1. `infrastructure/neo4j/projections/` 新增一个 `ProjectionHandler` 文件；
@@ -1383,7 +1383,7 @@ MVP 4 上下文跑通后，其余 10 上下文按**相同范式**扩展，无需
 
 ### 12.2 版本一致性测试
 
-- **工艺变更后历史追溯**：构造 SN-001 在 v1 下过点 → 工艺变更为 v2 → 断言 SN-001 的 `SNAPSHOT_OF_ROUTE` 边仍指向 v1，检索 `method_route` 返回 v1（不取当前 v2）。
+- **工艺变更后历史追溯**：构造 SN-001 在 v1 下过点 -> 工艺变更为 v2 -> 断言 SN-001 的 `SNAPSHOT_OF_ROUTE` 边仍指向 v1，检索 `method_route` 返回 v1（不取当前 v2）。
 - **旧版本 DEPRECATED 不删**：`ProcessRouteActivated(v2)` 后，断言 v1 节点 `status=DEPRECATED` 仍存在，历史边不动（INV-09）。
 - **降级查询强制版本**：`ProcessManagementAclClient.fetch_route_version(route_version=None)` 抛 `ValueError`。
 
@@ -1402,7 +1402,7 @@ MVP 4 上下文跑通后，其余 10 上下文按**相同范式**扩展，无需
 1. 搭 `rag_service` 骨架（FastAPI + uvicorn），对齐 §8 包结构；`docker-compose` 起 Neo4j + MySQL + Redis。
 2. 接 Neo4j 5.x async driver，`SchemaInitializer` 执行 §4.5 DDL（约束/索引/向量索引）。
 3. 实现 `GraphProjector` + 幂等表 + 位点表（§5.3），接一个消费者组（`rag-mes`）跑通。
-4. 实现 `CheckpointProjectionHandler`（§9.2），验证 `CheckpointReleased` → 节点 + `SNAPSHOT_OF_ROUTE` 边入图。
+4. 实现 `CheckpointProjectionHandler`（§9.2），验证 `CheckpointReleased` -> 节点 + `SNAPSHOT_OF_ROUTE` 边入图。
 5. 实现 `ReadOnlyProjectionGate` / `assert_no_raw_data_topic` 启动断言（§9.7）。
 
 ### 阶段二：4 上下文投影（2 周）
@@ -1449,7 +1449,7 @@ MVP 4 上下文跑通后，其余 10 上下文按**相同范式**扩展，无需
 - [ ] RAG 服务不进过点主事务（[领域总览.md](../../领域模型/领域总览.md) §5.3），图投影秒级最终一致，过点 P99 ≤200ms 不受影响。
 - [ ] 检索结果 `TraceSubgraph` 结构化，节点带 `source_event_id` 证据可回溯。
 - [ ] LLM 输出经 Pydantic `TraceAnswer` 校验，5M1E 分类固化为 Enum，失败重试。
-- [ ] `confidence < 0.6` 或投影滞后超阈值 → `needs_human_review`，不展示给操作工。
+- [ ] `confidence < 0.6` 或投影滞后超阈值 -> `needs_human_review`，不展示给操作工。
 - [ ] 图库故障返回 503 不阻塞 MES 生产；图可从 Kafka 事件回放重建。
 - [ ] `CONSUMED_BATCH` 边的契约 gap（🔴 §5.1）已登记，MVP 用降级查询兜底，待物料上下文明确事件后改为投影。
 - [ ] 所有答案带 disclaimer：辅助假设，最终处置需工程师确认。
@@ -1468,7 +1468,7 @@ A：图是领域事件的**只读投影**，不是事实源。事实源是各上
 A：4 个上下文（过点执行 + 工艺管理 + 物料 + 质量）覆盖了 5M1E 的 Man/Material/Method/Measurement 四维，是一条 SN 追溯闭环的核心。Machine（设备台账/维修/点检/计量）和 Environment（设备数据接入语义采样）依赖设备相关上下文，按相同范式扩展（§11），检索 Cypher 加 `OPTIONAL MATCH` 即可向后兼容。先 4 上下文跑通闭环验证价值，再按需扩展——这是按"价值/依赖"排的，不是拍脑袋。
 
 **Q：物料消耗的 sn↔batch 明细怎么来？**
-A：这是个真实的契约 gap。物料上下文消费 `mes.checkpoint.lifecycle`(CheckpointReleased) 做 `ConsumeInventory`（按 BOM `consumption_rule` 扣减，INV-15），但对外只发 `material.inventory.changed`（库存变更，不含 sn↔batch 明细）。MVP 用降级查询物料上下文只读 REST `GET /api/material/consumption?sn=&work_order_id=` 补齐 `CONSUMED_BATCH` 边（§7.3），待物料上下文明确消耗明细事件后改为事件投影。这种"识别 gap → 降级兜底 → 推动契约闭环"的处理方式，比假装没有 gap 更负责任。
+A：这是个真实的契约 gap。物料上下文消费 `mes.checkpoint.lifecycle`(CheckpointReleased) 做 `ConsumeInventory`（按 BOM `consumption_rule` 扣减，INV-15），但对外只发 `material.inventory.changed`（库存变更，不含 sn↔batch 明细）。MVP 用降级查询物料上下文只读 REST `GET /api/material/consumption?sn=&work_order_id=` 补齐 `CONSUMED_BATCH` 边（§7.3），待物料上下文明确消耗明细事件后改为事件投影。这种"识别 gap -> 降级兜底 -> 推动契约闭环"的处理方式，比假装没有 gap 更负责任。
 
 **Q：会不会拖慢过点？**
 A：不会进过点主事务。过点 P99 ≤200ms（[领域总览.md](../../领域模型/领域总览.md) §4.1）是硬约束，图投影是异步消费事件，与过点判定完全解耦（§5.3 过点主事务零分布式事务）。图允许秒级最终一致——追溯型 RAG 是事后诊断工具，不是实时过点判定，秒级滞后可接受，滞后超阈值降置信度兜底。

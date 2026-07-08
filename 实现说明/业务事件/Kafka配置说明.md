@@ -213,11 +213,11 @@ public void onMessage(
 
 ```text
 Kafka poll 收到消息
-  → 开启本地 MySQL 事务
-    → 插入 consumed_event 幂等记录
-    → 执行业务处理
-  → MySQL commit
-  → ack Kafka offset
+  -> 开启本地 MySQL 事务
+    -> 插入 consumed_event 幂等记录
+    -> 执行业务处理
+  -> MySQL commit
+  -> ack Kafka offset
 ```
 
 如果 MySQL commit 前失败，不 ack，Kafka 后续重投。

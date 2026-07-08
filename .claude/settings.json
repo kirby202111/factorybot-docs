@@ -6,7 +6,8 @@
       "Bash(cd \"e:/factorybot-docs/**\" && *)",
       "Edit(/.claude/skills/implementation/**)",
       "Bash(sort -t- -k2 -n -u)",
-      "Edit(/.claude/skills/domain-modeling/**)"
+      "Edit(/.claude/skills/domain-modeling/**)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)"
     ]
   }
 }

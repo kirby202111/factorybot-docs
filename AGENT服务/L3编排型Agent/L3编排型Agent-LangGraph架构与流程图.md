@@ -63,7 +63,7 @@ L3 的核心是**跨上下文编排**，但编排的大部分是确定性步骤�
                               动作卡推送 + 人工确认          │
                       ┌──────────────────────────────────┴──┐
                       │  WebSocket(SSE) + Kafka 动作卡事件     │
-                      │  → 责任人 UI  →  /confirm 端点         │
+                      │  -> 责任人 UI  ->  /confirm 端点         │
                       └──────────────────────────────────────┘
 ```
 
@@ -71,7 +71,7 @@ L3 的核心是**跨上下文编排**，但编排的大部分是确定性步骤�
 
 - **supervisor 是纯代码编排器**：不持工具、不调 LLM，只做 plan / dispatch / barrier / gate——想越界也没工具调。
 - **代码节点 vs agent 节点**：代码节点（query/compare/barrier/gate/write）直接调 ACL，不进 ToolRegistry，不调 LLM；只有 4 类 agent 能力（A/B/C/D）经 ToolNode 调 LLM + 工具。**换线全程 PASS 时，A/B/C/D 都不触发，LLM 调用为 0**。
-- **写工具走 ACL → 上下文应用服务 REST**：不碰 MES 原始表，过聚合根不变式 + 事务发件箱；放行 / 拦截类工具**不注册到任何 capability**——过点放行能力从架构层不存在于 agent 工具集。
+- **写工具走 ACL -> 上下文应用服务 REST**：不碰 MES 原始表，过聚合根不变式 + 事务发件箱；放行 / 拦截类工具**不注册到任何 capability**——过点放行能力从架构层不存在于 agent 工具集。
 - **动作卡通道独立**：gate 的 interrupt 不阻塞进程，卡片经 WebSocket + Kafka 推 UI，人确认走 `/confirm` 端点 resume。
 
 ---
@@ -85,11 +85,11 @@ START
   ↓
 [query_first_article]  代码：查首件状态
   ↓
-[gate: FIRST_ARTICLE]  代码节点 interrupt → 推首件触发卡 → 人确认 → resume
+[gate: FIRST_ARTICLE]  代码节点 interrupt -> 推首件触发卡 -> 人确认 -> resume
   ↓ PASS
 [query_active_route]  代码：查工艺版本（ACL 强制 route_version）
   ↓
-[gate: PROCESS_SWITCH]  代码节点 interrupt → 推工艺激活卡 → 人确认 → resume
+[gate: PROCESS_SWITCH]  代码节点 interrupt -> 推工艺激活卡 -> 人确认 -> resume
   ↓ PASS
   ├──────────────────────┬──────────────────────┐
   ▼并行(代码)            ▼并行(代码)              │
@@ -103,7 +103,7 @@ START
   │
   ├─ 都 PASS ────────────▶ [draft_release_card]  代码：结构化拼装放行卡（非 LLM）
   │                          ↓
-  │                       [gate: RELEASE]  代码节点 interrupt → 推放行意图卡 → 人确认
+  │                       [gate: RELEASE]  代码节点 interrupt -> 推放行意图卡 -> 人确认
   │                          ↓ PASS
   │                       过点上下文应用服务实际放行（过点主事务 + 规则引擎，P99≤200ms）
   │                          ↓
@@ -111,7 +111,7 @@ START
   │
   ├─ tooling FAIL ──────▶ [RootCauseAgent (A)]  ★agent 调用节点：自适应取证 + 根因假设 + 草拟处置卡
   │                          ↓
-  │                       [gate: DISPOSITION]  代码节点 interrupt → 推处置卡（含根因假设+证据）→ 人确认
+  │                       [gate: DISPOSITION]  代码节点 interrupt -> 推处置卡（含根因假设+证据）-> 人确认
   │                          ↓ PASS
   │                       处置落库（如归还ST-A/领用ST-B，走钢网上下文应用服务）
   │                          ↓
@@ -126,7 +126,7 @@ END
 ★ = agent 调用节点（调 LLM），其余均为代码节点（不调 LLM）
 ```
 
-**关键**：换线全程 PASS 时，图只走左侧 `plan → first_article → process_switch → tooling_check(PASS) ‖ kitting_check(PASS) → barrier → draft_release → gate_release → done`，**全程零 LLM 调用**。agent A 只在 `tooling_check` 产出 `FAIL(mismatch)` 时触发。
+**关键**：换线全程 PASS 时，图只走左侧 `plan -> first_article -> process_switch -> tooling_check(PASS) ‖ kitting_check(PASS) -> barrier -> draft_release -> gate_release -> done`，**全程零 LLM 调用**。agent A 只在 `tooling_check` 产出 `FAIL(mismatch)` 时触发。
 
 **节点与边的约束**
 
@@ -134,7 +134,7 @@ END
 |----|------|------|
 | 并行派发 | `conditional_edges` 返回 `["tooling_check","kitting_check"]` | LangGraph 自动并发执行两条分支 |
 | barrier 汇合 | `barrier_node` 是两分支边的共同终点 | LangGraph 等两分支都返回才执行；节点内按结构化结果分流 |
-| barrier 分流 | `conditional_edges` 按 `barrier_route` 路由 | 都 PASS → 放行；tooling FAIL → A；kitting FAIL → 挂起 |
+| barrier 分流 | `conditional_edges` 按 `barrier_route` 路由 | 都 PASS -> 放行；tooling FAIL -> A；kitting FAIL -> 挂起 |
 | gate 中断 | `interrupt(value=action_card)` | state 落 MySQL，进程不阻塞；`/confirm` 端点 `Command(resume=token)` 续跑 |
 | 代码节点不调 LLM | `query/compare/barrier/gate/draft_release` 是纯 Python 函数 | 直接调 ACL，不进 ToolRegistry；`l3_step_record.node_type=CODE` |
 | agent 节点才调 LLM | `RootCauseAgent` 等是 subgraph | 经 ToolNode 调 LLM + 工具；`node_type=AGENT` |
@@ -160,13 +160,13 @@ END
 [draft_repair_order]    [FaultImpactAgent (B)]   ★agent：故障模式推理 + 隔离集草拟
   代码：草拟维修单         │                        │
   ↓                       ↓                        │
-[gate: REPAIR]         [gate: ISOLATION]          代码节点 interrupt → 人确认
+[gate: REPAIR]         [gate: ISOLATION]          代码节点 interrupt -> 人确认
   ↓ PASS                 ↓ PASS                    │
   └──────────────────────┴──────────────────────┘
   ↓
 [计量复校 gate]  代码：复校结果确认（确定性，不嵌 agent）
   ↓ PASS
-[复产首件 gate]  代码：barrier 等复校+点检 PASS → 推复产放行卡 → 人确认
+[复产首件 gate]  代码：barrier 等复校+点检 PASS -> 推复产放行卡 -> 人确认
   ↓
 [done]
 ```
@@ -188,11 +188,11 @@ END
   ↓                       ↓                        │
   └──────────────────────┴──────────────────────┘
   ↓
-[gate: ISOLATION]  代码节点 interrupt → 推隔离卡 → 人确认 → 返工上下文下达
+[gate: ISOLATION]  代码节点 interrupt -> 推隔离卡 -> 人确认 -> 返工上下文下达
   ↓ PASS
 [DraftAgents.draft_8d (D)]  ★agent：草拟 8D 报告（拉追溯链 + 历史 8D）
   ↓
-[gate: 8D_PUBLISH]  代码节点 interrupt → 推 8D 发布卡 → 人确认
+[gate: 8D_PUBLISH]  代码节点 interrupt -> 推 8D 发布卡 -> 人确认
   ↓
 [done]
 ```
@@ -214,7 +214,7 @@ END
   ↓
 [barrier]  代码：等双 PASS
   ↓
-[新工艺首件验证 gate]  代码：推首件放行卡 → 人确认
+[新工艺首件验证 gate]  代码：推首件放行卡 -> 人确认
   ↓
 [done]
 ```
@@ -331,12 +331,12 @@ class ChangeoverGraph:
         t, k = state["tooling_result"], state["kitting_result"]
         if t["status"] == "PASS" and k["status"] == "PASS":
             state["barrier_route"] = "draft_release"
-        elif t["status"] == "FAIL":           # 钢网/程序 mismatch → 交 agent A
+        elif t["status"] == "FAIL":           # 钢网/程序 mismatch -> 交 agent A
             state["barrier_route"] = "root_cause"
             state["expected"] = t["expected"]
             state["actual"] = t["actual"]
             state["mismatch_code"] = t["code"]
-        else:                                  # 缺料 → 确定性，不嵌 agent，挂起催料
+        else:                                  # 缺料 -> 确定性，不嵌 agent，挂起催料
             state["barrier_route"] = "suspend"
             state["status"] = "SUSPENDED"
             await self._gates.push_exception_card(state, "物料齐套未达标，请催料")

@@ -1,6 +1,6 @@
 # GraphRAG 与 Agent 结合落地方案（图 + L1 诊断 + L2 草稿）
 
-> 本文把 [RAG 路线 A 追溯型 RAG（GraphRAG）](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md) 与 [AGENT 路线 L1 诊断型 Agent](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)、[L2 草稿型 Agent](../AGENT服务/AGENT服务引入路线.md) 结合成一条 **"查图 → 多步诊断 → 草拟处置"** 的落地链路。
+> 本文把 [RAG 路线 A 追溯型 RAG（GraphRAG）](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md) 与 [AGENT 路线 L1 诊断型 Agent](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)、[L2 草稿型 Agent](../AGENT服务/AGENT服务引入路线.md) 结合成一条 **"查图 -> 多步诊断 -> 草拟处置"** 的落地链路。
 >
 > **与现有文档的关系**：
 > - [追溯型 RAG-实现方案.md](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md) / [详细设计.md](../RAG服务/追溯型%20RAG/追溯型%20RAG-详细设计.md) = **图怎么建、怎么检索**（基座，已设计）；
@@ -53,7 +53,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 ### 1.3 与现有文档的关系
 
 - **与图方案**：图方案的 §6（5M1E 检索）、§9.8（`/rag/trace/query` 端点）是本文 L1 调图的底层。本文不重新定义 Cypher，只定义"Agent 何时调它、调完怎么用"。
-- **与 L1 方案**：L1 方案的 §4（工具注册）、§5（ReAct 循环）是本文 Agent 层的基础。本文新增的是"图工具优先"的路由策略 + L1→L2 的衔接契约。
+- **与 L1 方案**：L1 方案的 §4（工具注册）、§5（ReAct 循环）是本文 Agent 层的基础。本文新增的是"图工具优先"的路由策略 + L1->L2 的衔接契约。
 - **与 L2**：L2 尚无独立实现方案文件（仅在 [AGENT 路线 §2.3](../AGENT服务/AGENT服务引入路线.md) 有方向描述）。本文给出 L2 的结合层契约与代码骨架，**L2 完整实现方案待补**（§8 🔴）。
 - **与文档型 RAG（路线 B）**：L2 的 8D / SOP 草拟需要路线 B 提供历史同类文档检索。本文假设路线 B 已提供 `search_docs(query, route_version_filter)`（[L1 方案 §5.5](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)）。
 
@@ -66,8 +66,8 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
 │  前端（工程师工作台 / 工位屏幕）                                        │
-│    按场景路由：标准化追溯 → /rag/trace；开放诊断 → /agent/diagnose；     │
-│                要处置 → /agent/draft                                    │
+│    按场景路由：标准化追溯 -> /rag/trace；开放诊断 -> /agent/diagnose；     │
+│                要处置 -> /agent/draft                                    │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │
           ┌─────────────────────┼─────────────────────┐
@@ -80,7 +80,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
   │  Cypher 5M1E   │   │                  │   │                  │
   │  LLM 综合      │   │  ToolRegistry:   │   │  消费 L1 report  │
   │                │   │  ①query_trace_   │   │  + subgraph_ref  │
-  │                │◀──│    graph(优先)   │   │  → intent+draft  │
+  │                │◀──│    graph(优先)   │   │  -> intent+draft  │
   │                │   │  ②上下文只读REST  │   │                  │
   │                │   │   (降级/深挖)     │   │  confirmation    │
   └───────┬────────┘   └──────┬───────────┘   └────────┬─────────┘
@@ -88,7 +88,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
           │                   │ 降级/深挖调 REST         │ 草稿落库
           │                   ▼                        ▼
           │          ┌──────────────────┐    ┌────────────────────┐
-          │          │ ACL → 各上下文    │    │ 返工/工单上下文      │
+          │          │ ACL -> 各上下文    │    │ 返工/工单上下文      │
           │          │ 只读 REST         │    │ 正常应用服务         │
           │          │ (过点/工艺/物料/   │    │ (聚合根不变式 +      │
           │          │  质量/设备...)     │    │  事务发件箱)         │
@@ -97,7 +97,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
           ▼
   ┌──────────────────────────────────────────┐
   │ Neo4j（追溯图投影）                        │
-  │  领域事件流 → GraphProjector → 节点/边     │
+  │  领域事件流 -> GraphProjector -> 节点/边     │
   │  版本/权限结构性兜底（SNAPSHOT_OF_ROUTE、  │
   │  tenant_scope WHERE 前置）                 │
   └──────────────────────────────────────────┘
@@ -119,7 +119,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 ### 2.3 关键设计决策
 
 - **图作快路径，不等于图能回答一切**：图覆盖 5M1E 的"结构化事实"（哪批料、哪台设备、哪版工艺），但"同批次不良率统计""设备参数基线对比"这类**聚合计算**图不擅长——这些由 L1 调上下文 REST 现场算。图给"是谁"，REST 补"多少"。
-- **L1→L2 靠 `subgraph_ref` 传证据，不重查**：L1 诊断产出的 `DiagnosisReport` 带 `subgraph_ref`（指向落库的 `TraceSubgraph`），L2 草拟返工单时按 `subgraph_ref` 回查图节点填充 `affected_sn_list`、`source_work_order_id`——避免 L2 阶段重复检索 + 重复承担版本兜底。
+- **L1->L2 靠 `subgraph_ref` 传证据，不重查**：L1 诊断产出的 `DiagnosisReport` 带 `subgraph_ref`（指向落库的 `TraceSubgraph`），L2 草拟返工单时按 `subgraph_ref` 回查图节点填充 `affected_sn_list`、`source_work_order_id`——避免 L2 阶段重复检索 + 重复承担版本兜底。
 - **L2 不直查图、不直写 MES**：L2 只读 L1 产物 + 文档型 RAG，写意图落库走人确认 + 正常应用服务。这条把 L2 的风险面降到最小——最坏情况是"草稿没用上"，不会产生写副作用。
 - **三个服务独立部署、HTTP 解耦**：`rag-service` 与 `agent-service` 是独立微服务，跨服务调图/调诊断走 httpx，互不侵入。这与 [L1 方案 §1.3](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md) 跨语言解耦一脉相承。
 
@@ -127,7 +127,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 
 ## 3. 业务场景与各模块使用
 
-> 按业务场景组织：每个场景说明**触发条件 → 走哪个模块 → 数据流 → 输出 → 兜底**。场景 3.1–3.3 偏检索/诊断（图 + L1），3.4–3.6 偏处置草拟（L2）。
+> 按业务场景组织：每个场景说明**触发条件 -> 走哪个模块 -> 数据流 -> 输出 -> 兜底**。场景 3.1–3.3 偏检索/诊断（图 + L1），3.4–3.6 偏处置草拟（L2）。
 
 ### 3.1 单件根因诊断（SN-001 焊接不良）—— 图为主
 
@@ -135,10 +135,10 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 |----|------|
 | **触发** | 工艺/质量工程师输入"SN-001 焊接不良根因" |
 | **路由** | R1 直查图（问题含明确 SN + 要全貌，标准化追溯） |
-| **数据流** | `SeedResolver` 正则命中 SN-001 → `GraphRetriever.expand_5m1e` Cypher 扩展 → LLM 综合 → `TraceAnswer` |
+| **数据流** | `SeedResolver` 正则命中 SN-001 -> `GraphRetriever.expand_5m1e` Cypher 扩展 -> LLM 综合 -> `TraceAnswer` |
 | **主力模块** | **GraphRAG**（全程）；L1 不介入 |
 | **输出** | 5M1E 假设排序 + 证据链（`node_id` 引用）+ 置信度 |
-| **兜底** | `confidence < 0.6` → `needs_human_review` 转人工；`projection_lag_ms` 超阈值降权 + ACL 降级补齐 |
+| **兜底** | `confidence < 0.6` -> `needs_human_review` 转人工；`projection_lag_ms` 超阈值降权 + ACL 降级补齐 |
 
 > 这是图**独立能闭环**的场景——5M1E 全貌一次取齐，不需要多步推理。用 Agent 反而是浪费（数十秒 vs 秒级）。
 
@@ -148,7 +148,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 |----|------|
 | **触发** | 质量工程师"B-77 这批锡膏进了哪些单件，不良率多少" |
 | **路由** | R2 Agent 诊断（需"找单件 + 算不良率"，图给清单、REST 算比率） |
-| **数据流** | L1 第一步调 `query_traceability_graph(seed=InventoryBatch{B-77})` → 图反向扩展 `InventoryBatch ← CONSUMED_BATCH ← WipUnit` 给 `sn_list` → L1 再调 `query_defect_rate(sn_list)` 聚合不良率 → 对比基线 → 假设排序 |
+| **数据流** | L1 第一步调 `query_traceability_graph(seed=InventoryBatch{B-77})` -> 图反向扩展 `InventoryBatch ← CONSUMED_BATCH ← WipUnit` 给 `sn_list` -> L1 再调 `query_defect_rate(sn_list)` 聚合不良率 -> 对比基线 -> 假设排序 |
 | **主力模块** | **GraphRAG**（反向扩展给 sn_list）+ **L1**（调质量 REST 聚合不良率） |
 | **输出** | 受影响单件清单 + 不良率 + 根因假设 |
 | **兜底** | `CONSUMED_BATCH` 边若未投影（🔴 [图方案 §5.1](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md)），L1 降级调 `GET /api/material/consumption?sn=&work_order_id=` 补齐 |
@@ -161,20 +161,20 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 |----|------|
 | **触发** | 3.1 诊断指向 Material 维度，工程师要深挖"是 B-77 供应商问题，还是焊接站回流曲线偏移" |
 | **路由** | R2 Agent 诊断（开放、跨上下文递进） |
-| **数据流** | L1 多步 ReAct：①调图取 B-77 全部单件 + 焊接站设备绑定（`USED_EQUIPMENT`）→ ②调 `query_device_params(asset_id, time_range)` 取回流曲线 → ③调 `query_supplier_history(supplier_id)` → ④对比基线 → 假设排序 |
+| **数据流** | L1 多步 ReAct：①调图取 B-77 全部单件 + 焊接站设备绑定（`USED_EQUIPMENT`）-> ②调 `query_device_params(asset_id, time_range)` 取回流曲线 -> ③调 `query_supplier_history(supplier_id)` -> ④对比基线 -> 假设排序 |
 | **主力模块** | **L1**（多步调图 + REST），GraphRAG（每步可调取结构化关系） |
 | **输出** | 递进假设 + 每步工具调用证据（`tool_call_trace`） |
 | **兜底** | `recursion_limit` ≤20（≤10 次工具调用）；工具连续失败 3 次转人工 |
 
 > 这是图**单独搞不定**的场景——要跨物料/设备/供应商多个上下文递进追问、对比基线，正是 L1 多步推理的价值。但每一步的"结构化关系查找"仍优先调图（快路径），深挖的"参数对比"才调 REST。
 
-### 3.4 诊断 → 草拟返工单（L1→L2 闭环）—— L2 草稿 + 图供证据
+### 3.4 诊断 -> 草拟返工单（L1->L2 闭环）—— L2 草稿 + 图供证据
 
 | 项 | 内容 |
 |----|------|
 | **触发** | 3.1/3.3 诊断确认某批次要返工，工程师点"草拟返工单" |
 | **路由** | R3 草拟处置 |
-| **数据流** | L2 消费 L1 的 `DiagnosisReport + subgraph_ref` → 按 `subgraph_ref` 回查图节点填充 `source_work_order_id`、`affected_sn_list`、`reentry_point` → 草拟返工单（含返工工艺路线引用 + `route_version`）→ 工程师在**返工上下文正式界面**审核确认 → 走返工上下文应用服务落库 |
+| **数据流** | L2 消费 L1 的 `DiagnosisReport + subgraph_ref` -> 按 `subgraph_ref` 回查图节点填充 `source_work_order_id`、`affected_sn_list`、`reentry_point` -> 草拟返工单（含返工工艺路线引用 + `route_version`）-> 工程师在**返工上下文正式界面**审核确认 -> 走返工上下文应用服务落库 |
 | **主力模块** | **L2**（草拟）+ GraphRAG（供 `affected_sn_list`/`source_work_order_id` 证据）+ 返工上下文（落库） |
 | **输出** | 返工单草稿（`intent + draft`，`requires_confirmation=True`） |
 | **兜底** | 草稿**不落库**；落库过返工聚合根不变式 + 事务发件箱；Agent 绝不旁路写 |
@@ -187,7 +187,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 |----|------|
 | **触发** | 质量工程师要出 8D 报告 |
 | **路由** | R3 草拟处置 |
-| **数据流** | L2 按 `subgraph_ref` 拉图的 5M1E 证据链（人/料/法/测各维节点）+ 调 `search_docs`（路线 B）检索历史同类 8D → 草拟 8D（问题描述/根因/ containment/纠正措施）→ 质量工程师改完发布 |
+| **数据流** | L2 按 `subgraph_ref` 拉图的 5M1E 证据链（人/料/法/测各维节点）+ 调 `search_docs`（路线 B）检索历史同类 8D -> 草拟 8D（问题描述/根因/ containment/纠正措施）-> 质量工程师改完发布 |
 | **主力模块** | **L2** + GraphRAG（5M1E 证据）+ 文档型 RAG（历史 8D） |
 | **输出** | 8D 草稿 |
 | **兜底** | 草稿不落库；8D 模板待质量上下文定义（🔴 §8） |
@@ -198,9 +198,9 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 
 | 项 | 内容 |
 |----|------|
-| **触发** | 订阅 `ProcessRouteActivated` 事件（工艺升版 v3→v4） |
+| **触发** | 订阅 `ProcessRouteActivated` 事件（工艺升版 v3->v4） |
 | **路由** | 事件驱动 L2（非问答，主动触发） |
-| **数据流** | L2 基于新 `route_version=4` + 调 `search_docs` 检索现有 SOP → 对比新旧工艺步骤差异 → 草拟新 SOP → 工艺工程师审核发布 |
+| **数据流** | L2 基于新 `route_version=4` + 调 `search_docs` 检索现有 SOP -> 对比新旧工艺步骤差异 -> 草拟新 SOP -> 工艺工程师审核发布 |
 | **主力模块** | **L2** + 文档型 RAG（现有 SOP）；GraphRAG 提供 `RouteVersion{v4}` 节点作版本锚点（非主力） |
 | **输出** | SOP 草稿 |
 | **兜底** | 草稿不落库；版本过滤对齐 `ProcessRouteActivated`（[图方案 §5.4](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md)） |
@@ -222,7 +222,7 @@ L2 基于诊断结果 + 图证据，草拟返工单 / 8D（人确认后落库）
 
 ## 4. 模块协作契约
 
-### 4.1 GraphRAG → L1：`query_traceability_graph` 工具契约
+### 4.1 GraphRAG -> L1：`query_traceability_graph` 工具契约
 
 L1 把图的 `/rag/trace/query` 封装为工具，注册时**排首位**，system prompt 引导"先调图"：
 
@@ -243,7 +243,7 @@ class QueryTraceabilityGraphResult(BaseModel):
 - **版本/权限由图兜底**：工具入参**不含** `route_version`/`tenant_scope`——版本由图的 `SNAPSHOT_OF_ROUTE` 边按 SN 锁定，权限由图 `tenant_scope WHERE` 前置过滤。L1 拿到的结果已经是版本/权限合规的，**不需要 LLM 自觉带版本**。
 - **图覆盖度信号**：`summary` 里标注哪些 5M1E 维度为空（如 "Material: CONSUMED_BATCH 未投影"），L1 据此决定是否降级调 REST 补齐（🔴 阈值待定，§8）。
 
-### 4.2 L1 → L2：`DiagnosisReport + subgraph_ref` 传递
+### 4.2 L1 -> L2：`DiagnosisReport + subgraph_ref` 传递
 
 L1 诊断产出 `DiagnosisReport`（[L1 方案 §5.3](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)），L2 消费它 + `subgraph_ref`：
 
@@ -264,7 +264,7 @@ class DraftRequest(BaseModel):
 - **L2 不重查图**：L2 需要的 `affected_sn_list`/`source_work_order_id`/`reentry_point` 按 `subgraph_ref` 回查图节点（只读），不重新调 `query_traceability_graph`——保证证据已被 L1 验证，且避免重复检索。
 - **版本透传**：`DiagnosisReport.hypotheses[].evidence` 已含 `route_version`，L2 草拟返工工艺路线时引用同一 `route_version`（🔴 返工用原版本还是新版本待定，§8）。
 
-### 4.3 L2 → MES 写路径：confirmation gate
+### 4.3 L2 -> MES 写路径：confirmation gate
 
 L2 输出 `intent + draft`，**绝不直接落库**：
 
@@ -278,7 +278,7 @@ class Draft(BaseModel):
     route_version: str                 # 草稿锁定的工艺版本
 ```
 
-- **落库走正常应用服务**：工程师在返工上下文 / 工单管理上下文的**正式界面**审核草稿 → 调该上下文的正常应用服务下达 → 过聚合根不变式校验 + 事务发件箱（[AGENT 路线 §4](../AGENT服务/AGENT服务引入路线.md)）。
+- **落库走正常应用服务**：工程师在返工上下文 / 工单管理上下文的**正式界面**审核草稿 -> 调该上下文的正常应用服务下达 -> 过聚合根不变式校验 + 事务发件箱（[AGENT 路线 §4](../AGENT服务/AGENT服务引入路线.md)）。
 - **Agent 不旁路写**：L2 不持有任何写工具，`ToolRegistry` 不注册 `create_*` 类工具（`ReadOnlyToolGate` 启动断言，[L1 方案 §7.1](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)）。写动作的闸门 100% 在人手里。
 
 ### 4.4 版本一致性三层传递
@@ -417,9 +417,9 @@ L2 产出 Draft（requires_confirmation=True）
         ▼
 工程师 UI 展示草稿 + 证据链（subgraph_ref 可点开回溯）
         │
-        ├─ 工程师驳回 → 草稿归档，不落库
+        ├─ 工程师驳回 -> 草稿归档，不落库
         │
-        └─ 工程师确认 → 调返工/工单上下文的【正常应用服务】
+        └─ 工程师确认 -> 调返工/工单上下文的【正常应用服务】
                                 │
                                 ▼
                         聚合根不变式校验 + 事务发件箱
@@ -452,7 +452,7 @@ L2 产出 Draft（requires_confirmation=True）
 9. 实现 SOP 草拟（场景 3.6）：订阅 `ProcessRouteActivated` + 现有 SOP。
 
 ### 阶段四：版本一致性透传 + 评测（2 周）
-10. 验证版本三层传递：图 `route_version` → L1 evidence → L2 草稿 → MES 校验。
+10. 验证版本三层传递：图 `route_version` -> L1 evidence -> L2 草稿 -> MES 校验。
 11. 沉淀评测集：每个场景含种子 + 预期模块路由 + 预期输出。
 12. 灰度一条产线，收集工程师反馈。
 
@@ -464,12 +464,12 @@ L2 产出 Draft（requires_confirmation=True）
 - [ ] L2 **不持有任何写工具**，`ToolRegistry` 无 `create_*` 类工具；落库走返工/工单上下文正常应用服务。
 - [ ] L2 草稿 `requires_confirmation=True` 恒成立；草稿不落库，确认后走聚合根不变式 + 事务发件箱。
 - [ ] L2 不直查图，只按 L1 传来的 `subgraph_ref` 回查图节点（只读）。
-- [ ] 版本三层传递：图 `SNAPSHOT_OF_ROUTE` → L1 `evidence.route_version` → L2 `Draft.route_version` → MES 应用服务校验 `ACTIVE`。
+- [ ] 版本三层传递：图 `SNAPSHOT_OF_ROUTE` -> L1 `evidence.route_version` -> L2 `Draft.route_version` -> MES 应用服务校验 `ACTIVE`。
 - [ ] 图作快路径：L1 诊断第一步必调 `query_traceability_graph`；版本/权限由图结构性兜底，L1 不自行指定版本。
 - [ ] 图投影滞后 / `CONSUMED_BATCH` 边缺失时，L1 经 ACL 降级查询上下文只读 REST 补齐（[图方案 §7.3](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md)）。
 - [ ] 前端按 R1/R2/R3 路由：标准化追溯直调图、开放诊断走 Agent、处置草拟走 L2。
 - [ ] 全程不进过点主事务：图投影异步、L1 ≤60s、L2 草拟秒级，过点 P99 ≤200ms 不受影响。
-- [ ] `confidence < 0.6`（图）/ `< 0.5`（L1）→ `needs_human_review`，不展示给操作工。
+- [ ] `confidence < 0.6`（图）/ `< 0.5`（L1）-> `needs_human_review`，不展示给操作工。
 - [ ] 每步工具调用落 `tool_call_trace`，`subgraph_ref` + `node_id` 让证据链可点开回溯。
 - [ ] L2 主动触发（SOP 草拟）只订阅 `ProcessRouteActivated` 只读事件，不消费写命令。
 - [ ] 所有输出带 disclaimer：辅助假设/草稿，最终处置需工程师确认。
@@ -480,9 +480,9 @@ L2 产出 Draft（requires_confirmation=True）
 
 > 以下是无法替你拍板、需要你或 SME 判断的点。影响实现细节，不影响整体架构。
 
-1. **✅ L2 实现方案已补**：见 [L2草稿型Agent-实现方案.md](../AGENT服务/L2草稿型Agent/L2草稿型Agent-实现方案.md)。L2 内部实现（策略模式草拟、只读 ACL、`NoWriteClientGate` 启动断言、confirmation gate）已落地；下述与 L2 相关的待判断项（#3 L1→L2 触发 / #4 返工路线 / #5 8D 模板 / #6 审批矩阵 / #9 subgraph_ref 生命周期）移交 L2 文档 §11 统一跟踪。
+1. **✅ L2 实现方案已补**：见 [L2草稿型Agent-实现方案.md](../AGENT服务/L2草稿型Agent/L2草稿型Agent-实现方案.md)。L2 内部实现（策略模式草拟、只读 ACL、`NoWriteClientGate` 启动断言、confirmation gate）已落地；下述与 L2 相关的待判断项（#3 L1->L2 触发 / #4 返工路线 / #5 8D 模板 / #6 审批矩阵 / #9 subgraph_ref 生命周期）移交 L2 文档 §11 统一跟踪。
 2. **🔴 "图覆盖度判断"阈值**：L1 调图后，`summary` 标注某维度为空——什么条件下 L1 判定"图不够"、转降级 REST？是"某维度完全为空"还是"节点数 < N"？这影响 L1 的步数与延迟。
-3. **🔴 L1→L2 触发方式**：诊断完成后，L2 草拟是**自动续接**（L1 诊断完直接触发 L2）还是**人工发起**（工程师点"草拟返工单"）？自动续接省一步但可能草拟出不需要的处置；人工发起稳妥但多一次交互。
+3. **🔴 L1->L2 触发方式**：诊断完成后，L2 草拟是**自动续接**（L1 诊断完直接触发 L2）还是**人工发起**（工程师点"草拟返工单"）？自动续接省一步但可能草拟出不需要的处置；人工发起稳妥但多一次交互。
 4. **🔴 返工工艺路线 `ReworkRoute` 版本规则**：返工走**独立返工工艺路线**（非正常 `RouteVersion`，见 [返工上下文.md](../领域模型/生产执行服务/事件风暴/返工上下文.md)）。`ReworkRoute` 是否有版本生命周期、L2 草拟时如何选择 `rework_route_ref`，需工艺管理上下文明确。详见 [L2 §11](../AGENT服务/L2草稿型Agent/L2草稿型Agent-实现方案.md)。
 5. **🔴 8D 模板归属**：8D 报告草稿的模板（问题描述/根因/containment/纠正措施字段）是否由质量上下文定义标准模板？还是 L2 自由生成？
 6. **🔴 confirmation gate 审批人角色矩阵**：返工单草稿由谁确认（线长/工艺工程师/质量工程师）？不同 `draft_kind` 审批人是否不同？需与权限模型对齐。
@@ -510,13 +510,13 @@ A：不会。L2 输出 `intent + draft`，`requires_confirmation=True`，草稿�
 A：不重复，是分层。3.1 单件根因是图独立闭环的场景——5M1E 全貌一次取齐，用 Agent 是浪费。L1 诊断（3.3）服务于"图搞不定"的场景——递进追问、跨上下文跳转、聚合计算（不良率/参数基线对比）。图给"是谁"，L1 补"为什么 + 多少"。前端按 R1/R2 路由分流，简单场景直查图，复杂场景才走 Agent。
 
 **Q：版本一致性在三层怎么传递？**
-A：从图结构兜上来。图用 `SNAPSHOT_OF_ROUTE{route_version}` 边物理锁定版本 → L1 诊断证据 `evidence` 带 `route_version` → L2 草稿 `Draft.route_version` 锁定 → MES 应用服务最后一道校验 `ACTIVE`。L1/L2 只透传版本，不另搞版本管理——版本一致性不是哪层自己保证的，是从领域模型 + 图结构兜上来的。
+A：从图结构兜上来。图用 `SNAPSHOT_OF_ROUTE{route_version}` 边物理锁定版本 -> L1 诊断证据 `evidence` 带 `route_version` -> L2 草稿 `Draft.route_version` 锁定 -> MES 应用服务最后一道校验 `ACTIVE`。L1/L2 只透传版本，不另搞版本管理——版本一致性不是哪层自己保证的，是从领域模型 + 图结构兜上来的。
 
 **Q：上线了吗？**
-A：这是设计阶段的引入规划，不是已落地。重点是三个架构判断：①图作快路径把版本/权限从 LLM 责任变成图结构属性；②L1→L2 靠 `subgraph_ref` 传证据不重查，L2 不直查图不直写 MES；③写动作过 confirmation gate 不旁路应用服务。落地需要先图 MVP 跑通，再 L1 调图工具，再 L2 草稿——按"先基座后上层"推进。诚实 + 体现架构判断力，比硬吹"已上线 AI"得分高。
+A：这是设计阶段的引入规划，不是已落地。重点是三个架构判断：①图作快路径把版本/权限从 LLM 责任变成图结构属性；②L1->L2 靠 `subgraph_ref` 传证据不重查，L2 不直查图不直写 MES；③写动作过 confirmation gate 不旁路应用服务。落地需要先图 MVP 跑通，再 L1 调图工具，再 L2 草稿——按"先基座后上层"推进。诚实 + 体现架构判断力，比硬吹"已上线 AI"得分高。
 
 ---
 
 ## 10. 一句话定位
 
-"GraphRAG 与 Agent 结合的关键，是**让图作快路径把版本/权限从 LLM 的推理责任降级为图的结构属性**——L1 诊断优先调图取 5M1E 全貌、不够再降级调 REST，L2 草稿消费 L1 诊断 + `subgraph_ref` 证据不重查图、写意图过 confirmation gate 不旁路应用服务。三层接力：图给结构化事实链（秒级）、L1 做多步递进诊断（数十秒）、L2 草拟返工单/8D/SOP（人确认落库），全程不进过点主事务、版本三层透传、写闸门在人手里——这是建立在追溯护城河上的'问得到 → 做得完'闭环，别人没有这套领域模型抄不走。"
+"GraphRAG 与 Agent 结合的关键，是**让图作快路径把版本/权限从 LLM 的推理责任降级为图的结构属性**——L1 诊断优先调图取 5M1E 全貌、不够再降级调 REST，L2 草稿消费 L1 诊断 + `subgraph_ref` 证据不重查图、写意图过 confirmation gate 不旁路应用服务。三层接力：图给结构化事实链（秒级）、L1 做多步递进诊断（数十秒）、L2 草拟返工单/8D/SOP（人确认落库），全程不进过点主事务、版本三层透传、写闸门在人手里——这是建立在追溯护城河上的'问得到 -> 做得完'闭环，别人没有这套领域模型抄不走。"

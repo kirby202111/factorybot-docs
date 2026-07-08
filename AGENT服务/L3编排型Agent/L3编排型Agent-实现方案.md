@@ -16,7 +16,7 @@
 2. 是否需要推理 / 生成（非固定规则）？
 3. 分支是否难以穷举（决策树永远落后于现场）？
 
-三问皆否 → **代码节点**；三问有一 → **agent 节点**。
+三问皆否 -> **代码节点**；三问有一 -> **agent 节点**。
 
 按此标准重划 L3 全域：
 
@@ -71,10 +71,10 @@
 
 | # | 场景 | 代码骨架 | 嵌入的 agent 能力 |
 |---|------|---------|------------------|
-| ① | **换线** | 首件 gate → 工艺激活 gate →（钢网程序比对 ‖ 齐套比对）→ barrier → 放行 gate | 仅在钢网 / 程序 mismatch 分支嵌 **A** |
-| ② | **设备故障复产** | 维修单 gate →（维修 ‖ 故障排查）→ 复校 gate → 复产首件 gate | 嵌 **B**（隔离范围判定） |
-| ③ | **客诉 8D** | 自动追溯 →（供应商批次追溯 ‖ 隔离判定）→ 隔离 gate → 8D 发布 gate | 嵌 **C**（根因排序）+ **D**（8D 草拟） |
-| ④ | **工艺变更落地** | 订阅 `ProcessRouteActivated` →（SOP 草拟 ‖ 资质核对）→ barrier → 首件验证 gate | 嵌 **D**（SOP 草拟） |
+| ① | **换线** | 首件 gate -> 工艺激活 gate ->（钢网程序比对 ‖ 齐套比对）-> barrier -> 放行 gate | 仅在钢网 / 程序 mismatch 分支嵌 **A** |
+| ② | **设备故障复产** | 维修单 gate ->（维修 ‖ 故障排查）-> 复校 gate -> 复产首件 gate | 嵌 **B**（隔离范围判定） |
+| ③ | **客诉 8D** | 自动追溯 ->（供应商批次追溯 ‖ 隔离判定）-> 隔离 gate -> 8D 发布 gate | 嵌 **C**（根因排序）+ **D**（8D 草拟） |
+| ④ | **工艺变更落地** | 订阅 `ProcessRouteActivated` ->（SOP 草拟 ‖ 资质核对）-> barrier -> 首件验证 gate | 嵌 **D**（SOP 草拟） |
 
 **关键体现"懂什么时候不用 AI"**：换线场景①如果全程 PASS（无 mismatch、齐套达标），agent A 根本不触发——纯代码骨架跑完换线。agent 只在异常分支赚回成本。同理场景④的资质核对是确定性查询（操作工资质 ∈ 工艺要求资质集），代码做，不嵌 agent；只有 SOP 草拟（开放生成）嵌 D。
 
@@ -155,7 +155,7 @@
                               动作卡推送 + 人工确认          │
                       ┌──────────────────────────────────┴──┐
                       │  WebSocket(SSE) + Kafka 动作卡事件     │
-                      │  → 责任人 UI  →  /confirm 端点         │
+                      │  -> 责任人 UI  ->  /confirm 端点         │
                       └──────────────────────────────────────┘
 ```
 
@@ -164,7 +164,7 @@
 - **supervisor 不持工具**：supervisor 只做"下一步该干啥 + 派发 + 收口"，**没有任何写工具**，也没有 LLM 调用——它是纯代码编排器。写工具只挂在对应 agent 能力（且仅生成意图卡）。
 - **代码节点 vs agent 节点**：`query+compare`、`barrier`、`gate`、`write_via_appservice` 是纯 Python 函数节点，不调 LLM；`root_cause`、`fault_impact`、`traceability`、`draft_*` 是 agent 调用节点，调 LLM + 工具。**换线全程 PASS 时，agent 节点根本不执行**——LLM 调用次数为 0。
 - **agent 能力工具集互斥**：每个 agent 注册时声明 `capability`（A/B/C/D），`ToolRegistry.tools_for(capability)` 只返回该能力的工具。RootCauseAgent 看不到 FaultImpactAgent 的设备遥测工具。
-- **gate 是显式代码节点**：每个 confirmation gate 是 supervisor 图里的代码节点，`interrupt` 暂停 → 推动作卡 → 等人确认 → `resume` 续跑。gate 决策落库可审计。
+- **gate 是显式代码节点**：每个 confirmation gate 是 supervisor 图里的代码节点，`interrupt` 暂停 -> 推动作卡 -> 等人确认 -> `resume` 续跑。gate 决策落库可审计。
 - **barrier 在放行门禁**：并行分支汇合，supervisor 在放行前 barrier 等所有 gate 都 PASS（确定性硬校验）。
 
 ---
@@ -237,9 +237,9 @@ class ToolRegistry:
 ```text
 [plan_node]  代码：决定步骤序列
   ↓
-[query_first_article + gate: FIRST_ARTICLE]  代码：查首件状态 → gate 人确认触发
+[query_first_article + gate: FIRST_ARTICLE]  代码：查首件状态 -> gate 人确认触发
   ↓ PASS
-[query_active_route + gate: PROCESS_SWITCH]  代码：查工艺版本 → gate 人确认激活
+[query_active_route + gate: PROCESS_SWITCH]  代码：查工艺版本 -> gate 人确认激活
   ↓ PASS
   ├──────────────────────┬──────────────────────┐
   ▼并行(代码)            ▼并行(代码)              │
@@ -251,13 +251,13 @@ class ToolRegistry:
   ↓                        ↓                      │
 [barrier_node]  代码：等两条分支汇合，校验结果
   │
-  ├─ 都 PASS → [draft_release_card + gate: RELEASE]  代码：草拟放行卡（非LLM，结构化拼装）→ gate 人确认
-  │             → 过点上下文应用服务实际放行
+  ├─ 都 PASS -> [draft_release_card + gate: RELEASE]  代码：草拟放行卡（非LLM，结构化拼装）-> gate 人确认
+  │             -> 过点上下文应用服务实际放行
   │
-  ├─ tooling FAIL → [RootCauseAgent (A)]  agent：自适应取证 + 根因假设 + 草拟处置卡
-  │                  → [gate: DISPOSITION]  人确认处置 → 处置落库 → 回 tooling_check 重检
+  ├─ tooling FAIL -> [RootCauseAgent (A)]  agent：自适应取证 + 根因假设 + 草拟处置卡
+  │                  -> [gate: DISPOSITION]  人确认处置 -> 处置落库 -> 回 tooling_check 重检
   │
-  └─ kitting FAIL → [SUSPENDED]  代码：缺料是确定的，不嵌 agent，直接挂起推线长催料
+  └─ kitting FAIL -> [SUSPENDED]  代码：缺料是确定的，不嵌 agent，直接挂起推线长催料
   ↓
 [done_node]  代码：session.status=DONE
 ```
@@ -275,7 +275,7 @@ class ToolRegistry:
 - **并行**：tooling_check ‖ kitting_check 用 LangGraph 并行分支，barrier_node 等两条都返回。
 - **gate 中断**：每个 gate 节点调 `interrupt(value=action_card)`，FastAPI 收到人工确认后 `Command(resume=token)` 续跑。
 - **失败隔离**：agent 节点返回低置信度 / FAILED 时，supervisor 不直接终止，推"异常卡"给线长，state 标 `SUSPENDED`，等人工决策。
-- **mismatch 的处置回路**：A 草拟处置卡 → 人确认 → 处置落库（如归还 ST-A、领用 ST-B）→ 回 `tooling_check` 重检——重检仍是代码节点，agent 不参与"重检通过没"的判定。
+- **mismatch 的处置回路**：A 草拟处置卡 -> 人确认 -> 处置落库（如归还 ST-A、领用 ST-B）-> 回 `tooling_check` 重检——重检仍是代码节点，agent 不参与"重检通过没"的判定。
 
 ### 5.2 4 类 agent 能力实现
 
@@ -321,7 +321,7 @@ class RootCauseAgent:
 
 #### B. FaultImpactAgent（故障隔离范围）
 
-输入：故障设备 ID + 报警时刻。agent 拉`query_equipment_telemetry`推理故障模式（硬停 / 软漂移 / 间歇）→ 软漂移估漂移起始窗口 → `query_batches_in_window` 取窗口内批次 → `query_process_fmea` + `query_product_sensitivity` 关联"漂移参数 × 产品敏感度" → 对受影响产品标隔离、不受影响产品标放行 → `draft_isolation_card`。隔离集人确认后走返工 / 返修上下文应用服务下达。
+输入：故障设备 ID + 报警时刻。agent 拉`query_equipment_telemetry`推理故障模式（硬停 / 软漂移 / 间歇）-> 软漂移估漂移起始窗口 -> `query_batches_in_window` 取窗口内批次 -> `query_process_fmea` + `query_product_sensitivity` 关联"漂移参数 × 产品敏感度" -> 对受影响产品标隔离、不受影响产品标放行 -> `draft_isolation_card`。隔离集人确认后走返工 / 返修上下文应用服务下达。
 
 #### C. TraceabilityAgent（客诉根因追溯，嵌入 L1）
 
@@ -391,16 +391,16 @@ class ActionCard(BaseModel):
 
 ```text
 FaultImpactAgent
-  → draft_isolation_card 工具（生成 ActionCard，requires_confirmation）
-  → gate 中断，推卡给质量工程师
-  → 工程师查看 agent_hypothesis（隔离集 + 敏感度理由）+ evidence，确认
-  → agent 拿 confirmation token
-  → 调返工/返修上下文 REST: POST /api/isolation-orders
+  -> draft_isolation_card 工具（生成 ActionCard，requires_confirmation）
+  -> gate 中断，推卡给质量工程师
+  -> 工程师查看 agent_hypothesis（隔离集 + 敏感度理由）+ evidence，确认
+  -> agent 拿 confirmation token
+  -> 调返工/返修上下文 REST: POST /api/isolation-orders
        （返工上下文的应用服务接口，不是直改表）
-  → 返工上下文 application 层：
+  -> 返工上下文 application 层：
        IsolationAggregate.issue(batch_set, reason)  -- 聚合根不变式校验
-       → 事务发件箱落 BatchIsolated 事件
-  → agent 收到应用服务返回成功，gate.decision=PASS，续跑
+       -> 事务发件箱落 BatchIsolated 事件
+  -> agent 收到应用服务返回成功，gate.decision=PASS，续跑
 ```
 
 - Agent 全程不碰 MES 原始表，写动作过聚合根不变式 + 事务发件箱——与正规写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认"。
@@ -564,7 +564,7 @@ class ChangeoverGraph:
         g.add_conditional_edges("gate_process_switch", lambda s: ["tooling_check", "kitting_check"])
         g.add_edge("tooling_check", "barrier")
         g.add_edge("kitting_check", "barrier")
-        # barrier 按结果分流：都 PASS → 放行；tooling mismatch → A；缺料 → 挂起
+        # barrier 按结果分流：都 PASS -> 放行；tooling mismatch -> A；缺料 -> 挂起
         g.add_conditional_edges("barrier", self._barrier_route, ["draft_release", "root_cause", "suspend"])
         g.add_edge("draft_release", "gate_release")
         g.add_edge("gate_release", "done")
@@ -578,11 +578,11 @@ class ChangeoverGraph:
         t, k = state["tooling_result"], state["kitting_result"]
         if t["status"] == "PASS" and k["status"] == "PASS":
             state["barrier_route"] = "draft_release"
-        elif t["status"] == "FAIL":           # 钢网/程序 mismatch → 交 agent A
+        elif t["status"] == "FAIL":           # 钢网/程序 mismatch -> 交 agent A
             state["barrier_route"] = "root_cause"
             state["expected"] = t["expected"]; state["actual"] = t["actual"]
             state["mismatch_code"] = t["code"]
-        else:                                  # 缺料 → 确定性，不嵌 agent，直接挂起催料
+        else:                                  # 缺料 -> 确定性，不嵌 agent，直接挂起催料
             state["barrier_route"] = "suspend"
             state["status"] = "SUSPENDED"
             await self._gates.push_exception_card(state, "物料齐套未达标，请催料")
@@ -614,7 +614,7 @@ class ChangeoverGraph:
 ```
 
 - **agent 只在 mismatch 分支触发**：`_barrier_node` 的分流是确定性代码——PASS 走放行、mismatch 走 A、缺料挂起。换线全程 PASS 时 A 根本不执行。
-- **重检回路**：A 草拟处置 → 人确认 → 处置落库 → 回 `tooling_check` 重检（代码节点），agent 不参与"重检通过没"的判定。
+- **重检回路**：A 草拟处置 -> 人确认 -> 处置落库 -> 回 `tooling_check` 重检（代码节点），agent 不参与"重检通过没"的判定。
 
 ### 7.2 confirmation gate（interrupt / resume）
 
@@ -778,9 +778,9 @@ async def lifespan(app: FastAPI):
 
 - gate 等待人确认有 deadline，超时自动挂起 `SUSPENDED` 推责任人，不无限阻塞。
 - barrier 检测到未 PASS，**禁止推放行卡**，分流到 agent A 或挂起——编排层防错。
-- agent 置信度 `low` → 处置卡标 `need_human_review=True`，列疑点，不自动路由。
-- 写工具未带有效 confirmation token → `WriteToolGate` 拒绝 + 指标 +1 + 告警。
-- agent 连续失败 2 次 → 标 `SUSPENDED`，推异常卡，不自动重试到死。
+- agent 置信度 `low` -> 处置卡标 `need_human_review=True`，列疑点，不自动路由。
+- 写工具未带有效 confirmation token -> `WriteToolGate` 拒绝 + 指标 +1 + 告警。
+- agent 连续失败 2 次 -> 标 `SUSPENDED`，推异常卡，不自动重试到死。
 
 ---
 
@@ -791,14 +791,14 @@ async def lifespan(app: FastAPI):
 1. 在 L1 的 `agent_service` 上扩展 `orchestration/code_nodes/`，搭 supervisor + 代码节点（plan / query_compare / barrier / gate / done）。
 2. 实现 `ToolDescriptor.capability` / `requires_confirmation` / `writes_via` 与 `WriteToolGate` 启动断言。
 3. 实现 `l3_session` / `l3_step_record` 表 + repo（含 `node_type` 区分）。
-4. 接 LangGraph `interrupt` / `Command(resume=...)`，跑通单个 gate 的"推卡 → 确认 → 续跑"。
+4. 接 LangGraph `interrupt` / `Command(resume=...)`，跑通单个 gate 的"推卡 -> 确认 -> 续跑"。
 5. WebSocket + Kafka 动作卡推送 MVP。
 6. 换线场景跑通**纯代码骨架**（全程 PASS 路径，无 agent），验证"代码能跑的不交给 LLM"。
 
 ### 阶段二：agent 能力 A 嵌入（2 周）
 
 7. 实现 RootCauseAgent (A) + 其只读 toolset（钢网借还 / 主数据变更 / 工艺审计 / 上工单收线记录）。
-8. supervisor 加 mismatch 分支：barrier 分流到 A → 处置 gate → 重检回路。
+8. supervisor 加 mismatch 分支：barrier 分流到 A -> 处置 gate -> 重检回路。
 9. 评测 A 的根因假设准确率 + 置信度标定，低置信度转人工。
 
 ### 阶段三：agent 能力 B / C / D + 写路径（4 周）

@@ -13,12 +13,12 @@
 
 把 L1 诊断结果（根因假设 + 证据链）升级成**可执行处置的草稿**：Agent 自动拉追溯证据 + 历史同类文档，草拟返工单 / 8D 报告 / SOP，工程师改完在正式界面下达。
 
-典型场景："L1 诊断 SN-001 这批焊接不良要返工" → L2 自动：
+典型场景："L1 诊断 SN-001 这批焊接不良要返工" -> L2 自动：
 
 1. 按 L1 传来的 `subgraph_ref` 回查图节点，提取 `source_work_order_id`、`affected_sn_list`、`reentry_point`
 2. 调文档型 RAG（路线 B）检索历史同类 8D / 现有 SOP
 3. LLM 综合成结构化草稿（`intent + payload + evidence_refs`）
-4. 工程师在返工上下文正式界面审核确认 → 走返工上下文应用服务落库
+4. 工程师在返工上下文正式界面审核确认 -> 走返工上下文应用服务落库
 
 ### 1.2 硬边界（一开口就要讲）
 
@@ -34,7 +34,7 @@
 
 ### 1.3 与 L1、Java 技术栈的关系
 
-- **与 L1**：L1 是"查 + 诊断"（只读推理），L2 是"诊断 → 草拟"（写意图生成）。L2 **消费** L1 的 `DiagnosisReport + subgraph_ref`，不重复诊断。L1 和 L2 可同属 `agent-service`（不同模块），也可拆分；MVP 建议同服务不同模块，复用 LLM 抽象与可观测基础设施。
+- **与 L1**：L1 是"查 + 诊断"（只读推理），L2 是"诊断 -> 草拟"（写意图生成）。L2 **消费** L1 的 `DiagnosisReport + subgraph_ref`，不重复诊断。L1 和 L2 可同属 `agent-service`（不同模块），也可拆分；MVP 建议同服务不同模块，复用 LLM 抽象与可观测基础设施。
 - **与 Java**：L2 用 Python，**不替换** MES 三大服务的 Java/Spring 栈。L2 只通过 httpx 调只读 REST（图回查 / 文档检索 / 工艺版本查询），**不调任何写 API**。跨语言的物理边界强化了"L2 无法旁路写"——Python 侧连写 client 都没有。
 
 ---
@@ -47,7 +47,7 @@
 |------|------|---------|
 | 语言 | Python 3.11+ | 与 L1 同栈，复用 LLM 抽象 / Pydantic / 可观测 |
 | Web 框架 | **FastAPI** | 异步、原生 OpenAPI，与 L1 一致 |
-| 草拟编排 | **DraftService（async 函数编排 + 策略模式）** | L2 步骤固定（取证据 → 检索文档 → 综合），无需 LangGraph 开放 ReAct；策略模式按草稿类型分派（SRP） |
+| 草拟编排 | **DraftService（async 函数编排 + 策略模式）** | L2 步骤固定（取证据 -> 检索文档 -> 综合），无需 LangGraph 开放 ReAct；策略模式按草稿类型分派（SRP） |
 | LLM 抽象 | `langchain-core` 的 `BaseChatModel` | 与 L1 一致，`with_structured_output(Draft)` 强制结构化草稿 |
 | 数据校验 | **Pydantic v2** | 草稿 DTO / 证据模型 schema 即类型 |
 | HTTP 客户端 | **httpx**（异步） | 调图服务（回查子图）、文档型 RAG、工艺管理只读 REST |
@@ -61,7 +61,7 @@
 ### 2.2 为什么 L2 用策略模式 + async 编排，而非 LangGraph ReAct
 
 - L1 用 LangGraph 是因为**多步规划**——模型需根据上一步工具返回决定下一步，要对每步做权限拦截、trace、`recursion_limit`（[L1 §2.2](../L1诊断型Agent/L1诊断型Agent-实现方案.md)）。
-- L2 的步骤是**固定的**：取证据（`subgraph_ref` 回查）→ 检索文档（路线 B）→ LLM 综合成草稿。没有"模型自主决定下一步查什么"的开放性——用 async 函数编排更简洁、更可控、更易测试。
+- L2 的步骤是**固定的**：取证据（`subgraph_ref` 回查）-> 检索文档（路线 B）-> LLM 综合成草稿。没有"模型自主决定下一步查什么"的开放性——用 async 函数编排更简洁、更可控、更易测试。
 - 不同草稿类型（返工单/8D/SOP）的差异用**策略模式**（每个 `DraftBuilder` 一个类）表达，而非用 LangGraph 状态图分支——新增草稿类型只需加一个 `DraftBuilder`（OCP）。
 - 若未来某草稿类型变复杂（如 8D 需多段递进生成），可**局部**引入 LangGraph，不影响整体编排。
 
@@ -105,13 +105,13 @@
 
   ┌──────────────────────────────────────────────────────────────────┐
   │ confirmation gate（L2 服务之外）：                                  │
-  │   工程师 UI 展示 Draft + 证据链 → 驳回(归档) / 确认(调 MES 正式 API) │
+  │   工程师 UI 展示 Draft + 证据链 -> 驳回(归档) / 确认(调 MES 正式 API) │
   │   确认后：返工上下文 / 工单管理 / 质量上下文 正常应用服务落库        │
   │   （聚合根不变式 + 事务发件箱）—— L2 服务不参与                     │
   └──────────────────────────────────────────────────────────────────┘
 
   主动触发（SOP 草拟）：
-    aiokafka 订阅 ProcessRouteActivated → DraftService.draft(SOP)
+    aiokafka 订阅 ProcessRouteActivated -> DraftService.draft(SOP)
 ```
 
 ### 3.1 关键设计决策
@@ -163,9 +163,9 @@ DraftRequest(diagnosis_report, draft_kind, tenant)
 DraftService.draft()
   ├─ 1. 按 draft_kind 分派到对应 DraftBuilder（策略模式）
   ├─ 2. builder.build()：
-  │     ├─ fetch_subgraph_nodes(subgraph_ref) → 证据节点
-  │     ├─ search_docs(...) → 文档知识（8D 历史 / 现有 SOP）
-  │     ├─ LLM.with_structured_output(Draft) → 综合成草稿
+  │     ├─ fetch_subgraph_nodes(subgraph_ref) -> 证据节点
+  │     ├─ search_docs(...) -> 文档知识（8D 历史 / 现有 SOP）
+  │     ├─ LLM.with_structured_output(Draft) -> 综合成草稿
   │     └─ Draft.requires_confirmation = True（恒成立）
   └─ 3. 落草稿存档表 + 返回 Draft（不落 MES 业务库）
 ```
@@ -240,15 +240,15 @@ L2 产出 Draft（requires_confirmation=True）
         ▼  返回给前端
 工程师 UI：展示 Draft + 证据链（evidence_refs 可点开回溯图节点/L1 诊断）
         │
-        ├─ 驳回 → 草稿归档（draft_archive 表），不落 MES 业务库
+        ├─ 驳回 -> 草稿归档（draft_archive 表），不落 MES 业务库
         │
-        └─ 确认 → 前端调 MES 正式 API（L2 服务不参与）：
-                  │  返工单 → 返工上下文"人工决策生成工单"应用服务（🔴 端点待对齐）
-                  │  8D    → 质量上下文 8D 发布应用服务（🔴 待定义）
-                  │  SOP   → 工艺管理上下文 SOP 发布应用服务（🔴 待定义）
+        └─ 确认 -> 前端调 MES 正式 API（L2 服务不参与）：
+                  │  返工单 -> 返工上下文"人工决策生成工单"应用服务（🔴 端点待对齐）
+                  │  8D    -> 质量上下文 8D 发布应用服务（🔴 待定义）
+                  │  SOP   -> 工艺管理上下文 SOP 发布应用服务（🔴 待定义）
                   ▼
-          聚合根不变式校验 + 事务发件箱 → 落库 + 发布领域事件
-                  │  返工单 → brework.order.released
+          聚合根不变式校验 + 事务发件箱 -> 落库 + 发布领域事件
+                  │  返工单 -> brework.order.released
                   ▼
           过点执行上下文消费 brework.order.released 做批量再入校验（INV-07）
 ```
@@ -258,9 +258,9 @@ L2 产出 Draft（requires_confirmation=True）
 
 ### 5.6 与 L1、RAG 的衔接
 
-- **L1 → L2**：L1 诊断产出的 `DiagnosisReport` 带 `subgraph_ref`（[结合方案 §4.2](../../RAG与Agent协同/GraphRAG与Agent结合-落地方案.md)）。L2 入参 `DraftRequest.diagnosis_report` 即它。L1→L2 的触发方式（自动续接 vs 人工发起）🔴 待定（§11）。
-- **L2 → 图**：只按 `subgraph_ref` 回查（`fetch_subgraph_nodes`），不调 `query_traceability_graph`。图的 `/rag/trace/subgraph/{ref}` 是 L2 专用的只读回查端点（图服务需补，🔴）。
-- **L2 → 文档型 RAG**：`search_docs(query, route_version_filter)` 调路线 B，版本过滤对齐 `route_version`（[结合方案 §4.4](../../RAG与Agent协同/GraphRAG与Agent结合-落地方案.md)）。
+- **L1 -> L2**：L1 诊断产出的 `DiagnosisReport` 带 `subgraph_ref`（[结合方案 §4.2](../../RAG与Agent协同/GraphRAG与Agent结合-落地方案.md)）。L2 入参 `DraftRequest.diagnosis_report` 即它。L1->L2 的触发方式（自动续接 vs 人工发起）🔴 待定（§11）。
+- **L2 -> 图**：只按 `subgraph_ref` 回查（`fetch_subgraph_nodes`），不调 `query_traceability_graph`。图的 `/rag/trace/subgraph/{ref}` 是 L2 专用的只读回查端点（图服务需补，🔴）。
+- **L2 -> 文档型 RAG**：`search_docs(query, route_version_filter)` 调路线 B，版本过滤对齐 `route_version`（[结合方案 §4.4](../../RAG与Agent协同/GraphRAG与Agent结合-落地方案.md)）。
 
 ---
 
@@ -542,8 +542,8 @@ class ProcessRouteActivatedListener:
 
 ### 8.3 兜底
 
-- **置信度兜底**：`confidence < 0.5` → `needs_review=True`，草稿标记"需复核"才推工程师，不直接进 confirmation gate 下达流程。
-- **证据缺失兜底**：`subgraph_ref` 回查为空（图投影滞后）→ 草稿标 `needs_review`，`intent` 注明"证据不完整，请人工补齐"，不硬凑草稿。
+- **置信度兜底**：`confidence < 0.5` -> `needs_review=True`，草稿标记"需复核"才推工程师，不直接进 confirmation gate 下达流程。
+- **证据缺失兜底**：`subgraph_ref` 回查为空（图投影滞后）-> 草稿标 `needs_review`，`intent` 注明"证据不完整，请人工补齐"，不硬凑草稿。
 - **LLM 输出兜底**：`Draft` 经 Pydantic 校验，不符合 schema 判失败重试；重试仍失败返回"草拟失败转人工"，不硬答。
 - **confirmation gate 兜底**：草稿 `requires_confirmation` 恒 `True`，前端无法绕过确认直接下达；L2 服务不持有写 client，即使被绕过也无法落库。
 
@@ -553,14 +553,14 @@ class ProcessRouteActivatedListener:
 
 ### 阶段一：骨架与返工单草拟（2 周）
 1. 搭 L2 模块骨架（`draft_service` / `builders/` / `acl/`），对齐 §6 包结构。
-2. 实现 `ReworkOrderDraftBuilder`（§7.2），验证 L1 诊断 → 返工单草稿闭环。
+2. 实现 `ReworkOrderDraftBuilder`（§7.2），验证 L1 诊断 -> 返工单草稿闭环。
 3. 实现 `NoWriteClientGate` 启动断言（§7.5），验证 L2 无写 client。
 4. 实现图服务只读端点 `/rag/trace/subgraph/{ref}`（🔴 图服务侧待补）。
 
 ### 阶段二：8D / SOP 草拟 + 文档型 RAG 协同（2 周）
 5. 对接路线 B `search_docs`，实现 `EightDDraftBuilder`（§7.3）。
 6. 实现 `SopDraftBuilder` + 订阅 `ProcessRouteActivated` 主动触发（§7.4/§7.7）。
-7. 验证版本透传：L1 `route_version` → `Draft.route_version` → 文档检索版本过滤。
+7. 验证版本透传：L1 `route_version` -> `Draft.route_version` -> 文档检索版本过滤。
 
 ### 阶段三：confirmation gate + 存档（2 周）
 8. 实现草稿存档表 + 工程师 UI 展示草稿 + 证据链回溯。
@@ -582,8 +582,8 @@ class ProcessRouteActivatedListener:
 - [ ] `Draft.route_version` 透传自 L1 `DiagnosisReport`，L2 不自行指定版本；返工单引用 `ReworkRoute`（🔴 版本规则待明确）。
 - [ ] 返工单草稿字段对齐 `BatchReworkOrder`：`source_work_order_id` / `affected_sn_list` / `reentry_point` / `rework_route_ref`。
 - [ ] `DraftRequest.tenant` 透传到图回查 / 文档检索 / 草稿落库全程。
-- [ ] `confidence < 0.5` → `needs_review=True`，不进 confirmation gate 下达流程。
-- [ ] 证据缺失（`subgraph_ref` 回查为空）→ 草稿标 `needs_review`，不硬凑。
+- [ ] `confidence < 0.5` -> `needs_review=True`，不进 confirmation gate 下达流程。
+- [ ] 证据缺失（`subgraph_ref` 回查为空）-> 草稿标 `needs_review`，不硬凑。
 - [ ] LLM 输出经 Pydantic `Draft` 校验，不符合 schema 判失败重试，重试仍失败转人工。
 - [ ] 主动触发（SOP）只订阅 `process.route.lifecycle` 只读事件，不消费写命令；主动草拟仍需人确认下达。
 - [ ] 每份草稿落 `draft_trace`，`evidence_refs` + `subgraph_ref` 让证据链可点开回溯。
@@ -596,12 +596,12 @@ class ProcessRouteActivatedListener:
 1. **🔴 返工工艺路线 `ReworkRoute` 的版本规则**：返工走独立路线（非正常 `RouteVersion`），但 `ReworkRoute` 是否有版本生命周期？L2 草拟返工单时如何选择 `rework_route_ref`？需工艺管理上下文明确。
 2. **🔴 8D 模板归属**：8D 报告的字段模板（问题描述/根因/containment/纠正措施）由质量上下文定义标准模板，还是 L2 自由生成？影响 `EightDDraftBuilder` 的 prompt 结构。
 3. **🔴 confirmation gate 审批人角色矩阵**：返工单 / 8D / SOP 各自的确认审批人是谁（线长 / 工艺工程师 / 质量工程师 / 生产主管）？需与权限模型对齐。返工上下文 §1.1 提到"生产主管/质量主管/工程师通过终端决策"。
-4. **🔴 L1→L2 触发方式**：L1 诊断完成后，L2 草拟是自动续接还是人工发起？自动续接省一步但可能草拟出不需要的处置；人工发起稳妥。
+4. **🔴 L1->L2 触发方式**：L1 诊断完成后，L2 草拟是自动续接还是人工发起？自动续接省一步但可能草拟出不需要的处置；人工发起稳妥。
 5. **🔴 `subgraph_ref` 跨服务生命周期**：`subgraph_ref` 落在 rag-service，L2 在 agent-service 回查——保留多久？是否随工单/草稿归档？跨服务引用的清理策略需定义。
 6. **🔴 草稿落库的应用服务契约**：返工上下文"人工决策生成工单"的 REST 端点 / 命令名；质量上下文 8D 发布应用服务（8D 上下文尚未定义）；工艺管理 SOP 发布应用服务。L2 草稿 `payload` 要能映射到这些应用服务入参。
 7. **🔴 图服务只读回查端点**：`/rag/trace/subgraph/{ref}` 在图方案 §9.8 未定义，需图服务侧补一个按 `subgraph_ref` 返回子图节点的只读端点。
 8. **🔴 草稿保留与归档策略**：驳回的草稿保留多久？确认下达的草稿是否随工单归档？影响 `draft_archive` 表的清理策略。
-9. **🔴 质量上下文批量异常事件**：返工上下文 §1.1 标注"质量上下文批量异常事件未定义"——L2 返工单草拟若由批量异常触发（而非 L1 诊断），需等该事件定义。MVP 走"L1 诊断 → 人工发起返工单草拟"通道。
+9. **🔴 质量上下文批量异常事件**：返工上下文 §1.1 标注"质量上下文批量异常事件未定义"——L2 返工单草拟若由批量异常触发（而非 L1 诊断），需等该事件定义。MVP 走"L1 诊断 -> 人工发起返工单草拟"通道。
 
 ---
 
@@ -617,10 +617,10 @@ A：不重复，是接力。L1 是多步只读推理，给"根因假设 + 证据
 A：两个原因。一是证据已被 L1 验证过版本/权限——L1 调图时版本由 `SNAPSHOT_OF_ROUTE` 结构性锁定、权限由 `tenant_scope WHERE` 前置过滤，L2 回查的是同一份已验证子图，不重复承担版本兜底责任。二是 L2 职责是"草拟"不是"检索"——开放图检索归 L1，L2 只按引用回查，职责清晰（SRP），也避免 L2 阶段重复检索的延迟。
 
 **Q：返工单草稿的关键字段从哪来？**
-A：从图的追溯子图。`source_work_order_id` 来自 `WipUnit.BELONGS_TO → WorkOrder`，`affected_sn_list` 来自 `BatchReworkOrder` 的 SN 清单（或 `CONSUMED_BATCH` 反向扩展），`reentry_point` 从 L1 诊断的根因假设推。返工工艺路线 `ReworkRoute` 是返工专用路线（独立于正常 `RouteVersion`），从工艺管理上下文只读引用。这些都靠 `subgraph_ref` 回查图节点提取，L2 不编造。
+A：从图的追溯子图。`source_work_order_id` 来自 `WipUnit.BELONGS_TO -> WorkOrder`，`affected_sn_list` 来自 `BatchReworkOrder` 的 SN 清单（或 `CONSUMED_BATCH` 反向扩展），`reentry_point` 从 L1 诊断的根因假设推。返工工艺路线 `ReworkRoute` 是返工专用路线（独立于正常 `RouteVersion`），从工艺管理上下文只读引用。这些都靠 `subgraph_ref` 回查图节点提取，L2 不编造。
 
 **Q：为什么 L2 用策略模式 + async 编排，不用 LangGraph？**
-A：L1 用 LangGraph 是因为多步开放规划（模型自主决定下一步查什么）。L2 步骤固定（取证据 → 检索文档 → 综合），没有开放性，用 async 函数编排更简洁可控。不同草稿类型的差异用策略模式（每个 `DraftBuilder` 一个类）表达，新增类型只加 builder 不改 `DraftService`（OCP）。若未来某草稿变复杂可局部引入 LangGraph，不影响整体。
+A：L1 用 LangGraph 是因为多步开放规划（模型自主决定下一步查什么）。L2 步骤固定（取证据 -> 检索文档 -> 综合），没有开放性，用 async 函数编排更简洁可控。不同草稿类型的差异用策略模式（每个 `DraftBuilder` 一个类）表达，新增类型只加 builder 不改 `DraftService`（OCP）。若未来某草稿变复杂可局部引入 LangGraph，不影响整体。
 
 **Q：工艺变更后自动草拟 SOP，会不会乱发？**
 A：不会。SOP 草拟订阅 `ProcessRouteActivated` 只读事件，产出草稿推送给工艺工程师，仍需人确认下达——不自动落库。L2 不持有写 client，即使主动触发也止步于草稿。主动触发的价值是"工艺升版后及时提醒更新 SOP"，不是"自动改 SOP"。
@@ -632,4 +632,4 @@ A：这是设计阶段的引入规划，不是已落地。重点是三个架构�
 
 ## 13. 一句话定位
 
-"L2 草稿型 Agent 用 Python + 策略模式把 L1 诊断结果升级成可执行处置草稿——按 `subgraph_ref` 回查图证据不重查图、按草稿类型分派 `DraftBuilder` 综合成返工单/8D/SOP、`requires_confirmation` 恒成立且 L2 服务不持有任何写 client、下达走人确认 + 返工/工单/质量上下文正常应用服务不旁路写——全程不进过点主事务、版本透传自 L1 证据、写闸门 100% 在人手里，是 MES 写红线下'查完 → 诊断 → 草拟处置'链路的安全落地形态。"
+"L2 草稿型 Agent 用 Python + 策略模式把 L1 诊断结果升级成可执行处置草稿——按 `subgraph_ref` 回查图证据不重查图、按草稿类型分派 `DraftBuilder` 综合成返工单/8D/SOP、`requires_confirmation` 恒成立且 L2 服务不持有任何写 client、下达走人确认 + 返工/工单/质量上下文正常应用服务不旁路写——全程不进过点主事务、版本透传自 L1 证据、写闸门 100% 在人手里，是 MES 写红线下'查完 -> 诊断 -> 草拟处置'链路的安全落地形态。"
