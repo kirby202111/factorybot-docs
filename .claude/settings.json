@@ -11,7 +11,11 @@
       "Bash(python -c ' *)",
       "Bash(py -c \"import sys; f=open\\(r'd:\\\\Code\\\\factorybot-docs\\\\.claude\\\\skills\\\\event-storming\\\\SKILL.md',encoding='utf-8'\\); lines=f.readlines\\(\\); print\\(repr\\(lines[63]\\)\\); print\\(repr\\(lines[156]\\)\\)\")",
       "Bash(python -c \"print\\(1\\)\")",
-      "Bash(echo \"exit=$?\")"
+      "Bash(echo \"exit=$?\")",
+      "Bash(grep -rn \"wip\\\\.kit\\\\.status\" .)",
+      "Bash(grep -rn \"KitStatus\\\\|kit_ready\\\\|missing_items\\\\|齐套\" 生产执行服务/领域建模/在制品追踪上下文.md 生产执行服务/事件风暴/在制品追踪上下文.md)",
+      "Bash(grep -rn \"wip\\\\.\\\\*\" 生产执行服务/领域建模/过点执行上下文.md 生产执行服务/事件风暴/过点执行上下文.md 生产执行服务/领域建模/排程上下文.md 生产执行服务/事件风暴/排程上下文.md)",
+      "Bash(grep -rn \"在制品追踪.*KitStatus\\\\|在制品追踪.*齐套\\\\|KitStatus.*在制品追踪\\\\|齐套.*在制品追踪\" 生产执行服务/领域建模/过点执行上下文.md 生产执行服务/事件风暴/过点执行上下文.md 生产执行服务/领域建模/排程上下文.md 生产执行服务/事件风暴/排程上下文.md 制造资源服务/领域建模/物料上下文.md 制造资源服务/事件风暴/物料上下文.md 领域总览.md)"
     ]
   }
 }
