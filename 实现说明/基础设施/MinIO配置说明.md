@@ -321,7 +321,102 @@ Range: bytes=-8192
 
 ---
 
-## 8. 生命周期规则
+## 8. 预览访问模式
+
+预览按数据类型分流为两类场景，MinIO 在两边都只负责"吐字节"，区别在中间有无业务代理层。通用预签名 GET / CORS / Range 基础见 §7，本节给出两种访问模式的 MinIO 用法与选型。
+
+| 场景 | 方案 | 典型数据 |
+|---|---|---|
+| 强权限、生效版控制、水印审计 | A 后端代理流式 | SOP / 工艺图纸 / 质检报告（PDF） |
+| 内网、高频、大文件 | B 预签名直读 | AOI 图像 / 烧录日志 |
+
+### 8.1 方案 A：后端代理流式预览（SOP / 工艺文档）
+
+后端用 `S3Client.getObject()` 流式取对象，边读边写响应。权限校验、生效版解析、审计都在调 MinIO 之前完成（业务层职责），MinIO 只负责吐字节。
+
+```java
+@GetMapping("/sop/{docId}/preview")
+public void preview(@PathVariable String docId, HttpServletResponse response)
+        throws IOException {
+    // 1. 查文档主数据（MySQL），解析当前生效版的 object_key + version_id（业务层职责）
+    SopVersion active = sopService.resolveActiveVersion(docId);
+    // 2. 权限校验 + 审计（业务层职责，略）
+
+    // 3. 从 MinIO 流式取 PDF，显式指定生效版本
+    GetObjectRequest req = GetObjectRequest.builder()
+        .bucket(bucket)
+        .key(active.getObjectKey())
+        .versionId(active.getVersionId())
+        .build();
+    try (ResponseInputStream<GetObjectResponse> in = s3Client.getObject(req)) {
+        GetObjectResponse meta = in.response();
+        response.setContentType("application/pdf");
+        response.setHeader("Content-Disposition", "inline");
+        response.setContentLengthLong(meta.contentLength());
+        in.transferTo(response.getOutputStream());
+    }
+}
+```
+
+关键点：
+
+- `versionId` 显式取生效版，不取 `latest`（latest 可能是草稿），见 §8.3。
+- `Content-Disposition: inline` 让浏览器原生 PDF viewer 预览，不触发下载。
+- `transferTo` 流式转发，几十 MB 图纸也不进内存。
+- 预签名 URL 过期问题在此方案不存在（URL 不下发前端）。
+
+### 8.2 方案 B：预签名直读预览（设备大文件）
+
+后端用 `S3Presigner` 生成预签名 GET URL（生成方式见 §7.1），前端直接加载，浏览器直连 MinIO。
+
+前端：
+
+```html
+<!-- 图片 -->
+<img src="<presigned-url>">
+<!-- PDF -->
+<iframe src="<presigned-url>" width="100%" height="800"></iframe>
+```
+
+关键点：
+
+- 预签名 URL 有过期，`<iframe>` 长期嵌入需前端定时刷新（SOP 长开屏不建议用此方案）。
+- 大 PDF 的 Range 优势：浏览器原生 PDF viewer 发 `Range` 分段加载，直读时浏览器直接对 MinIO 发 Range，MinIO 原生支持 206，首页秒开。方案 A 代理要自己处理 Range / 206，较复杂。
+
+### 8.3 配合对象版本控制（SOP 版本生效）
+
+SOP 会更新，需保留历史版并指定生效版。MinIO bucket versioning 提供对象级版本：
+
+```bash
+mc version enable myminio/factorybot-docs
+```
+
+开启后同 key 多次上传产生不同 `version_id`。**版本生效语义（哪份是当前生效版、审批、回滚）归业务主数据（MySQL），不在 MinIO**；MinIO 只存文件本体 + `version_id`。业务主数据样例：
+
+```text
+doc_id | version_no | status     | object_key       | version_id | sha256 | effective_from | effective_to
+SOP-01 | 1.0        | SUPERSEDED | sop/SOP-01.pdf   | v1...      | ...    | 2026-01-01     | 2026-06-30
+SOP-01 | 2.0        | EFFECTIVE  | sop/SOP-01.pdf   | v2...      | ...    | 2026-07-01     | null
+```
+
+预览时 `resolveActiveVersion(docId)` 查 `status=EFFECTIVE`（或当前时间落在 effective 区间）拿到 `version_id`，再 `getObject` 显式取该版。工位永远看生效版，历史版可追溯、可回滚，不会被误预览。
+
+### 8.4 选型小结
+
+| 维度 | 方案 A 代理流式 | 方案 B 预签名直读 |
+|---|---|---|
+| 适用 | SOP / 工艺文档 | AOI 图 / 烧录日志 |
+| 权限/生效版/审计 | 代理层统一做 | 签发环节做 |
+| 流量 | 过业务服务器 | 不过业务服务器 |
+| 大文件分段 | 需自己处理 Range/206 | 浏览器原生 Range |
+| URL 过期 | 无 | 有，需刷新 |
+| MinIO 用法 | `getObject(versionId)` + inline | `presignGetObject` |
+
+两类不是二选一，按数据类型分流：SOP 走 A，设备大文件走 B。
+
+---
+
+## 9. 生命周期规则
 
 按 §3.2 的前缀与保留期配置 bucket 生命周期，到期自动删除，对齐领域模型的 `retain_until`。
 
@@ -363,7 +458,7 @@ mc ilm import myminio/factorybot-artifacts lifecycle.json
 
 ---
 
-## 9. 监控与运维基线
+## 10. 监控与运维基线
 
 需要关注：
 
@@ -388,28 +483,28 @@ mc ilm import myminio/factorybot-artifacts lifecycle.json
 
 ---
 
-## 10. 初始化检查清单
+## 11. 初始化检查清单
 
-### 10.1 MinIO Server
+### 11.1 MinIO Server
 
 - [ ] 生产环境采用单节点纠删码（4 盘起）或分布式形态。
 - [ ] `MINIO_ROOT_PASSWORD` 为强随机密码。
 - [ ] API 端口（9000）与 Console 端口（9001）已规划，Console 不暴露公网。
 - [ ] 数据盘容量已规划，按数据类型保留期估算。
 
-### 10.2 Bucket 与权限
+### 11.2 Bucket 与权限
 
 - [ ] 业务 bucket 已显式创建（如 `factorybot-artifacts`）。
 - [ ] 业务专用 access key 已创建，不使用 root 凭证。
 - [ ] Bucket Policy 已绑定最小权限。
 - [ ] 前缀分区方案已落地（`deadletter/` `aoi-image/` `log/` `curve/`）。
 
-### 10.3 生命周期与 CORS
+### 11.3 生命周期与 CORS
 
 - [ ] 生命周期规则按前缀配置，保留期对齐 `retain_until`。
 - [ ] 需要前端 canvas 读取像素的场景已配置 CORS。
 
-### 10.4 Spring 集成
+### 11.4 Spring 集成
 
 - [ ] 已配置 AWS S3 SDK v2 依赖。
 - [ ] 已配置 `OBJECT_STORAGE_ENDPOINT` / `ACCESS_KEY` / `SECRET_KEY` / `BUCKET`。
@@ -420,3 +515,11 @@ mc ilm import myminio/factorybot-artifacts lifecycle.json
 - [ ] 上传成功 + `sha256` 校验通过后才 `seal` 报文。
 - [ ] 预签名 GET 过期时间已配置，过期降级已处理。
 - [ ] 签发预签名 URL 前已做业务权限校验与审计。
+
+### 11.5 预览与版本控制
+
+- [ ] SOP / 文档 bucket 已开启 versioning。
+- [ ] 预览显式指定 `version_id` 取生效版，不取 `latest`。
+- [ ] 方案 A 代理响应已设 `Content-Disposition: inline`。
+- [ ] 方案 A 代理流式转发，不将整文件读入内存。
+- [ ] 方案 B 预签名 URL 过期降级已处理（见 §7.5）。
