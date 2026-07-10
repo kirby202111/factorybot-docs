@@ -146,7 +146,7 @@
 - **事件驱动增量 + 位点管理**：消费者维护 `consumer offset` 落 MySQL，重启从断点续跑；`event_id` 幂等表保证重复投递不产生重复边（§5.3）。
 - **检索与投影分离**：`GraphProjector`（写图）与 `GraphRetriever`（读图）解耦，投影滞后不阻塞检索——检索带 `as_of` 时间窗，滞后时段内低置信度兜底（§10.3）。
 - **ACL 防腐层**：降级查询各上下文 REST 时经 ACL 适配，外部 DTO -> 内部视图（`TraceNode` / `ProcessVersionSnapshot`），外部 schema 变化不污染检索核心。符合 CLAUDE.md 的低耦合 / ACL 约束。
-- **多租户隔离权衡（属性过滤 vs 分库）**：MVP 采用单库 + `tenant_scope` 属性前置过滤（实现简单、跨车间联合追溯方便）。⚠️ 风险：某条 Cypher 漏写 `WHERE tenant_scope` 即泄露；大车间数据量影响其他车间查询性能。多车间规模扩大后，可演进为 Neo4j 5.x 多 database 按租户分库（物理隔离、泄露面归零），代价是跨车间联合查询需跨库。🔴 单库 vs 分库的切换时机待定（按实际车间数与数据量评估）。
+- **多租户隔离权衡（属性过滤 vs 分库）**：MVP 采用单库 + `tenant_scope` 属性前置过滤（实现简单、跨车间联合追溯方便）。⚠️ 风险：某条 Cypher 漏写 `WHERE tenant_scope` 即泄露；大车间数据量影响其他车间查询性能。多车间规模扩大后，可演进为 Neo4j 5.x 多 database 按租户分库（物理隔离、泄露面归零），代价是跨车间联合查询需跨库。MVP 单库 + 预留按 tenant 路由的 DB 命名/Projector 扩展点，切换分库时机按上线后车间数与数据量观测定（不在 MVP 硬定阈值）。
 
 ---
 
@@ -156,7 +156,7 @@
 
 ### 4.1 节点类型（按限界上下文）
 
-每个节点带统一属性：`node_id`（上下文内唯一）、`bounded_context`、`tenant_scope`（workshop/line，权限过滤用，🔴 来源待确认：事件 payload 与 envelope 均未含，需明确取自 Kafka header 租户头或工单/在制品投影）、`source_event_id`（创建该节点的事件，溯源用）、`occurred_at`、`version`（仅版本化聚合）。
+每个节点带统一属性：`node_id`（上下文内唯一）、`bounded_context`、`tenant_scope`（workshop/line，权限过滤用，取自事件 envelope metadata（workshop/line 由发布事件的聚合根在 outbox 投递时填入，随事件持久化，图回放重建不丢；覆盖生产类与台账类所有节点，投影免反查工单））、`source_event_id`（创建该节点的事件，溯源用）、`occurred_at`、`version`（仅版本化聚合）。
 
 | 限界上下文 | 节点标签 | 源聚合根 | 关键属性 | 版本化 |
 |-----------|---------|---------|---------|--------|
@@ -342,7 +342,7 @@ graph LR
 |---------|-------------------|----------------------|
 | `WorkOrderCreated` / `WorkOrderBindingLocked` | 工单管理 `wo.*` | upsert `WorkOrder`；建 `BINDS_BOM{bom_version}` -> `Bom`、`BINDS_ROUTE{route_version}` -> `RouteVersion` |
 | `WipUnitRegistered` | 在制品执行 `wip.*` | upsert `WipUnit{sn, route_version}`；建 `BELONGS_TO` -> `WorkOrder` |
-| `CheckpointScanned` / `CheckpointReleased` / `CheckpointBlocked` | 在制品执行 `mes.checkpoint.lifecycle` | 三事件合投同一 `CheckpointRecord`（MERGE by node_id）：Scanned 补 `equipment_id`/`scanned_by`、Released 补 `route_version`/`decision=PASS`、Blocked 补 `decision=BLOCK`/`blocking_reason`；建 `FOR_UNIT` -> `WipUnit`、`USED_EQUIPMENT` -> `Asset`（equipment_id 来自 Scanned）；**不建 NEXT 边**（§4.5，查询时排序）。🔴 `SNAPSHOT_OF_ROUTE` 边需 `route_id`，但事件 payload 仅 `route_version_id` 无 `route_id`，待在制品执行上下文补 `route_id` 入 payload（或从 `route_version_id` 解析） |
+| `CheckpointScanned` / `CheckpointReleased` / `CheckpointBlocked` | 在制品执行 `mes.checkpoint.lifecycle` | 三事件合投同一 `CheckpointRecord`（MERGE by node_id）：Scanned 补 `equipment_id`/`scanned_by`、Released 补 `route_version`/`decision=PASS`、Blocked 补 `decision=BLOCK`/`blocking_reason`；建 `FOR_UNIT` -> `WipUnit`、`USED_EQUIPMENT` -> `Asset`（equipment_id 来自 Scanned）；**不建 NEXT 边**（§4.5，查询时排序）。🔴 `SNAPSHOT_OF_ROUTE` 边需 `route_id`，而 `CheckpointReleased` payload 仅 `route_version_id`--已决定推动在制品执行上下文将 `route_id` 补入 payload，维持 `RouteVersion` 节点 `{route_id, route_version}` 联合键（领域改造登记，同 `CONSUMED_BATCH` 的 `lot_no`） |
 | `TestResultStructured` | 在制品执行 `mes.testresult.structured` | upsert `TestResult`；建 `PRODUCED_TESTRESULT` ← `CheckpointRecord` |
 | `RoutingProgressed` | 在制品执行 `mes.routing.progress` | upsert `RoutingProgress{current_step}`；建 `AT_STEP` -> `RouteStep` |
 | `QualityVerdictIssued` | 质量 `quality.*` | upsert `QualityVerdict`；建 `JUDGED_BY` ← `TestResult`、`CITES_DEFECT` -> `DefectCatalog`、`UNDER_RULE{rule_version}` -> `QualityGateRule` |
@@ -700,7 +700,7 @@ class ProcessManagementAclClient:
 
 - 外部 DTO 不进检索核心，只暴露 `RouteVersionView`——防腐层核心职责（CLAUDE.md ACL 约束）。
 - 降级查询是兜底，不进过点主事务（§5.3），超时降级为低置信度而非阻塞。
-- **降级查询必须带 `as_of` 时间窗**：consumption/batches/verdicts/checkpoints 等降级查询查回的是"当时状态"而非"当前状态"，否则破坏版本快照不可变（§4.4）。例如 `fetch_consumption` 带 `as_of` 只取过点当时的消耗明细，后补录消耗不混入。🔴 各上下文只读 REST 是否支持 `as_of` 历史查询待确认（实现方案 §7.3 契约表）。
+- **降级查询必须带 `as_of` 时间窗**：consumption/batches/verdicts/checkpoints 等降级查询查回的是"当时状态"而非"当前状态"，否则破坏版本快照不可变（§4.4）。例如 `fetch_consumption` 带 `as_of` 只取过点当时的消耗明细，后补录消耗不混入。降级查询改由 RAG 侧本地快照表承载--消费事件时把消耗明细/判定快照落本地表，降级查本地表带 `as_of`，免改各上下文只读 REST（实现方案 §7.3）。
 
 ### 7.4 版本一致性保证
 
@@ -1071,7 +1071,7 @@ async def expand(
 - [ ] 所有答案带 disclaimer：辅助假设，最终处置需工程师确认。
 - [ ] 工装 `EQUIPPED_WITH_FIXTURE` 由台账上下文投影（equipment -> fixture），不依赖过点事件 `fixture_id`（过点事件无此字段）。
 - [ ] `CONSUMED_BATCH` 边走降级查询补齐（`MaterialConsumed` 无 `lot_no`，🔴 待物料上下文补 payload）；`NEXT` 时序不物化为边，检索时按 `occurred_at` 排序。
-- [ ] 降级查询带 `as_of` 时间窗，查回当时状态而非当前状态（🔴 REST 是否支持历史查询待确认）。
+- [ ] 降级查询带 `as_of` 时间窗，查回当时状态而非当前状态；由 RAG 侧本地快照表承载，免改各上下文 REST（§7.3）。
 
 ---
 

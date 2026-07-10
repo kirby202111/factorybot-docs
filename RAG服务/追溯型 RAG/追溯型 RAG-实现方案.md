@@ -182,7 +182,7 @@ dependencies = [
 - **检索与投影分离**：`GraphProjector`（写图）与 `GraphRetriever`（读图）解耦，投影滞后不阻塞检索——检索带 `as_of` 时间窗，滞后时段内低置信度兜底（§10.3）。
 - **ACL 防腐层**：降级查询各上下文 REST 时经 ACL 适配，外部 DTO -> 内部视图（`TraceNode` / `ProcessVersionSnapshot`），外部 schema 变化不污染检索核心。符合 CLAUDE.md 的低耦合 / ACL 约束。
 - **投影器按上下文隔离**：每个上下文一个 `ProjectionHandler`，互不干涉——与在制品执行上下文 §2.7"只消费不重发、按主题前缀隔离"完全同构（ISP/SRP）
-- **多租户隔离权衡**：MVP 单库 + `tenant_scope` 前置过滤；多车间规模扩大后可演进为 Neo4j 多 database 分库（物理隔离），🔴 切换时机待定（详见 [详细设计](./追溯型 RAG-详细设计.md) §3.1）。。
+- **多租户隔离权衡**：MVP 单库 + `tenant_scope` 前置过滤；多车间规模扩大后可演进为 Neo4j 多 database 分库（物理隔离），MVP 单库 + 预留按 tenant 路由的 DB 命名/Projector 扩展点，切换分库时机按上线后车间数与数据量观测定（详见 [详细设计](./追溯型 RAG-详细设计.md) §3.1）。。
 
 ---
 
@@ -190,7 +190,7 @@ dependencies = [
 
 图谱的节点 = 各上下文的**聚合根实例**，边 = 聚合之间的**跨上下文引用** + **时序流转**。本节聚焦 MVP 4 上下文 + 追溯骨架节点，全 14 上下文建模见 [详细设计](./追溯型 RAG-详细设计.md) §4。
 
-每个节点带统一属性：`node_id`（上下文内唯一）、`bounded_context`、`tenant_scope`（workshop/line，权限过滤用，🔴 来源待确认：事件 payload 与 envelope 均未含，需明确取自 Kafka header 租户头或工单/在制品投影）、`source_event_id`（创建该节点的事件，溯源用）、`occurred_at`、`version`（仅版本化聚合）。
+每个节点带统一属性：`node_id`（上下文内唯一）、`bounded_context`、`tenant_scope`（workshop/line，权限过滤用，取自事件 envelope metadata（workshop/line 由发布事件的聚合根在 outbox 投递时填入，随事件持久化，图回放重建不丢；覆盖生产类与台账类所有节点，投影免反查工单））、`source_event_id`（创建该节点的事件，溯源用）、`occurred_at`、`version`（仅版本化聚合）。
 
 ### 4.1 节点类型（MVP）
 
@@ -688,7 +688,7 @@ class MaterialAclClient:
 
 - 外部 DTO 不进检索核心，只暴露 `RouteVersionView` / `ConsumptionView`——防腐层核心职责（CLAUDE.md ACL 约束）。
 - 降级查询是兜底，不进过点主事务（§5.3），超时降级为低置信度而非阻塞。
-- **降级查询带 `as_of` 时间窗**：consumption/batches/verdicts 等降级查回"当时状态"而非"当前状态"，否则破坏版本快照（§4.4）。🔴 各上下文只读 REST 是否支持 `as_of` 历史查询待确认。
+- **降级查询带 `as_of` 时间窗**：consumption/batches/verdicts 等降级查回"当时状态"而非"当前状态"，否则破坏版本快照（§4.4）。`as_of` 历史查询不走各上下文 REST（REST 仅补当前态），改由 RAG 侧消费事件时落本地快照表--`MaterialConsumed`（消耗明细，🔴 仍缺 `lot_no` 仅 sn 级）、`QualityVerdictIssued`（判定）、`InventoryChanged`（批次/供应商）；检索带 `as_of` 查本地表取当时快照，免改各上下文只读 REST。表结构 DDL 后续补。
 
 ### 7.4 版本一致性保证
 
@@ -860,7 +860,7 @@ class CheckpointProjectionHandler:
             scanned_by=p.get("scanned_by"), at=p["occurred_at"],
             tenant=p["tenant_scope"], eid=e.event_id,
         )
-        # 版本快照边：指向当时工艺版本（INV-CX-02，不取当前生效版）
+        # 版本快照边：指向当时工艺版本（INV-CX-02，不取当前生效版）。🔴 route_id 待在制品执行上下文补入 CheckpointReleased payload（同 CONSUMED_BATCH 的 lot_no，详见详细设计 §5.1）；未补前 route_id 缺失则跳过此边，补后自动建。
         if p.get("route_version") and p.get("route_id"):
             await tx.run(
                 """
