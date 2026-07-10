@@ -524,28 +524,13 @@ class ProcessRouteActivatedListener:
 
 ## 8. 可观测性与兜底
 
-### 8.1 指标（prometheus-client）
+> **完整设计见** [可观测性方案](../Agent可观测性-设计与实现方案.md)（L1/L2/L3 共用可观测底座，事实源唯一）。本节仅列 L2 特有点索引。
 
-| 指标 | 含义 |
-|------|------|
-| `l2_draft_total` | 草稿生成数（按 draft_kind / status label） |
-| `l2_draft_latency_seconds` | 草拟延迟（取证据 + 检索 + LLM 综合，Histogram） |
-| `l2_draft_low_confidence_total` | `confidence < 0.5` 草稿数 |
-| `l2_draft_rejected_total` | 工程师驳回草稿数（confirmation gate 拒绝） |
-| `l2_acl_error_total` | 只读 ACL 调用失败次数（按 client label） |
-| `l2_active_trigger_total` | 主动触发草拟次数（SOP） |
+L2 复用 L1 的可观测底座（OTel trace / `agent_*` 指标 / `ObservabilityPort`），层级特有点对应新文档章节：
 
-### 8.2 trace 串联
-
-- 每份草稿一个 `trace_id`，OpenTelemetry 在 `DraftBuilder`、ACL client、LLM 调用都注入 span，透传到下游图服务 / 文档型 RAG / 制造资源服务（`traceparent` header）。
-- `Draft.evidence_refs` + `subgraph_ref` 让工程师从草稿回溯到图节点、再到 L1 诊断、再到原始领域事件——证据链可点开回溯。
-
-### 8.3 兜底
-
-- **置信度兜底**：`confidence < 0.5` -> `needs_review=True`，草稿标记"需复核"才推工程师，不直接进 confirmation gate 下达流程。
-- **证据缺失兜底**：`subgraph_ref` 回查为空（图投影滞后）-> 草稿标 `needs_review`，`intent` 注明"证据不完整，请人工补齐"，不硬凑草稿。
-- **LLM 输出兜底**：`Draft` 经 Pydantic 校验，不符合 schema 判失败重试；重试仍失败返回"草拟失败转人工"，不硬答。
-- **confirmation gate 兜底**：草稿 `requires_confirmation` 恒 `True`，前端无法绕过确认直接下达；L2 服务不持有写 client，即使被绕过也无法落库。
+- **特有指标**：`l2_draft_total` / `l2_draft_latency_seconds` / `l2_draft_low_confidence_total` / `l2_draft_adoption_total` / `l2_draft_rejected_total` / `l2_acl_error_total` / `l2_active_trigger_total` -> 新文档 §5.2 L2 新增。
+- **链路**：每份草稿一个 `trace_id`，`Draft.evidence_refs` + `subgraph_ref` 回溯到图节点与 L1 诊断 -> 新文档 §7。
+- **特有兜底**：`confidence < 0.5` 标 `needs_review`；`subgraph_ref` 回查为空标 `needs_review` 不硬凑；草稿 `requires_confirmation` 恒 True，L2 不持有写 client -> 新文档 §12。
 
 ---
 
@@ -565,7 +550,7 @@ class ProcessRouteActivatedListener:
 ### 阶段三：confirmation gate + 存档（2 周）
 8. 实现草稿存档表 + 工程师 UI 展示草稿 + 证据链回溯。
 9. 对接返工上下文"人工决策生成工单"应用服务（🔴 端点待对齐），验证 confirmation gate 落库走正常应用服务。
-10. 接 OTel + prometheus 指标（§8.1）。
+10. 接 OTel + prometheus 指标（[可观测性方案](../Agent可观测性-设计与实现方案.md) §5.2）。
 
 ### 阶段四：评测与加固（2 周）
 11. 沉淀评测集：每个草稿类型含 L1 诊断 + 预期草稿字段 + 预期证据引用。

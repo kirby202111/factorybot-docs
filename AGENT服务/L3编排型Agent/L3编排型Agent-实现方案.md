@@ -752,35 +752,13 @@ async def lifespan(app: FastAPI):
 
 ## 8. 可观测性与兜底
 
-### 8.1 指标（在 L1 基础上新增）
+> **完整设计见** [可观测性方案](../Agent可观测性-设计与实现方案.md)（L1/L2/L3 共用可观测底座，事实源唯一）。本节仅列 L3 特有点索引。
 
-| 指标 | 含义 |
-|------|------|
-| `l3_session_total` | 会话数（按 scenario / status label） |
-| `l3_node_total` | 节点执行数（按 **node_type=CODE/AGENT** label）——区分代码与 agent 调用 |
-| `l3_llm_invocation_total` | LLM 实际调用次数（按 capability label）——换线全程 PASS 时为 0 |
-| `l3_step_latency_seconds` | 各步耗时（含 gate 等待，Histogram） |
-| `l3_gate_decision_total` | gate 决策数（按 step / decision label） |
-| `l3_agent_confidence_total` | agent 置信度分布（按 capability / confidence label） |
-| `l3_suspended_total` | 故障隔离挂起次数 |
-| `l3_write_tool_total` | 写工具调用数（按 tool / confirmed label） |
-| `l3_write_rejected_total` | 未带 confirmation 被拒次数 |
+L3 复用 L1 的可观测底座，层级特有点对应新文档章节：
 
-- `l3_node_total{node_type=CODE}` vs `{node_type=AGENT}` 可量化"代码节点占比"——占比越高说明边界划得越干净。
-- `l3_llm_invocation_total` 是真 LLM 调用，换线全程 PASS 时此指标为 0，体现"懂什么时候不用 AI"。
-
-### 8.2 trace 串联
-
-- 一个会话一个 `trace_id`，透传到所有代码节点 / agent 节点 / 下游 Java 服务（`traceparent`）。
-- 每张动作卡带 `evidence`（trace_id 列表）+ `agent_hypothesis`，确认人可点开回溯 agent 的工具调用链与根因推理。
-
-### 8.3 兜底
-
-- gate 等待人确认有 deadline，超时自动挂起 `SUSPENDED` 推责任人，不无限阻塞。
-- barrier 检测到未 PASS，**禁止推放行卡**，分流到 agent A 或挂起——编排层防错。
-- agent 置信度 `low` -> 处置卡标 `need_human_review=True`，列疑点，不自动路由。
-- 写工具未带有效 confirmation token -> `WriteToolGate` 拒绝 + 指标 +1 + 告警。
-- agent 连续失败 2 次 -> 标 `SUSPENDED`，推异常卡，不自动重试到死。
+- **特有指标**：`l3_session_total` / `l3_node_total`（node_type=CODE/AGENT）/ `l3_llm_invocation_total`（换线 PASS 时为 0）/ `l3_step_latency_seconds` / `l3_gate_decision_total` / `l3_agent_confidence_total` / `l3_suspended_total` / `l3_write_tool_total` / `l3_write_rejected_total` -> 新文档 §5.2 L3 新增。
+- **链路**：一个会话一个 `trace_id`，动作卡带 `evidence`（trace_id 列表）+ `agent_hypothesis` -> 新文档 §7。
+- **特有兜底**：gate 超 deadline 挂起 `SUSPENDED`；barrier 未 PASS 禁推放行卡；agent 置信度 `low` 标 `need_human_review` 不自动路由；写工具未带 token 被 `WriteToolGate` 拒（P0 告警）；agent 连续失败 2 次挂起 -> 新文档 §12。
 
 ---
 
@@ -812,7 +790,7 @@ async def lifespan(app: FastAPI):
 ### 阶段四：试点与加固（2 周）
 
 15. 挑一条产线灰度换线 Agent（先代码骨架 + A），confirmation gate 做扎实。
-16. 接 OTel + prometheus 指标（§8.1），重点观察 `l3_llm_invocation_total` 与 `l3_node_total{node_type=CODE}` 占比。
+16. 接 OTel + prometheus 指标（[可观测性方案](../Agent可观测性-设计与实现方案.md) §5.2），重点观察 `l3_llm_invocation_total` 与 `l3_node_total{node_type=CODE}` 占比。
 17. 评测：根因假设准确率、隔离集命中率、8D 草稿采纳率、gate 拒绝率。
 18. 沉淀场景评测集，回归提示词 / 模型变更。
 

@@ -556,29 +556,14 @@ class DefectRateSpikeListener:
 
 ## 8. 可观测性与兜底
 
-### 8.1 指标（prometheus-client）
+> **完整设计见** [可观测性方案](../Agent可观测性-设计与实现方案.md)（L1/L2/L3 共用可观测底座，事实源唯一）。本节仅列 L1 要点索引。
 
-| 指标 | 含义 |
-|------|------|
-| `agent_session_total` | 会话总数（按 status label 分桶） |
-| `agent_tool_call_total` | 工具调用次数（按 tool / status label） |
-| `agent_tool_call_latency_seconds` | 单工具调用延迟（Histogram） |
-| `agent_tool_denied_total` | 权限拒绝次数 |
-| `agent_session_latency_seconds` | 整会话延迟 |
-| `agent_low_confidence_total` | 置信度 <0.5 转人工次数 |
-| `agent_tool_error_total` | 工具调用失败次数 |
-| `agent_recursion_limit_hit_total` | 触发最大步数上限次数 |
+L1 是可观测底座基准，无层级特有指标，全部使用通用 `agent_*` 指标。要点对应新文档章节：
 
-### 8.2 trace 串联
-
-- 每个会话一个 `trace_id`，OpenTelemetry 在 `ToolNode` 和 ACL 客户端都注入 span，透传到下游 Java 服务（通过 `traceparent` header）。
-- 工程师可在 UI 点击报告中的证据，回溯到具体工具调用与下游 REST 调用。
-
-### 8.3 兜底
-
-- `confidence < 0.5` -> 不展示给操作工，标记 `needs_human_review` 推工程师。
-- 工具连续失败 3 次 -> 终止会话，转人工。
-- 所有报告带 `disclaimer`：辅助诊断假设，最终处置需工程师确认——与 MES 防错理念一致，宁可让人判。
+- **指标**：`agent_session_total` / `agent_tool_call_*` / `agent_low_confidence_total` / `agent_recursion_limit_hit_total` 等 -> 新文档 §5.2。
+- **链路**：每会话一个 `trace_id`，`traceparent` 透传下游 Java 服务，`tool_call_trace` 落证据链 -> 新文档 §4、§7。
+- **置信度与兜底**：`confidence < 0.5` 转 `needs_human_review` 不推操作工；工具连续失败 3 次终止；`recursion_limit` / 超时转人工 -> 新文档 §9、§12。
+- **约束清单**：见新文档 §18。
 
 ---
 
@@ -604,7 +589,7 @@ class DefectRateSpikeListener:
 
 11. 固化 `DiagnosisReport` / `Hypothesis` / `FiveM1ECategory`，实现 `ReportParser`（Pydantic 校验模型输出）。
 12. 置信度阈值与 `needs_human_review` 兜底。
-13. 接入 OpenTelemetry + prometheus 指标（§8.1）。
+13. 接入 OpenTelemetry + prometheus 指标（[可观测性方案](../Agent可观测性-设计与实现方案.md) §5.2）。
 14. 工程师 UI：展示报告 + 证据链可点开回溯 trace。
 
 ### 阶段四：主动触发试点（2 周）
