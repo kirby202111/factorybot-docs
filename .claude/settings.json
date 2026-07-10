@@ -22,7 +22,8 @@
       "Bash(grep -c '^───$' 领域模型/生产执行服务/领域建模/在制品执行上下文.md)",
       "Bash(python .claude/tmp_update_overview.py)",
       "Bash(bun .claude/tmp_update_overview.cjs)",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(unix2dos \"RAG与Agent评测/RAG与Agent评测-设计与实现方案.md\")"
     ]
   }
 }

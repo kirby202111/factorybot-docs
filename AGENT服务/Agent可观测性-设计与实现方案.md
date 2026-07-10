@@ -609,6 +609,7 @@ class ObservableChatModel(BaseChatModel):
 ---
 
 ## 10. 评测与回归（Eval）
+> 评测体系完整设计（金标准集 / 指标体系 / LLM-as-judge / 置信度标定 / 漂移 / CI 门禁）的事实源见 [RAG与Agent评测-设计与实现方案.md](../RAG与Agent评测/RAG与Agent评测-设计与实现方案.md)；本节保留链路侧简要视角，不重复展开。
 
 ### 10.1 评测集构建
 

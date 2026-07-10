@@ -1389,6 +1389,7 @@ MVP 4 上下文跑通后，其余 10 上下文按**相同范式**扩展，无需
 - **降级查询强制版本**：`ProcessManagementAclClient.fetch_route_version(route_version=None)` 抛 `ValueError`。
 
 ### 12.3 检索准确性评测集
+> 评测集构建、指标体系、离线流水线与 CI 门禁的完整设计见 [RAG与Agent评测-设计与实现方案.md](../../RAG与Agent评测/RAG与Agent评测-设计与实现方案.md) §4/§5/§6；本节为追溯型 RAG 专属要点。
 
 - 沉淀典型不良场景评测集（每条含：种子 SN + 预期 5M1E 命中节点 + 预期根因类别）。
 - pytest + 评测脚本回归：模型 / 提示词 / Cypher 变更后跑评测集，断言 `hypotheses` 覆盖预期类别、`evidence` 引用预期 `node_id`。
