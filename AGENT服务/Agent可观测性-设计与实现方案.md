@@ -997,7 +997,7 @@ A：靠 W3C `traceparent`。Agent 调 Java REST 时 OTel 的 httpx instrumentati
 A：因为转人工是兜底在工作，是健康的——低置信转人说明防错在起作用。告警应该盯**突增**（同比 +50%），那才说明模型或数据出问题了。盯上限会把正常的兜底误报成故障，反而干扰。这个区别写进告警规则，体现你懂"可观测不是堆指标，是分清信号和噪声"。
 
 **Q：token 成本怎么管？会不会烧钱？**
-A：三层。一是 `agent_token_total` 按 prompt/completion 计数，`agent_cost_usd_total` 按单价估算，按租户聚合给管理层看。二是成本漂移检测，token/会话 P95 超基线 1.5× 告警。三是 `recursion_limit` 限制最大步数，从根本上限死单会话 token 上限。L3 换线顺利时 LLM 调用应趋近 0（`l3_llm_invocation_total`），全靠代码节点跑——懂什么时候不用 AI，就是最大的省钱。
+A：先分清"测得清"和"降得下"。测得清是本篇可观测性的事，降得下是 [AgentToken成本优化-设计与实现方案.md](AgentToken成本优化-设计与实现方案.md) 的事（优先级"少调 > 少发 > 调便宜的"：代码节点归零 / prompt caching / 工具结果压缩 / 版本化缓存 / 过评测门禁的模型路由）。测得清靠三件事：一是 `agent_token_total` 按 prompt/completion 计数，`agent_cost_usd_total` 按单价估算，按租户聚合给管理层看。二是成本漂移检测，token/会话 P95 超基线 1.5× 告警。三是 `recursion_limit` 限制最大步数，从根本上限死单会话 token 上限。L3 换线顺利时 LLM 调用应趋近 0（`l3_llm_invocation_total`），全靠代码节点跑——懂什么时候不用 AI，就是最大的省钱。
 
 ---
 
