@@ -24,6 +24,16 @@ min.insync.replicas = 2
 - `min.insync.replicas=2` 需要配合 Producer `acks=all` 才能提升写入可靠性。
 - 生产环境不建议依赖自动创建 topic，避免拼写错误或默认参数不符合预期。
 
+### 1.1 高可用拓扑补强项
+
+以下几项不补不会立刻报错，但会在故障时直接丢数据或丢位点，属于"埋坑"配置，部署前必须确认：
+
+- **禁止非 ISR 副本当选 leader**：`unclean.leader.election.enable=false`。若为 true，ISR 之外的落后副本可被选为 leader，直接丢失未同步消息，使 `acks=all + min.insync=2` 的可靠性前提失效。这是数据可靠性最关键的单项开关。
+- **内部 topic 副本数与业务 topic 对齐**：`__consumer_offsets`、`__transaction_state` 等内部 topic 默认副本数为 1，单 broker 故障即丢消费位点或事务状态。需显式设 `offsets.topic.replication.factor=3`；若启用 Kafka 事务，还需 `transaction.state.log.replication.factor=3` 与 `transaction.state.log.min.isr=2`。
+- **机架感知**：3 个 broker 若同机房跨机架部署，应通过 `broker.rack` 标注机架，使 leader/follower 副本跨机架分布，避免单机架故障同时打掉多个副本。
+- **Controller 高可用**：Kafka 3.x+ 建议采用 KRaft 模式（3 节点 controller 仲裁，容忍 1 个挂）替代 ZooKeeper，消除 ZK 这套独立的高可用组件与脑裂风险。KRaft 需用 `process.roles` / `node.id` / `controller.quorum.voters` 替换 `broker.id` 与 ZK 连接配置，具体随部署形态（combined / separated）而定，见部署文档。
+- **集群级配额**：业务 client-id 与高频采集 `*-dc` client-id 分离设置字节/请求配额，防止 dc.* 高频流打爆 broker 带宽影响业务事件投递（命名空间隔离之外的资源级隔离，配额数值见《Kafka 集成全景与实现说明》附录 A）。
+
 ---
 
 ## 2. Kafka Broker 配置
@@ -62,6 +72,13 @@ replica.fetch.max.bytes=1048576
 num.replica.fetchers=2
 replica.lag.time.max.ms=30000
 
+# 高可用与数据安全
+unclean.leader.election.enable=false
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
+broker.rack=rack-1
+
 # 压缩
 compression.type=producer
 ```
@@ -72,6 +89,11 @@ compression.type=producer
 |---|---:|---|
 | `default.replication.factor` | `3` | 生产环境 topic 默认 3 副本。 |
 | `min.insync.replicas` | `2` | 至少 2 个 ISR 确认，配合 `acks=all`。 |
+| `unclean.leader.election.enable` | `false` | 禁止非 ISR 副本当选 leader，避免丢未同步消息。 |
+| `offsets.topic.replication.factor` | `3` | `__consumer_offsets` 副本数，默认 1 需显式提到 3。 |
+| `transaction.state.log.replication.factor` | `3` | 启用 Kafka 事务时内部事务日志副本数。 |
+| `transaction.state.log.min.isr` | `2` | 事务日志 min.insync，配合事务 Producer。 |
+| `broker.rack` | 按机架填写 | 机架感知，使副本跨机架分布。 |
 | `auto.create.topics.enable` | `false` | 禁止自动创建 topic。 |
 | `num.partitions` | `6` 起步 | 默认分区数，具体 topic 仍应显式创建。 |
 | `log.retention.hours` | `168` | 默认保留 7 天，可按 topic 覆盖。 |
@@ -341,6 +363,11 @@ value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 - [ ] `default.replication.factor=3`。
 - [ ] `min.insync.replicas=2`。
 - [ ] `auto.create.topics.enable=false`。
+- [ ] `unclean.leader.election.enable=false`。
+- [ ] `offsets.topic.replication.factor=3`（启用事务时含 `transaction.state.log.*`）。
+- [ ] 已规划机架感知（`broker.rack`）使副本跨机架分布。
+- [ ] Controller 高可用已落地（KRaft 3 节点仲裁或 ZK 集群）。
+- [ ] 业务与高频采集 client-id 配额已分离设置。
 - [ ] 已规划 topic 默认保留周期。
 - [ ] 已规划 Kafka 日志磁盘容量。
 - [ ] 已建立 broker、partition、consumer lag 监控。

@@ -1,0 +1,467 @@
+# Redis 实现说明
+
+> **定位**：本文是本 MES 项目 **Redis 使用场景识别与实现方式**的权威方案。基于对 [领域模型](../../领域模型/领域总览.md) 全部 14 个限界上下文业务建模的审查，结构化梳理所有需要使用 Redis 的具体业务场景、使用方式（缓存 / 热层快照 / 去重 / 分布式协调）、闪光点与重难点，并明确 Redis **不适用**的边界。
+>
+> **与既有文档的关系**：
+> - 领域契约（聚合根 / 事件 / 不变式编号）的权威源是各上下文的领域建模文档，本文**不重复定义**，只引用其不变式编号（INV-CX-04、BIZ-02、BIZ-07、INV-CX-05 等）。
+> - [MES高频数据方案](../高频数据/MES高频数据方案.md) 已在 §6.1（msg_id 去重）与 §7.1（热层实时快照）明确使用 Redis，本文是其**场景展开与重难点深挖**，不重复管道设计。
+> - 与 [Outbox设计方案](../业务事件/Outbox设计方案.md) 是**分工关系**：Outbox 管低频业务契约事件的可靠投递（MySQL 事务 + Kafka），Redis 不承担 MQ 角色；本文管 Redis 作为缓存 / 热层 / 去重 / 协调的职责。
+> - 与 [MySQL配置说明](./MySQL配置说明.md)（`cache-enabled: false`，显式关闭 MyBatis 二级缓存）、[Kafka配置说明](./Kafka配置说明.md)、[MinIO配置说明](./MinIO配置说明.md) 并列，补齐中间件配置族。
+>
+> **适用边界**：覆盖 MES 主体三大服务（制造资源 / 设备管理 / 生产执行）的业务建模场景。**Agent / RAG 服务**（Python 侧）的 Redis 使用（ConfirmationStore / 工具结果缓存 / 租户限流信号量）见 [整体技术选型与模块划分](../../整体技术选型与模块划分.md) §2.5，**不在本文范围**。
+>
+> **可靠性语义**：Redis 在本项目中**只承担读优化投影、热层快照、去重加速、协调辅助**，**永不承担事务一致性事实来源**。事实来源始终是 MySQL 聚合 + Kafka 事件流；Redis 丢失可从温层 / 事件流重建。这是一切 Redis 场景设计的总前提。
+
+---
+
+## 0. 口径纪律
+
+本文出现的命中率、TTL、QPS、内存容量等数值均为**设计容量目标 + 假设**（基于典型 SMT/PCBA + Box Build 单线量级估算），不是线上实绩。所有需要按真实集群容量与车间实测量拍板的阈值用 🔴 标注，交还运维/架构决策，**不自行编造 SLA**。
+
+---
+
+## 1. Redis 在 MES 中的定位与场景全景
+
+### 1.1 为什么 MES 需要 Redis
+
+MES 业务的三个硬约束把 Redis 推到不可替代的位置：
+
+| 硬约束 | 来源 | 对存储的要求 | Redis 不可替代性 |
+|---|---|---|---|
+| **过点 SLA ≤1s**（含扫码→防错→判定→记录→推进→累计全链路） | 在制品执行上下文 §4.1 🔴 热点 | 防错校验六维度查询必须亚毫秒级 | 进程内缓存为主；Redis 作降级二级缓存 |
+| **过点设备实时数据查询 ≤200ms** | INV-CX-04（[设备数据接入上下文 §4.8](../../领域模型/设备管理服务/领域建模/设备数据接入上下文.md)） | 跨服务读设备当前温度/程序版本，不能回放 Kafka、不能查 MySQL | **必须 Redis**（跨服务共享热数据） |
+| **高频采集"不丢不重"** | [MES高频数据方案 §2.2](../高频数据/MES高频数据方案.md) BIZ-02 | 秒级持续流补传/重发产生重复 msg_id，平台侧需高吞吐去重 | **必须 Redis 布隆过滤器**（DB 唯一索引扛不住采集吞吐） |
+
+### 1.2 场景全景表
+
+下表给出 Redis 在 MES 业务建模中的全景，标注使用方式、载体选型与覆盖状态。
+
+| # | 场景 | 所属上下文 | 使用方式 | 载体选型 | 事实来源 | 覆盖状态 |
+|---|---|---|---|---|---|---|
+| ① | 过点校验本地缓存族（工艺/设备可用性/质量门禁/工单状态/齐套/首件） | 在制品执行上下文 | 缓存（读优化投影） | **Caffeine 进程内为主，Redis 作降级二级缓存** 🔴 | 制造资源/设备台账/质量/工单上下文聚合 | ✅ 已识别（§2） |
+| ② | 设备实时数据热层快照 | 设备数据接入上下文 | 热层快照（跨服务共享） | **Redis（hash by equipment_id）** | Kafka `dc.*` 流 + 温层 | ✅ 已覆盖（[高频数据方案 §7.1](../高频数据/MES高频数据方案.md)，§3 展开） |
+| ③ | 高频采集 msg_id 去重 | 设备数据接入上下文 | 去重（布隆过滤器） | **Redis Bloom + DB 唯一索引兜底** | msg_id 唯一性（BIZ-02） | ✅ 已覆盖（[高频数据方案 §6.1](../高频数据/MES高频数据方案.md)，§4 展开） |
+| ④ | 在制品位置快照读模型 | 在制品执行上下文 | CQRS 读侧投影 | **MySQL 读模型为主，Redis 可选加速** 🔴 | 写侧 RoutingProgress 聚合 | 🟡 已识别，载体可选（§5） |
+| ⑤ | 工单/产品流水号生成 | 工单管理上下文 | 分布式序号（INCR） | **DB 唯一索引为主，Redis INCR 可选优化** 🔴 | `(serial_no_prefix, sequence_no)` 唯一索引（BIZ-03） | 🟡 已识别，可选优化（§6.1） |
+| ⑥ | 跨实例全局限流 | 横切（过点入口/ACL 出站） | 分布式限流（令牌桶 Lua） | **Redis + Lua 令牌桶**（多实例时启用） 🔴 | 无（速率控制） | 🟡 已识别，按规模启用（§6.2） |
+| ⑦ | 事件消费幂等去重 | 各上下文 consumed_event | 去重 | **MySQL 表（不用 Redis）** | `(event_id, consumer_group)` 主键 | ✅ 已澄清不用 Redis（§7） |
+| ⑧ | 可用性重算并发控制 | 设备工装台账上下文 | 并发控制 | **DB 乐观锁（不用 Redis 分布式锁）** | `asset_id + version`（BIZ-07） | ✅ 已澄清不用 Redis（§7） |
+| ⑨ | 消息队列 | 全局 | MQ | **Kafka（不用 Redis Pub/Sub / Stream）** | - | ✅ 已澄清不用 Redis（§7） |
+
+> **三种状态含义**：✅ 已覆盖/已澄清 = 文档已明确；🟡 已识别 = 文档未定型，本文给出专家建议与决策点；🔴 = 阈值待拍板。
+
+### 1.3 核心认知：Redis 在 MES 的"三不"原则
+
+1. **不承担事实来源**：Redis 是读优化投影/热层快照，丢失可重建；事实来源是 MySQL 聚合 + Kafka 事件流。
+2. **不承担 MQ**：业务契约事件走 Outbox + Kafka（[Outbox设计方案](../业务事件/Outbox设计方案.md)）；高频采集走 Kafka 直连（[高频数据方案 §5](../高频数据/MES高频数据方案.md)）。Redis Pub/Sub 无持久化、Stream 吞吐弱，均不替代 Kafka。
+3. **不替代 DB 唯一性约束**：跨实例唯一性（msg_id 除外，因其高吞吐）优先用 DB 唯一索引 / 乐观锁 / 聚合内事务，Redis 只在 DB 扛不住吞吐时作加速层。
+
+---
+
+## 2. 场景①：过点校验本地缓存族
+
+### 2.1 业务背景
+
+在制品执行上下文是过点执行枢纽。每次扫码过点，[AntiErrorCheckService](../../领域模型/生产执行服务/领域建模/在制品执行上下文.md) §3.1 并行校验六个维度，每个维度读一个缓存/投影：
+
+| 缓存 | 刷新来源（事件订阅） | 降级查询 | 守护不变式 | 用途 |
+|---|---|---|---|---|
+| `ProcessRouteCache` | `process.route.lifecycle` (ProcessRouteActivated) | REST 查制造资源服务 ≤500ms | INV-CX-02 | 过点防错项/步骤配置/跳站校验 |
+| `EquipmentAvailabilityCache` | `eam.asset.availability` (AssetAvailabilityChanged) | REST 查台账上下文 | BIZ-07（乐观锁） | 设备准入校验（available=true 且在目标工位） |
+| `QualityGateCache` | `quality.gate.lifecycle` (QualityGateRuleActivated/Deprecated) | REST 查质量上下文 | rule_id+version 去重 | 质量门禁判定（PASS/HOLD/BLOCK） |
+| `WorkOrderStatusCache` | `wo.order.*` (Released/Started/Paused/Resumed/Cancelled...) | REST 查工单管理上下文 | INV-CX-05 | 工单状态校验（仅 RELEASED/IN_PROGRESS 放行） |
+| `KitStatusCache` | `wo.kit.status` (KitStatusChanged) | REST 查工单管理上下文 | BIZ-08 | 首次过点齐套防错（kit_ready） |
+| `FirstArticleGateProjection` | `fai.article.released/blocked` | - | BIZ-03 | 首件门禁校验 |
+
+缓存未命中/不可信时降级 REST 查源上下文；REST 失败则**保守拦截过点**（INV-CX-05：`blocking_reason ∈ {RouteCacheMiss, EquipmentCacheMiss}`，见 [在制品执行上下文 §2.3 BlockingReason](../../领域模型/生产执行服务/领域建模/在制品执行上下文.md)）。
+
+### 2.2 载体选型决策（关键架构判断）🔴
+
+领域总览 §5.1/§5.2 与在制品执行上下文将这六个称为"**本地缓存**"，未指定载体。在微服务多实例部署下，有两条路线，本文给出推荐：
+
+| 路线 | 机制 | 优势 | 劣势 | 适用 |
+|---|---|---|---|---|
+| **A. 进程内缓存（Caffeine）为主** 🔴 主推 | 每实例独立 Caffeine，事件驱动刷新各刷各的，miss 时 REST 降级查源上下文 | 亚毫秒读、零网络 RTT、无外部依赖、单实例故障不波及缓存 | 多实例内存冗余；冷启动/事件延迟窗口内实例间短暂不一致 | 写少读多 + 事件可广播 + 过点 SLA 苛刻 |
+| B. Redis 共享缓存为主 | 所有实例共享一份 Redis，miss 时查 Redis | 实例间一致性好；无内存冗余 | 每次过点 6 次 Redis RTT（pipeline 仍有 ~1ms）；Redis 是吞吐瓶颈；故障波及所有过点 | 实例数少、一致性要求高于延迟 |
+| **C. Caffeine + Redis 二级缓存** 🔴 可选 | L1=Caffeine（进程内），L2=Redis（共享）；miss 依次查 L1→L2→REST | 兼顾低延迟与多实例一致性；多实例 miss 风暴被 L2 吸收 | 复杂度高；L1/L2 一致性需事件广播 + 失效 | 实例数多（🔴 阈值待定，如 ≥10）且源上下文 REST 扛不住 miss 风暴 |
+
+**推荐**：起步用路线 A（Caffeine + 事件刷新 + REST 降级），不引入 Redis 依赖；当过点实例数扩张到源上下文 REST 降级查询被多实例 miss 放大击穿时，引入 Redis 作 L2（路线 C）。**Redis 在本场景的价值是"降级查询的二级缓存，保护源上下文不被多实例 miss 放大击穿"，而非过点主路径。**
+
+### 2.3 闪光点
+
+- **写少读多 + 事件驱动刷新的天然匹配**：工艺版本/质量规则/设备状态都是低频写（版本发布、状态变更才写），过点高频读。事件订阅刷新 + 本地缓存命中，过点主路径零外部依赖，SLA 可控。
+- **降级查询保守拦截（INV-CX-05）**：缓存未命中 + REST 失败时不是"放过"而是 `CheckpointBlocked`，符合 MES 防错优先（fool-proofing）原则——宁可拦截不过错放。
+- **`routeVersion` 快照锁定历史追溯**：过点记录携带 `routeVersion`（[CheckpointRecord §1.1](../../领域模型/生产执行服务/领域建模/在制品执行上下文.md)），工艺变更只刷缓存影响后续过点，历史过点不受影响。缓存与事实解耦。
+- **DDD 聚合边界设计避免了缓存强一致需求**：工艺/设备/质量/工单分属不同限界上下文，各自是事实来源，生产执行服务只持有读投影。最终一致可接受（过点读缓存秒级延迟无碍），这正是能用本地缓存 + 事件刷新的前提。
+
+### 2.4 重难点
+
+| 重难点 | 风险 | 应对 |
+|---|---|---|
+| **缓存一致性（事件丢失/延迟）** | 事件订阅刷新失败或延迟，缓存陈旧导致过点放行不该放行的单/拦截不该拦截的单 | ① 事件刷新幂等（source_event_id 去重，见各 CacheRefreshService）；② 缓存带 TTL 兜底（🔴 建议 5~30min，按数据语义），TTL 到期强制 REST 回源；③ 关键校验（如工单状态终态 CLOSED/CANCELLED）可双读校验 |
+| **缓存穿透（查不存在的 key）** | 恶意/异常 SN 或不存在的 work_order_id 反复 miss 打源上下文 | ① 空值缓存（null placeholder，短 TTL 如 60s）；② 布隆过滤器前置判存在性（工单/设备 ID 集合）；③ 过点前置校验 SN/工单有效性 |
+| **缓存击穿（热点 key 过期瞬间并发回源）** | 换线瞬间某工单/工艺版本缓存刚过期，多个过点终端并发 REST 查源上下文 | ① Caffeine `refreshAfterWrite` 异步刷新（不阻塞读）；② 互斥锁（单个实例只允许一个线程回源，其余读旧值）；③ Redis L2 天然吸收击穿 |
+| **缓存雪崩（大量 key 同时过期）** | 批量工单同时下达/同时刷新，TTL 集中到期 | TTL 加随机抖动（基准 ±20%）；分批预热 |
+| **多实例一致性窗口** | 路线 A 下，事件广播到各实例有秒级延迟，实例间短暂不一致 | ① 事件投递保序（partition_key=聚合根 ID，[Outbox §7.2](../业务事件/Outbox设计方案.md)）；② 对一致性敏感的判定（如工单 PAUSED 拦截）缓存未命中走 REST 强一致查；③ 监控缓存版本 lag |
+| **冷启动 miss 风暴** | 服务重启/新实例上线，缓存全空，过点高峰打爆源上下文 | ① 启动预热（加载活跃工单/当前生效工艺版本/在制设备可用性）；② Redis L2 跨实例共享吸收；③ 降级查询限流（§6.2）保护源上下文 |
+
+### 2.5 实现要点
+
+```text
+CacheRefreshService（[在制品执行上下文 §3.6]）落地为双层缓存：
+
+L1 Caffeine（进程内，主路径）:
+  - cache key: route_version_id / asset_id / rule_id / work_order_id
+  - expireAfterWrite: 🔴 30min（兜底，防事件丢失陈旧）
+  - refreshAfterWrite: 🔴 5min（异步刷新，防击穿）
+  - maxSize: 按活跃工单/设备数估算 🔴
+
+L2 Redis（可选，降级二级缓存）:
+  - key 前缀: mes:cache:{context}:{type}:{id}  (见 §8.2)
+  - TTL: 🔴 30min（与 L1 兜底对齐）
+  - 仅 L1 miss 时回源前先查 L2，命中则回填 L1
+
+事件刷新链:
+  Kafka 事件 -> CacheRefreshService.refreshXxx(source_event_id 去重)
+             -> 写 L1（覆盖）+ 异步写 L2（若启用）
+             -> 失败不阻塞过点（靠 TTL + REST 降级兜底）
+
+降级查询链:
+  过点读缓存 -> L1 miss -> (L2 miss) -> REST 查源上下文 -> 回填 L1(+L2) -> 继续判定
+  REST 失败 -> CheckpointBlocked(RouteCacheMiss/EquipmentCacheMiss)  [保守拦截]
+```
+
+---
+
+## 3. 场景②：设备实时数据热层快照（跨服务，≤200ms）
+
+### 3.1 业务背景
+
+过点时校验设备实时状态（波峰焊当前温区温度、烧录器当前程序版本、电批扭矩实时值）要求 **≤200ms**（INV-CX-04，[设备数据接入上下文 §4.8 DataQueryAppService.getRealtimeDataPoints](../../领域模型/设备管理服务/领域建模/设备数据接入上下文.md)）。这不能走 Kafka 回放（秒级流历史），不能走 MySQL 查询（写放大 + 慢），需内存级快照。
+
+关键特征：**数据源（设备数据接入上下文）与消费方（在制品执行上下文过点引擎）跨服务**，且数据由采集流**持续高频写入**——进程内缓存无法跨服务共享写入，**必须用 Redis 作跨服务共享热层**。
+
+### 3.2 Redis 使用方式
+
+| 维度 | 设计 |
+|---|---|
+| 数据结构 | **Hash**，key = `mes:hot:equip:{equipment_id}`，field = `logical_name`（如 `zone3_temp`、`program_version`），value = 采样值 + `source_ts` |
+| 写入 | 平台 `PlatformIngestionService.PersistAndPublish` 时同步刷新热层最新值（**覆盖写**，只留最新）|
+| 查询 | 过点执行上下文 REST 查 `DataQueryAppService.getRealtimeDataPoints(equipment_id, logical_names)` -> `HMGET` 多 field |
+| 保留 | 只保留最新值（或最近 N 个采样，🔴 按追溯需求定） |
+| 失效 | 设备 `OFFLINE` 后保留最后值 + 标记 `offline_at`；资产 `CLOSED` 终态后清除（[高频数据方案 §7.1](../高频数据/MES高频数据方案.md)） |
+
+### 3.3 闪光点
+
+- **跨服务共享热数据，过点零回放延迟**：设备数采服务写 Redis 一次，所有过点实例共享读，避免每个实例各自订阅 Kafka 维护内存快照（重复投影 + 内存冗余）。
+- **Hash 结构契合"一设备多点位"查询**：过点只查该设备关心的几个 `logical_name`，`HMGET` 一次往返取齐，比 KV 多次 GET 或 String 存全量 JSON 更高效。
+- **热/温/冷分层的关键一环**：热层 Redis 管过点实时查询，温层 MySQL/TSDB 管近期历史与 SPC，冷层对象存储管长期归档（[高频数据方案 §7](../高频数据/MES高频数据方案.md)）。各司其职，Redis 不背历史包袱。
+- **覆盖写天然幂等**：采集流重复/补传到达，覆盖写最新值即可，无需去重（去重在 msg_id 层已做，§4）。
+
+### 3.4 重难点
+
+| 重难点 | 风险 | 应对 |
+|---|---|---|
+| **数据一致性（热层是投影非事实源）** | Redis 数据可能与温层/Kafka 短暂不一致；Redis 宕机数据丢失 | ① 明确热层是**读优化投影**，事实源是 Kafka + 温层，丢失可重建（[高频数据方案 §7.1](../高频数据/MES高频数据方案.md)）；② 写入时附带 `source_ts`，过点查询可判新鲜度，超时数据计 `EquipmentDataTimeout` 拦截（INV-10） |
+| **过期/陈旧策略** | 设备掉线后热层残留最后值，过点误判设备"正常" | ① `OFFLINE` 后保留最后值但标记 `offline_at`，过点校验设备可用性走 `EquipmentAvailabilityCache`（§2）而非热层；② 热层 `source_ts` 超过阈值 🔴（如 30s）视为陈旧，触发 `EquipmentDataTimeout` 拦截 |
+| **重建（冷启动 / Redis 故障后）** | Redis 重启后热层全空，过点查询全 miss | ① 从 Kafka `dc.*` 主题重放最近窗口（`auto-offset-reset=latest` + 回放近 N 分钟）重建最新值；② 重建期间过点降级查温层（慢但可用）或保守拦截；③ Redis 持久化（§8.3）缩短重建窗口 |
+| **大点位设备内存膨胀** | 某些设备（如多温区波峰焊）点位多，Hash 大 | ① 只存过点关心的 `logical_name`（按工艺配置裁剪）；② 监控 Hash 内存，超阈值告警 |
+| **跨服务写入竞态** | 多网关/多平台实例并发写同一设备热层 | 覆盖写以 `source_ts` 最新为准（写入时 `source_ts <= 现值` 则丢弃，CAS 语义），保序由 `partition_key=equipment_id` 保证（[高频数据方案 §5.5](../高频数据/MES高频数据方案.md)） |
+
+### 3.5 实现要点
+
+```text
+写入侧（设备数据接入上下文 PlatformIngestionService）:
+  PersistAndPublish 落温层后:
+    -> HSET mes:hot:equip:{equipment_id} {logical_name} "{value}|{source_ts}"
+    -> 若 source_ts < 现有 field 的 source_ts -> 丢弃（乱序矫正已在上游做，此处兜底）
+    -> 设备 OFFLINE: HSET mes:hot:equip:{equipment_id} __offline_at__ {ts}
+    -> 资产 CLOSED: DEL mes:hot:equip:{equipment_id}
+
+查询侧（过点执行上下文 -> DataQueryAppService.getRealtimeDataPoints）:
+  HMGET mes:hot:equip:{equipment_id} {logical_name1} {logical_name2} ...
+  -> 解析 value|source_ts
+  -> 若 source_ts 距今 > 🔴 30s -> 计 EquipmentDataTimeout（INV-10，保守拦截）
+  -> 否则返回实时值供防错校验
+
+重建（Redis 故障恢复后）:
+  订阅 dc.process.sample.raw / dc.station.event.raw
+  -> auto-offset-reset=latest + 回溯近 🔴 5min
+  -> 按 equipment_id 覆盖写最新值
+```
+
+---
+
+## 4. 场景③：高频采集 msg_id 去重（布隆过滤器）
+
+### 4.1 业务背景
+
+高频设备采集走"边缘缓冲 + Kafka 直连"，可靠性模型从"同事务原子"降级为"不丢不重"（[高频数据方案 §2](../高频数据/MES高频数据方案.md)）。补传/重发会产生重复 `msg_id`，平台侧 `PlatformIngestionService` 按 `msg_id` 去重（BIZ-02，[设备数据接入上下文 §3.6](../../领域模型/设备管理服务/领域建模/设备数据接入上下文.md)）。
+
+采集是秒级持续流，单线数十~百条/s（[高频数据方案 §1.5](../高频数据/MES高频数据方案.md)），纯 DB 唯一索引去重扛不住吞吐（写放大 + 行锁），需 Redis 布隆过滤器前置加速。
+
+### 4.2 Redis 使用方式
+
+```text
+PacketReceived(msg_id, ...)
+  -> BF.EXISTS mes:dedup:dc {msg_id}
+     命中（可能） -> 查 DB msg_id 唯一索引确认（布隆假阳性回退）
+        DB 命中 -> DuplicateDiscarded（BIZ-02，丢弃）
+        DB 未命中 -> 布隆假阳性，放行
+     未命中 -> PacketAccepted
+            -> BF.ADD mes:dedup:dc {msg_id}  （占位，防并发重复）
+            -> INSERT DB msg_id 唯一索引（兜底，并发最后防线）
+            -> 进入乱序矫正 / 落库 / 分发
+```
+
+去重三道防线：**Redis 布隆（快速判重，少量假阳性）→ DB 唯一索引（精确兜底）→ 消费端 msg_id 幂等（漏网兜底）**，叠加等效"不重"。
+
+### 4.3 闪光点
+
+- **布隆过滤器 O(1) 判重扛采集吞吐**：秒级持续流下，布隆过滤器内存占用恒定（百 MB 级即可支撑亿级 msg_id），判重亚毫秒，远优于 DB 唯一索引的行锁竞争。
+- **三层去重纵深防御**：布隆（快但有假阳性）+ DB 唯一索引（精确但慢）+ 消费端幂等（兜底），任一环崩溃下一环兜底，符合"不丢不重"降级模型的稳健性设计。
+- **假阳性可接受**：布隆假阳性只是"误判重复 → 多查一次 DB"，不丢数据、不误丢弃，代价仅是一次 DB 查询，业务无副作用。
+
+### 4.4 重难点
+
+| 重难点 | 风险 | 应对 |
+|---|---|---|
+| **假阳性** | 布隆过滤器误判未处理过的 msg_id 为"已存在"，导致多查 DB | ① 假阳性回退 DB 唯一索引精确确认（§4.2）；② 合理配置误判率 🔴（建议 0.1%），按预期 msg_id 总量算最优 hash 函数数与位数 |
+| **布隆膨胀 / 无限增长** | msg_id 持续累积，布隆位图满后误判率飙升 | ① **计数布隆（Counting Bloom）**支持删除（msg_id 过期后递减计数）；② 或**定期重建**（按保留期分桶，滚动新建 + 旧桶过期）；③ RedisBloom 模块支持 `BF.RESERVE` 容量预估 + 扩容 |
+| **保留期与补传窗口对齐** | 去重表保留期 < 最长补传窗口，补传的重复 msg_id 被当成新消息 | 保留期 **≥ 最长补传窗口 + 安全余量**（🔴 建议 ≥7 天，与死信保留窗口对齐，[高频数据方案 §6.1](../高频数据/MES高频数据方案.md)） |
+| **Redis 与 DB 一致窗口** | 布隆 ADD 成功但 DB INSERT 前宕机，恢复后布隆有/DB 无 | ① DB 唯一索引是最终事实源，布隆只是加速；② 恢复后以 DB 为准重建布隆（扫描近保留期 msg_id）；③ 漏网重复由消费端 msg_id 幂等吸收 |
+| **并发 ADD 竞态** | 两个相同 msg_id 并发到达，均 BF.EXISTS 未命中，均 ADD | DB 唯一索引兜底（其中一个 INSERT 冲突），消费端幂等再兜底，三层防御保证不重 |
+| **Redis 故障降级** | Redis 宕机，布隆不可用 | 降级为仅 DB 唯一索引去重（吞吐下降但不丢不重，靠限流背压保护 DB，[高频数据方案 §8](../高频数据/MES高频数据方案.md)） |
+
+### 4.5 实现要点
+
+- 使用 **RedisBloom 模块**（`BF.ADD` / `BF.EXISTS` / `BF.RESERVE`），需 Redis ≥ 4.0 + 模块加载 🔴。
+- 容量预估：单线百条/s × 7 天 ≈ 6 千万 msg_id/线，按车间线数 × 误判率 0.1% 算位图大小 🔴。
+- 重建：定时任务（如每日）扫描 DB 近保留期 msg_id 重建布隆，或用滚动分桶（按天建 `mes:dedup:dc:2026-07-12`，保留 7 个桶，滚动删除最旧）。
+
+---
+
+## 5. 场景④：在制品位置快照读模型（CQRS 读侧）
+
+### 5.1 业务背景
+
+在制品执行上下文采用**上下文内写侧/读侧 CQRS**：5 个写侧聚合发领域事件，读侧投影聚合 `WipUnit` + 读模型 `WipLocationSnapshot` / `BatchLocationView` 进程内订阅投影（[在制品执行上下文 §1.6 / §2.14](../../领域模型/生产执行服务/领域建模/在制品执行上下文.md)）。`WipProjectionService`（§3.10）消费写侧事件投影位置/状态/流转历史，幂等去重（`source_event_id`，BIZ-07）。
+
+### 5.2 载体选型 🔴
+
+| 路线 | 机制 | 适用 |
+|---|---|---|
+| **A. MySQL 读模型表** 🔴 主推 | `WipLocationSnapshot` / `WipHistoryProjection` 落 MySQL 表，事件驱动刷新 | 车间可视化查询频率不高（秒级/分钟级）、需历史追溯（`WipHistoryEntry` 只增）、可重放重建 |
+| B. Redis 读模型 | 位置快照落 Redis Hash，历史落 Redis List/Stream | 可视化高频实时刷新（如大屏每秒拉全车间在制位置） |
+
+**推荐**：路线 A（MySQL 读模型）为主。`WipHistoryEntry` 只增不可改不可删（INV-04），需长期追溯，MySQL 更合适；位置快照若可视化高频刷新，可额外投影一份到 Redis 加速（路线 B 作为可视化加速层，非事实源）。**Redis 在本场景是可选的可视化加速，非必需。**
+
+### 5.3 闪光点
+
+- **CQRS 读写分离，读侧可独立选型**：写侧聚合守护不变式，读侧投影按查询模式选 MySQL/Redis，互不污染（[在制品执行上下文 §0](../../领域模型/生产执行服务/领域建模/在制品执行上下文.md)）。
+- **幂等重放重建（BIZ-07 / INV-CX 降级 BIZ-09）**：`WipUnit` 可从事件流完全重放重建，Redis/MySQL 读模型丢失无碍，投影是派生数据。
+
+### 5.4 重难点
+
+| 重难点 | 风险 | 应对 |
+|---|---|---|
+| **事件乱序** | `UnitRoutedToRework` 与 `UnitReworkReentered` 投递乱序，投影位置错乱 | ① 维护事件序号/过点时间戳，乱序暂存缓冲按序重放（[在制品执行上下文 §3.10 🔴 热点](../../领域模型/生产执行服务/领域建模/在制品执行上下文.md)）；② `source_event_id` 幂等去重保证重放安全 |
+| **Redis 读模型一致性** | Redis 投影与 MySQL 写侧短暂不一致 | Redis 投影是派生数据，可重建；可视化容忍秒级延迟 |
+| **历史膨胀** | `WipHistoryEntry` 只增，高频过点下历史增长快 | MySQL 按工单分区归档；Redis 只存最新位置快照，不存全量历史 |
+
+### 5.5 实现要点
+
+- MySQL 读模型：`wip_location_snapshot`（按 `work_order_id`+`sn` 唯一）、`wip_history`（按 `sn`+`timestamp` 索引），事件驱动 upsert/insert。
+- Redis 加速（可选）：`mes:wip:snapshot:{work_order_id}` Hash 存该工单在制位置分布，可视化大屏 `HGETALL` 一次取齐；TTL 🔴 按工单生命周期。
+
+---
+
+## 6. 场景⑤⑥：分布式协调（可选/优化项）
+
+### 6.1 场景⑤：工单/产品流水号生成（Redis INCR 可选优化）
+
+**业务背景**：[MesSerialNumberService](../../领域模型/生产执行服务/领域建模/工单管理上下文.md) §3.4 按前缀递增生成全局唯一 `MesSerialNo`，`ProductSerialNoService` §3.5 批量生成产品流水号。当前由 `(serial_no_prefix, sequence_no)` DB 唯一索引保证并发安全（BIZ-03/BIZ-06/BIZ-07）。
+
+**Redis 使用方式（可选优化）**：
+
+```text
+方案 A（当前，DB 唯一索引）:
+  sequence_no = SELECT MAX(sequence_no) + 1 FOR UPDATE
+  INSERT ... 唯一索引冲突重试
+
+方案 B（Redis INCR 优化，可选）:
+  sequence_no = INCR mes:seq:{prefix}
+  -> 仍落 DB 唯一索引兜底（Redis INCR 与 DB 不原子）
+```
+
+| 闪光点 | 重难点 |
+|---|---|
+| Redis `INCR` 原子递增，免 DB 行锁，高并发下达号更快 | **Redis 与 DB 不原子**：INCR 成功但 DB INSERT 失败则号段空洞；需 DB 唯一索引兜底 + 接受空洞（流水号不连续可接受，文档已确认"不可回收"） |
+| `INCR` 单线程串行保证同前缀递增 | Redis 故障降级回 DB `MAX+1 FOR UPDATE`；故障期间号段可能回退（与"不可回收"冲突），需 Redis 持久化（AOF appendfsync everysec）缩短窗口 |
+
+**推荐**：工单下达是低频操作（[工单管理上下文 §3.2](../../领域模型/生产执行服务/领域建模/工单管理上下文.md) 已确认"低频，建议默认不缓存"），**保持 DB 唯一索引方案 A，不引入 Redis**。仅当批量发号成为瓶颈时评估方案 B。这是"不滥用 Redis"的体现。
+
+### 6.2 场景⑥：跨实例全局限流（Redis 令牌桶 Lua）
+
+**业务背景**：过点入口（如换班高峰）、ACL 出站 REST（调源上下文降级查询）、SAP 工单接收等场景，多实例部署下需**跨实例统一限流**保护下游。单实例令牌桶（Resilience4j）无法感知其它实例的消耗。
+
+**Redis 使用方式**：Redis + Lua 脚本实现分布式令牌桶（`INCRBY` + `EXPIRE` 原子判桶）。
+
+| 闪光点 | 重难点 |
+|---|---|
+| Lua 脚本在 Redis 单线程内原子执行，跨实例精确限流 | Redis 故障时限流失效；需降级为本地令牌桶（宽松限流）或直接放行（按业务容忍度） |
+| 集群级配额统一管控（与 [Outbox §9.4](../业务事件/Outbox设计方案.md) Kafka 配额互补） | 限流是"自律"非"强制"，需下游也有自我保护（熔断/背压） |
+
+**推荐**：起步用单实例令牌桶（Resilience4j）；当实例数扩张到本地限流无法保护下游时（🔴 阈值待定），引入 Redis 分布式令牌桶。Outbox Publisher 限流已是单实例令牌桶 + Kafka 集群配额兜底（[Outbox §9](../业务事件/Outbox设计方案.md)），不强制 Redis。
+
+### 6.3 为什么 MES 业务建模基本不需要 Redis 分布式锁
+
+这是 DDD 聚合边界设计的**正向收益**——以下场景天然不需要分布式锁：
+
+| 场景 | 常见误用 | MES 正确做法 | 为什么不需要 Redis 锁 |
+|---|---|---|---|
+| 同线已确认槽位不重叠（排产 INV-01） | Redis 分布式锁锁产线 | `LineSchedule` 聚合内事务强一致校验（[排产上下文 §1.1](../../领域模型/生产执行服务/领域建模/排产上下文.md)） | 聚合边界把"同线槽位"收敛到单聚合，事务内校验 |
+| 可用性重算并发（台账 BIZ-07） | Redis 分布式锁锁资产 | DB 乐观锁 `asset_id + version`（[设备工装台账上下文](../../领域模型/设备管理服务/领域建模/设备工装台账上下文.md)） | 乐观锁无锁竞争，冲突重试即可 |
+| 设备单活跃通道（BIZ-01） | Redis 分布式锁锁设备 | `(equipment_id, status=ACTIVE)` DB 唯一索引 | 唯一索引是数据库级强制约束，比 Redis 锁更可靠 |
+| 工单状态机流转 | Redis 分布式锁锁工单 | `WorkOrder` 聚合内状态机 + 版本号 | 聚合内事务保证，跨实例由乐观锁/唯一索引兜底 |
+
+**结论**：MES 通过 DDD 聚合边界 + DB 唯一索引/乐观锁，把并发控制收敛到聚合内事务或 DB 约束，**规避了 Redis 分布式锁的复杂性**（锁过期/续约/脑裂/不可重入）。这是架构成熟度的体现，应作为设计原则坚守。
+
+---
+
+## 7. 明确不用 Redis 的场景（边界澄清）
+
+为避免 Redis 滥用，下表明确 MES 中**看似适合 Redis 但实际不该用**的场景：
+
+| 场景 | 误用倾向 | 正确选型 | 理由 |
+|---|---|---|---|
+| **消息队列** | Redis Pub/Sub / Stream | **Kafka**（业务事件 Outbox + 采集直连） | Redis Pub/Sub 无持久化、Stream 吞吐弱；Kafka 持久化 + 高吞吐 + 分区有序，是 MES 事件骨干（[Outbox设计方案](../业务事件/Outbox设计方案.md) / [高频数据方案](../高频数据/MES高频数据方案.md)） |
+| **事件消费幂等表** `consumed_event` | Redis SET 去重 | **MySQL 表** `(event_id, consumer_group)` 主键 | 幂等记录必须与业务处理**同本地事务原子**（[Outbox §3.3/§8.3](../业务事件/Outbox设计方案.md)）；Redis 无法参与 MySQL 事务，跨存储无法原子 |
+| **可用性重算并发** | Redis 分布式锁 | **DB 乐观锁** `asset_id + version`（BIZ-07） | 乐观锁无锁竞争、冲突重试简单；Redis 锁有过期/脑裂问题 |
+| **单活跃通道/流水号唯一性** | Redis SETNX | **DB 唯一索引**（BIZ-01/BIZ-03） | DB 唯一索引是持久化强制约束，比 Redis 锁/SETNX 更可靠，且与事务原子 |
+| **Outbox Publisher 限流** | Redis 令牌桶 | **单实例令牌桶 + Kafka 集群配额**（[Outbox §9](../业务事件/Outbox设计方案.md)） | Publisher 多实例各自令牌桶 + 集群级配额兜底已足够；引入 Redis 增加依赖 |
+| **聚合状态/事务数据** | Redis 存聚合 | **MySQL 聚合表** | 聚合是事实来源，必须事务持久化；Redis 不可作事实源（§1.3 三不原则） |
+
+---
+
+## 8. Redis 部署与配置
+
+### 8.1 部署形态 🔴
+
+| 形态 | 适用 | 说明 |
+|---|---|---|
+| **主从 + 哨兵（Sentinel）** 🔴 主推 | 中小规模（单车间/单 MES 部署） | 主从自动故障转移；哨兵监控选主；满足过点 SLA 与采集去重可用性 |
+| Cluster 集群 | 大规模（多车间/数据量超单机内存） | 分片扩容；但 Hash tag 需保证同 `equipment_id` 落同槽（热层 Hash 操作需同节点） |
+
+🔴 部署形态按车间规模与内存容量决策。热层（§3）与去重（§4）可共用同一 Redis 集群，DB 号隔离（§8.2）。
+
+### 8.2 数据隔离与 Key 命名
+
+统一 key 前缀 `mes:{domain}:{type}:{id}`，按场景分 DB 号：
+
+| 场景 | DB 号 🔴 | Key 前缀 | 数据结构 |
+|---|---|---|---|
+| 过点校验二级缓存（§2） | 0 | `mes:cache:{context}:{type}:{id}` | String（JSON） |
+| 设备实时数据热层（§3） | 1 | `mes:hot:equip:{equipment_id}` | Hash |
+| msg_id 去重（§4） | 2 | `mes:dedup:dc[:{date_bucket}]` | Bloom（RedisBloom 模块） |
+| 在制品位置快照（§5，可选） | 3 | `mes:wip:snapshot:{work_order_id}` | Hash |
+| 流水号（§6.1，可选） | 4 | `mes:seq:{prefix}` | String（INCR） |
+| 全局限流（§6.2，可选） | 5 | `mes:limit:{resource}:{window}` | String + Lua |
+
+### 8.3 持久化策略（按场景差异化）
+
+| 场景 | 持久化 | 理由 |
+|---|---|---|
+| 热层快照（§3） | **可关闭**或 AOF everysec | 投影数据，丢失可从 Kafka 重建；重启快 |
+| msg_id 去重（§4） | **AOF everysec** 🔴 | Redis 故障后缩短布隆重建窗口；但 DB 唯一索引是事实源，不依赖 Redis 持久化 |
+| 二级缓存（§2） | 关闭 | 纯缓存，丢失回源 |
+| 流水号（§6.1） | **AOF everysec**（若启用） | 防号段回退（与"不可回收"冲突） |
+
+### 8.4 内存治理
+
+- **maxmemory + 淘汰策略**：热层/缓存用 `allkeys-lru`；去重布隆不淘汰（按保留期滚动分桶治理）。
+- 🔴 `maxmemory` 按场景预估：热层（设备数 × 平均点位大小）+ 去重布隆（msg_id 总量 × 位图）+ 缓存（活跃工单/设备数 × 条目大小），留 30% 余量。
+- 监控 `used_memory` / `evicted_keys` / 布隆过滤器误判率。
+
+---
+
+## 9. 可观测性
+
+| 指标 | 含义 |
+|---|---|
+| `redis_cache_hit_total{cache}` / `_miss_total` | 过点校验缓存命中率（应 >99%，[在制品执行上下文 §3.6 🔴](../../领域模型/生产执行服务/领域建模/在制品执行上下文.md)） |
+| `redis_cache_fallback_rest_total{cache}` | 缓存未命中降级 REST 查询次数（持续高则告警，源上下文被打） |
+| `redis_hot_query_latency_seconds{equipment_id}` | 热层查询延迟（应 ≤200ms，INV-CX-04） |
+| `redis_hot_stale_data_total` | 热层 `source_ts` 超时计为陈旧的次数（触发 `EquipmentDataTimeout` 拦截） |
+| `dc_duplicate_discarded_total` | msg_id 去重命中次数（[高频数据方案 §10.1](../高频数据/MES高频数据方案.md)） |
+| `redis_bloom_false_positive_total` | 布隆假阳性回退 DB 次数（误判率监控） |
+| `redis_used_memory` / `evicted_keys` | 内存使用与淘汰 |
+
+告警：缓存命中率 <99% 持续；热层查询 p99 >200ms；布隆误判率超预期；`used_memory` 接近 `maxmemory`。
+
+---
+
+## 10. 实施检查清单
+
+**过点校验缓存（§2）**
+- [ ] 六个过点校验缓存落地 Caffeine 进程内为主，事件驱动刷新 + `source_event_id` 幂等。
+- [ ] 缓存未命中降级 REST 查询，REST 失败保守拦截（INV-CX-05）。
+- [ ] TTL 兜底 + `refreshAfterWrite` 防击穿 + 空值缓存防穿透。
+- [ ] 实例数扩张时评估 Redis L2 二级缓存（路线 C）。
+
+**设备实时数据热层（§3）**
+- [ ] Redis Hash 按 `equipment_id` 维护最新数据点，平台 `PersistAndPublish` 同步覆盖写。
+- [ ] 过点查询走 `DataQueryAppService.getRealtimeDataPoints` -> Redis，≤200ms（INV-CX-04）。
+- [ ] `source_ts` 超时计 `EquipmentDataTimeout` 拦截（INV-10）；`OFFLINE`/`CLOSED` 失效策略落地。
+- [ ] Redis 故障重建链路（Kafka 回放）验证。
+
+**msg_id 去重（§4）**
+- [ ] RedisBloom 模块加载，`BF.RESERVE` 容量与误判率按实测定。
+- [ ] 布隆判重 + DB 唯一索引兜底 + 消费端幂等三层防御就位。
+- [ ] 去重保留期 ≥ 最长补传窗口（≥7 天），布隆滚动重建/计数布隆防膨胀。
+- [ ] Redis 故障降级 DB 去重 + 背压验证。
+
+**分布式协调（§6）**
+- [ ] 流水号保持 DB 唯一索引（不滥用 Redis INCR），除非发号成瓶颈。
+- [ ] 跨实例限流按实例规模评估 Redis 令牌桶启用时机。
+- [ ] 确认所有并发控制场景用聚合内事务/DB 唯一索引/乐观锁，未引入 Redis 分布式锁。
+
+**部署与可观测（§8/§9）**
+- [ ] 部署形态定稿（主从+哨兵 / Cluster），DB 号与 key 前缀隔离落地。
+- [ ] 持久化策略按场景差异化配置。
+- [ ] 指标 + 告警就位（命中率、热层延迟、布隆误判率、内存）。
+
+---
+
+## 11. 关键原则总结
+
+1. **Redis 是读优化投影/热层/去重/协调辅助，永不承担事实来源**--事实来源是 MySQL 聚合 + Kafka 事件流，Redis 丢失可重建（§1.3 三不原则）。
+2. **过点校验缓存以 Caffeine 进程内为主、Redis 作降级二级缓存**--写少读多 + 事件驱动刷新 + 过点 SLA 苛刻，进程内缓存最优；Redis 价值在吸收多实例 miss 风暴保护源上下文（§2）。
+3. **设备实时数据热层必须 Redis**--跨服务共享 + 持续高频写入 + ≤200ms 查询，进程内缓存无法跨服务共享（§3）。
+4. **高频采集去重必须 Redis 布隆 + DB 唯一索引兜底**--采集吞吐超 DB 承受，布隆 O(1) 判重，三层防御保"不重"（§4）。
+5. **MES 通过 DDD 聚合边界规避了 Redis 分布式锁**--同线不重叠/可用性重算/单活跃通道/状态机均用聚合内事务 + DB 唯一索引/乐观锁解决，是架构成熟度体现，应坚守（§6.3）。
+6. **Redis 不承担 MQ、不替代 DB 唯一性约束、不参与 MySQL 事务原子**--消息走 Kafka，幂等表/聚合状态走 MySQL，跨存储无法原子（§7）。
+7. **每引入一处 Redis 必答"为什么不是 MySQL/Kafka/进程内缓存"**--避免滥用，Redis 是有代价的依赖（故障域 + 一致性窗口 + 运维成本）。
+
+---
+
+## 附录 A：决策点 🔴（交还用户）
+
+| 决策点 | 说明 | 默认建议 |
+|---|---|---|
+| 过点校验缓存载体路线（A/B/C） | Caffeine 为主 / Redis 为主 / Caffeine+Redis 二级 | 起步 A（Caffeine + 事件刷新 + REST 降级）；实例数多时 C |
+| 过点校验缓存 L2 Redis 启用阈值 | 实例数/降级查询率到多少启用 L2 | 🔴 实例数 ≥10 或源上下文 REST 降级率 >1% 时评估 |
+| 缓存 TTL / refreshAfterWrite | 兜底过期与异步刷新参数 | TTL 30min、refresh 5min（按数据语义调） |
+| 热层设备数据陈旧阈值 | `source_ts` 超多少计 `EquipmentDataTimeout` | 🔴 30s（按设备采样周期定） |
+| 热层重建回放窗口 | Redis 故障后从 Kafka 回放多久重建 | 🔴 5min |
+| msg_id 去重保留期 | ≥ 最长补传窗口 | ≥7 天，与死信保留对齐 |
+| 布隆误判率与容量 | `BF.RESERVE` error_rate 与 capacity | 0.1%，按线数 × 速率 × 7 天算 |
+| 布隆膨胀治理 | 计数布隆 vs 滚动分桶重建 | 滚动按天分桶 + 旧桶过期（简单） |
+| 在制品位置快照载体 | MySQL 读模型 vs Redis 加速 | MySQL 为主；可视化高频刷新时 Redis 加速 |
+| 流水号生成方案 | DB 唯一索引 vs Redis INCR | DB 唯一索引（低频不优化）；瓶颈时评估 Redis |
+| 跨实例限流启用时机 | 单实例令牌桶 vs Redis 分布式令牌桶 | 单实例起步；实例数扩张保护下游时启用 Redis |
+| Redis 部署形态 | 主从+哨兵 vs Cluster | 中小规模主从+哨兵；超单机内存用 Cluster（Hash tag 保同节点） |
+| Redis 持久化策略 | 热层/去重/缓存/流水号差异化 | 热层可关或 AOF everysec；去重 AOF everysec；缓存关闭；流水号 AOF |
+| Redis `maxmemory` 与淘汰策略 | 内存上限与淘汰 | 按场景预估 + 30% 余量；热层/缓存 allkeys-lru；去重不淘汰 |
+
+> 以上阈值在真实集群容量与车间实测量明确前，均为**设计目标 + 假设**，不作线上实绩承诺（口径见 §0）。
