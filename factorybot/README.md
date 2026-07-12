@@ -13,8 +13,8 @@
 
 ```bash
 cd factorybot
-pip install -e .
-python main.py            # http://127.0.0.1:8000/docs
+uv sync                   # 建 .venv + 装依赖（可编辑），生成 uv.lock
+uv run python main.py     # http://127.0.0.1:8000/docs
 ```
 
 mock 模式下：
@@ -23,7 +23,9 @@ mock 模式下：
 - checkpoint 用 `MemorySaver`（替代 MySQL SqlSaver）。
 - Redis 用进程内 `FakeRedis`；Kafka 动作卡推送用 `MockActionCardProducer`（仅记录日志）。
 
-切真实模式：复制 `.env.example` → `.env`，按需填写 `LLM_API_KEY` / `MYSQL_URL` / `REDIS_URL` / `KAFKA_BOOTSTRAP_SERVERS`，对应组件自动从 mock 切换到真实实现。
+切真实模式：复制 `.env.example` → `.env`，按需填写 `LLM_API_KEY` / `MYSQL_URL` / `REDIS_URL` / `KAFKA_BOOTSTRAP_SERVERS`，对应组件自动从 mock 切换到真实实现；可选依赖按需安装：`uv sync --extra llm --extra mysql --extra redis`（或 `--all-extras`，等价于 `pip install -e ".[llm,mysql,redis]"`）。
+
+> LLM 接入 DeepSeek + 思考模型兼容要点（json_mode / tool_call_id 贯穿 / 多 interrupt resume 等）详见 [LLM接入与模型兼容-设计与实现方案.md](../AGENT服务/LLM接入与模型兼容-设计与实现方案.md)。
 
 ## 目录
 
