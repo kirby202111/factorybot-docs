@@ -1,0 +1,27 @@
+{
+  "isolation": {
+    "isolation_order_id": "ISO-20260712-001",
+    "status": "ISSUED",
+    "batches": ["B-501", "B-502"]
+  },
+  "route_activate": {
+    "route_id": "RR-B",
+    "version": "v4",
+    "status": "ACTIVE"
+  },
+  "pass_release": {
+    "work_order_id": "WO-2026-0701",
+    "status": "RELEASED"
+  },
+  "sop_publish": {
+    "sop_id": "SOP-20260712-001",
+    "status": "PUBLISHED"
+  },
+  "repair_order": {
+    "repair_order_id": "RO-20260712-001",
+    "status": "OPEN"
+  },
+  "_default": {
+    "status": "OK"
+  }
+}

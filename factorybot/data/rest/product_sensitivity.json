@@ -1,0 +1,7 @@
+{
+  "batches": [
+    {"batch_id": "B-501", "product_family": "0201_fine_pitch", "sensitive_to": ["placement_pressure"]},
+    {"batch_id": "B-502", "product_family": "0201_fine_pitch", "sensitive_to": ["placement_pressure"]},
+    {"batch_id": "B-503", "product_family": "0603_standard", "sensitive_to": []}
+  ]
+}

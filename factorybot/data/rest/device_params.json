@@ -1,0 +1,19 @@
+{
+  "ASSET-01": {
+    "asset_id": "ASSET-01",
+    "data_points": [
+      {"param_name": "placement_pressure", "value": 1.22, "unit": "N", "source_ts": "2026-07-12T13:40:00Z", "quality": "GOOD"},
+      {"param_name": "vacuum_level", "value": -85.0, "unit": "kPa", "source_ts": "2026-07-12T13:40:00Z", "quality": "GOOD"}
+    ]
+  },
+  "ASSET-02": {
+    "asset_id": "ASSET-02",
+    "data_points": [
+      {"param_name": "zone3_temp", "value": 245.5, "unit": "C", "source_ts": "2026-07-12T13:50:00Z", "quality": "GOOD"}
+    ]
+  },
+  "_default": {
+    "asset_id": "ASSET-DEFAULT",
+    "data_points": []
+  }
+}

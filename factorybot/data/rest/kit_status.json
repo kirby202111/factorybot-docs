@@ -1,0 +1,27 @@
+{
+  "WO-2026-0701": {
+    "wo_id": "WO-2026-0701",
+    "kit_ready": true,
+    "kit_rate": 100,
+    "missing_items": [],
+    "missing_material_ids": [],
+    "total_material_lines": 120,
+    "kitted_lines": 120,
+    "status": "READY",
+    "checked_at": "2026-07-12T13:40:00Z"
+  },
+  "_default": {
+    "wo_id": "WO-DEFAULT",
+    "kit_ready": false,
+    "kit_rate": 85,
+    "missing_items": [
+      {"part_no": "MAT-001", "required_qty": 5000, "available_qty": 4200},
+      {"part_no": "MAT-002", "required_qty": 5000, "available_qty": 4000}
+    ],
+    "missing_material_ids": ["MAT-001", "MAT-002"],
+    "total_material_lines": 120,
+    "kitted_lines": 102,
+    "status": "PARTIAL",
+    "checked_at": "2026-07-12T13:40:00Z"
+  }
+}

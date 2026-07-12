@@ -1,0 +1,14 @@
+{
+  "RR-B:v4": {
+    "route_id": "RR-B",
+    "version": "v4",
+    "qualified": true,
+    "missing_qualifications": []
+  },
+  "_default": {
+    "route_id": "RR-DEFAULT",
+    "version": "v1",
+    "qualified": true,
+    "missing_qualifications": []
+  }
+}

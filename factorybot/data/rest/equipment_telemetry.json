@@ -1,0 +1,17 @@
+{
+  "ASSET-01": {
+    "asset_id": "ASSET-01",
+    "window": ["2026-07-11T22:00:00Z", "2026-07-12T14:30:00Z"],
+    "series": [
+      {"timestamp": "2026-07-11T22:00:00Z", "placement_pressure": 1.15, "vacuum_level": -85.0},
+      {"timestamp": "2026-07-12T06:00:00Z", "placement_pressure": 1.18, "vacuum_level": -84.0},
+      {"timestamp": "2026-07-12T12:00:00Z", "placement_pressure": 1.21, "vacuum_level": -83.0},
+      {"timestamp": "2026-07-12T14:00:00Z", "placement_pressure": 1.24, "vacuum_level": -82.0}
+    ]
+  },
+  "_default": {
+    "asset_id": "ASSET-DEFAULT",
+    "window": ["2026-07-12T00:00:00Z", "2026-07-12T14:00:00Z"],
+    "series": []
+  }
+}

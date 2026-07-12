@@ -1,0 +1,16 @@
+{
+  "event_id": "evt-route-001",
+  "event_type": "ProcessRouteActivated",
+  "route_id": "RR-B",
+  "version": "v5",
+  "previous_version": "v4",
+  "tenant_id": "WS-A",
+  "workshop": "SMT-1",
+  "line": "L-01",
+  "activated_at": "2026-07-12T14:00:00Z",
+  "changes": {
+    "added_params": [{"zone": 3, "temp": 248}],
+    "removed_params": [{"zone": 3, "temp": 245}],
+    "modified_params": []
+  }
+}

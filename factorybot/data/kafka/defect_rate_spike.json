@@ -1,0 +1,10 @@
+{
+  "event_id": "evt-spike-001",
+  "event_type": "DefectRateSpike",
+  "batch_no": "B-2026-0701",
+  "workshop": "SMT-1",
+  "line": "L-01",
+  "defect_rate": 2.09,
+  "baseline_rate": 0.8,
+  "spike_at": "2026-07-12T14:00:00Z"
+}

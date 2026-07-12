@@ -1,0 +1,29 @@
+{
+  "ST-A": {
+    "stencil_id": "ST-A",
+    "current_status": "LENT_OUT",
+    "lent_to_asset": "ASSET-01",
+    "lent_by": "u_zhang",
+    "lent_at": "2026-07-11T22:00:00Z",
+    "expected_return_at": "2026-07-12T06:00:00Z",
+    "returned_at": null
+  },
+  "ST-B": {
+    "stencil_id": "ST-B",
+    "current_status": "IN_STOCK",
+    "lent_to_asset": "",
+    "lent_by": "",
+    "lent_at": "",
+    "expected_return_at": "",
+    "returned_at": "2026-07-11T21:00:00Z"
+  },
+  "_default": {
+    "stencil_id": "ST-DEFAULT",
+    "current_status": "IN_STOCK",
+    "lent_to_asset": "",
+    "lent_by": "",
+    "lent_at": "",
+    "expected_return_at": "",
+    "returned_at": null
+  }
+}

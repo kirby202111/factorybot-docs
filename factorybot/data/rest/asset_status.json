@@ -1,0 +1,18 @@
+{
+  "ASSET-01": {
+    "asset_id": "ASSET-01",
+    "asset_kind": "SMT_PLACEMENT",
+    "status": "AVAILABLE",
+    "available": true,
+    "blocking_reasons": [],
+    "last_updated": "2026-07-12T13:00:00Z"
+  },
+  "_default": {
+    "asset_id": "ASSET-DEFAULT",
+    "asset_kind": "MISC",
+    "status": "AVAILABLE",
+    "available": true,
+    "blocking_reasons": [],
+    "last_updated": "2026-07-12T00:00:00Z"
+  }
+}

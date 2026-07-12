@@ -1,0 +1,42 @@
+{
+  "SN-2026-001234": {
+    "serial_no": "SN-2026-001234",
+    "subgraph_ref": "SUB-A1",
+    "route_version": "v4",
+    "nodes": [
+      {"id": "n1", "label": "WipUnit", "properties": {"sn": "SN-2026-001234", "status": "BLOCKED"}, "source_event_id": "evt-1"},
+      {"id": "n2", "label": "WorkOrder", "properties": {"work_order_id": "WO-2026-0701", "product_id": "P-100"}, "source_event_id": "evt-2"},
+      {"id": "n3", "label": "RouteVersion", "properties": {"route_id": "RR-B", "route_version": "v4", "status": "ACTIVE"}, "source_event_id": "evt-3"},
+      {"id": "n4", "label": "CheckpointRecord", "properties": {"station_id": "STN-REFLOW", "equipment_id": "ASSET-02", "decision": "BLOCK", "blocking_reason": "焊接不良", "scanned_by": "u_li", "occurred_at": "2026-07-12T13:55:00Z"}, "source_event_id": "evt-4"},
+      {"id": "n5", "label": "CheckpointRecord", "properties": {"station_id": "STN-SMT", "equipment_id": "ASSET-01", "decision": "PASS", "occurred_at": "2026-07-12T13:52:00Z"}, "source_event_id": "evt-5"},
+      {"id": "n6", "label": "Asset", "properties": {"asset_id": "ASSET-01", "asset_kind": "SMT_PLACEMENT"}, "source_event_id": "evt-6"},
+      {"id": "n7", "label": "InventoryBatch", "properties": {"batch_no": "B-2026-0701", "part_no": "MAT-SOLDER-PASTE", "supplier_id": "SUP-001"}, "source_event_id": "evt-7"},
+      {"id": "n8", "label": "TestResult", "properties": {"test_id": "T-102", "raw_verdict": "FAIL", "test_type": "AOI_SOLDER", "defect_count": 3}, "source_event_id": "evt-8"},
+      {"id": "n9", "label": "QualityVerdict", "properties": {"verdict": "DEFECTIVE", "defect_type": "SOLDER_INSUFFICIENT"}, "source_event_id": "evt-9"}
+    ],
+    "edges": [
+      {"source": "n1", "target": "n2", "type": "BELONGS_TO"},
+      {"source": "n2", "target": "n3", "type": "SNAPSHOT_OF_ROUTE", "properties": {"route_version": "v4"}},
+      {"source": "n1", "target": "n4", "type": "PASSED_AT"},
+      {"source": "n1", "target": "n5", "type": "PASSED_AT"},
+      {"source": "n5", "target": "n6", "type": "ON_EQUIPMENT"},
+      {"source": "n2", "target": "n7", "type": "CONSUMED_BATCH"},
+      {"source": "n4", "target": "n8", "type": "HAS_TEST_RESULT"},
+      {"source": "n8", "target": "n9", "type": "RESULTED_IN"}
+    ]
+  },
+  "_default": {
+    "serial_no": "SN-DEFAULT",
+    "subgraph_ref": "SUB-DEFAULT",
+    "route_version": "v4",
+    "nodes": [
+      {"id": "d1", "label": "WipUnit", "properties": {"sn": "SN-DEFAULT", "status": "IN_PROGRESS"}, "source_event_id": "evt-d1"},
+      {"id": "d2", "label": "WorkOrder", "properties": {"work_order_id": "WO-2026-0701", "product_id": "P-100"}, "source_event_id": "evt-d2"},
+      {"id": "d3", "label": "RouteVersion", "properties": {"route_id": "RR-B", "route_version": "v4", "status": "ACTIVE"}, "source_event_id": "evt-d3"}
+    ],
+    "edges": [
+      {"source": "d1", "target": "d2", "type": "BELONGS_TO"},
+      {"source": "d2", "target": "d3", "type": "SNAPSHOT_OF_ROUTE", "properties": {"route_version": "v4"}}
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "SN-2026-001234": {
+    "results": [
+      {
+        "test_id": "T-101",
+        "sn": "SN-2026-001234",
+        "station_id": "STN-SPI",
+        "test_type": "SPI_SOLDER_VOLUME",
+        "raw_verdict": "PASS",
+        "measured_items": [
+          {"item_name": "solder_volume_pct", "value": 92.0, "unit": "%"}
+        ],
+        "source_channel": "SPI",
+        "source_ts": "2026-07-12T13:51:00Z"
+      },
+      {
+        "test_id": "T-102",
+        "sn": "SN-2026-001234",
+        "station_id": "STN-REFLOW",
+        "test_type": "AOI_SOLDER",
+        "raw_verdict": "FAIL",
+        "measured_items": [
+          {"item_name": "solder_defect_type", "value": 0, "unit": "code"},
+          {"item_name": "defect_count", "value": 3, "unit": "ea"}
+        ],
+        "source_channel": "AOI",
+        "source_ts": "2026-07-12T13:55:00Z"
+      }
+    ]
+  },
+  "_default": {
+    "results": [
+      {
+        "test_id": "T-999",
+        "sn": "SN-DEFAULT",
+        "station_id": "STN-SMT",
+        "test_type": "AOI_SOLDER",
+        "raw_verdict": "PASS",
+        "measured_items": [],
+        "source_channel": "AOI",
+        "source_ts": "2026-07-12T13:50:00Z"
+      }
+    ]
+  }
+}

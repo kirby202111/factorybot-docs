@@ -1,0 +1,12 @@
+{
+  "ASSET-01": {
+    "asset_id": "ASSET-01",
+    "stencil_id": "ST-A",
+    "scanned_at": "2026-07-12T13:45:00Z"
+  },
+  "_default": {
+    "asset_id": "ASSET-DEFAULT",
+    "stencil_id": "ST-B",
+    "scanned_at": "2026-07-12T00:00:00Z"
+  }
+}

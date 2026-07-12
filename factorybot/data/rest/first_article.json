@@ -1,0 +1,12 @@
+{
+  "WO-2026-0701": {
+    "work_order_id": "WO-2026-0701",
+    "status": "PASS",
+    "article_id": "FA-2026-0701-001"
+  },
+  "_default": {
+    "work_order_id": "WO-DEFAULT",
+    "status": "PASS",
+    "article_id": "FA-DEFAULT"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "RR-B:v4": {
+    "route_id": "RR-B",
+    "version": "v4",
+    "product_id": "P-100",
+    "route_type": "SMT",
+    "status": "ACTIVE",
+    "tooling": {
+      "stencil_id": "ST-B",
+      "program_id": "PB-B-v4",
+      "fixture_id": "FX-B"
+    },
+    "steps": [
+      {"step_no": 10, "operation_id": "OP-SPI", "station_type": "SPI", "anti_error_items": ["solder_volume_pct>=80"], "is_reentry_point": false},
+      {"step_no": 20, "operation_id": "OP-SMT", "station_type": "SMT", "anti_error_items": ["stencil_id==ST-B", "program_id==PB-B-v4"], "is_reentry_point": false},
+      {"step_no": 30, "operation_id": "OP-REFLOW", "station_type": "REFLOW", "anti_error_items": ["zone3_temp==245"], "is_reentry_point": false},
+      {"step_no": 40, "operation_id": "OP-AOI", "station_type": "AOI", "anti_error_items": [], "is_reentry_point": true}
+    ]
+  },
+  "RR-A:v2": {
+    "route_id": "RR-A",
+    "version": "v2",
+    "product_id": "P-080",
+    "route_type": "SMT",
+    "status": "ACTIVE",
+    "tooling": {
+      "stencil_id": "ST-A",
+      "program_id": "PB-A-v2",
+      "fixture_id": "FX-A"
+    },
+    "steps": [
+      {"step_no": 10, "operation_id": "OP-SMT", "station_type": "SMT", "anti_error_items": ["stencil_id==ST-A"], "is_reentry_point": false}
+    ]
+  },
+  "RR-B:v3": {
+    "route_id": "RR-B",
+    "version": "v3",
+    "product_id": "P-100",
+    "route_type": "SMT",
+    "status": "SUPERSEDED",
+    "tooling": {"stencil_id": "ST-B", "program_id": "PB-B-v3", "fixture_id": "FX-B"},
+    "steps": []
+  },
+  "_default": {
+    "route_id": "RR-DEFAULT",
+    "version": "v1",
+    "product_id": "P-100",
+    "route_type": "SMT",
+    "status": "ACTIVE",
+    "tooling": {"stencil_id": "ST-D", "program_id": "PB-D-v1", "fixture_id": "FX-D"},
+    "steps": []
+  }
+}

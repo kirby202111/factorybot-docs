@@ -1,0 +1,22 @@
+{
+  "BOM-100:v3": {
+    "bom_id": "BOM-100",
+    "version": "v3",
+    "product_id": "P-100",
+    "bom_type": "MANUFACTURING",
+    "status": "ACTIVE",
+    "items": [
+      {"part_no": "MAT-SOLDER-PASTE", "name": "锡膏", "qty_per_unit": 0.02, "consumption_rule": "BATCH"},
+      {"part_no": "MAT-PCB-100", "name": "PCB", "qty_per_unit": 1.0, "consumption_rule": "PER_UNIT"},
+      {"part_no": "MAT-IC-0201", "name": "0201电阻", "qty_per_unit": 12.0, "consumption_rule": "PER_UNIT"}
+    ]
+  },
+  "_default": {
+    "bom_id": "BOM-DEFAULT",
+    "version": "v1",
+    "product_id": "P-100",
+    "bom_type": "MANUFACTURING",
+    "status": "ACTIVE",
+    "items": []
+  }
+}

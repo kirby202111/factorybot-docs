@@ -1,0 +1,18 @@
+{
+  "WO-2026-0701": {
+    "wo_id": "WO-2026-0701",
+    "completed_qty": 1820,
+    "good_qty": 1800,
+    "bad_qty": 20,
+    "reworked_qty": 12,
+    "scrapped_qty": 8
+  },
+  "_default": {
+    "wo_id": "WO-DEFAULT",
+    "completed_qty": 0,
+    "good_qty": 0,
+    "bad_qty": 0,
+    "reworked_qty": 0,
+    "scrapped_qty": 0
+  }
+}

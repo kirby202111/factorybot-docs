@@ -1,0 +1,32 @@
+{
+  "WO-2026-0701": {
+    "wo_id": "WO-2026-0701",
+    "product_id": "P-100",
+    "status": "IN_PROGRESS",
+    "bom_version": "v3",
+    "route_version": "v4",
+    "planned_qty": 5000,
+    "completed_qty": 1820,
+    "line_id": "L-01"
+  },
+  "WO-2026-0630": {
+    "wo_id": "WO-2026-0630",
+    "product_id": "P-080",
+    "status": "CLOSED",
+    "bom_version": "v2",
+    "route_version": "v2",
+    "planned_qty": 3000,
+    "completed_qty": 3000,
+    "line_id": "L-01"
+  },
+  "_default": {
+    "wo_id": "WO-DEFAULT",
+    "product_id": "P-100",
+    "status": "IN_PROGRESS",
+    "bom_version": "v3",
+    "route_version": "v4",
+    "planned_qty": 1000,
+    "completed_qty": 0,
+    "line_id": "L-01"
+  }
+}

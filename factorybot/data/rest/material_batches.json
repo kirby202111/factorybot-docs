@@ -1,0 +1,26 @@
+{
+  "B-2026-0701": {
+    "batch_no": "B-2026-0701",
+    "part_no": "MAT-SOLDER-PASTE",
+    "material_name": "锡膏 Sn63/Pb37",
+    "category": "SOLDER_PASTE",
+    "supplier_id": "SUP-001",
+    "lot_no": "LOT-0701",
+    "received_qty": 5000,
+    "available_qty": 3200,
+    "received_at": "2026-07-01T09:00:00Z",
+    "expiry_date": "2026-08-15"
+  },
+  "_default": {
+    "batch_no": "B-DEFAULT",
+    "part_no": "MAT-DEFAULT",
+    "material_name": "默认物料",
+    "category": "MISC",
+    "supplier_id": "SUP-000",
+    "lot_no": "LOT-0",
+    "received_qty": 1000,
+    "available_qty": 1000,
+    "received_at": "2026-07-01T00:00:00Z",
+    "expiry_date": null
+  }
+}

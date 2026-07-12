@@ -1,0 +1,14 @@
+{
+  "ASSET-01": {
+    "previous_work_order_id": "WO-2026-0630",
+    "closed_at": "2026-07-11T22:00:00Z",
+    "stencil_return_triggered": false,
+    "stencil_id_at_close": "ST-A"
+  },
+  "_default": {
+    "previous_work_order_id": "WO-DEFAULT-PREV",
+    "closed_at": "2026-07-11T22:00:00Z",
+    "stencil_return_triggered": true,
+    "stencil_id_at_close": "ST-A"
+  }
+}

@@ -1,0 +1,148 @@
+"""composition root：构建全部单例服务并装配。
+
+依赖注入在此完成：ACL clients -> 工具注册表 -> LLM -> 可观测 -> 仓库 ->
+L1 服务 / L2 服务 / L3 编排。FastAPI 的 api/deps.py 从这里取单例。
+"""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Optional
+
+from app.application.action_card_dispatcher import ActionCardDispatcher, WebSocketManager
+from app.application.diagnosis_service import DiagnosisService
+from app.application.draft_service import DraftService
+from app.application.l3_orchestrator import L3Orchestrator
+from app.application.tools import build_l1_tool_registry, build_l3_tool_registry
+from app.application.builders.eight_d import EightDDraftBuilder
+from app.application.builders.rework_order import ReworkOrderDraftBuilder
+from app.application.builders.sop import SopDraftBuilder
+from app.config import get_settings
+from app.domain.draft import DraftKind
+from app.domain.tenant import TenantContext
+from app.infrastructure.acl.wiring import build_acl_clients
+from app.infrastructure.ai.llm_factory import get_llm
+from app.infrastructure.cost.eval_gate import EvalGate
+from app.infrastructure.cost.model_router import ModelRouter
+from app.infrastructure.longtask.session_manager import SessionManager
+from app.infrastructure.obs.observability import build_observability
+from app.infrastructure.persistence.checkpointer import get_checkpointer
+from app.infrastructure.persistence.repos import (
+    DraftRepo, DraftTraceRepo, L3Repo, NodeTraceRepo, ToolCallTraceRepo,
+    get_l3_repo, get_tool_call_trace_repo,
+)
+from app.infrastructure.redis_.confirmation_store import ConfirmationStore
+from app.infrastructure.redis_.fake_redis import get_redis
+from app.orchestration.agents import build_agent_registry
+from app.orchestration.code_nodes.barrier import FailureTracker
+from app.orchestration.code_nodes.gate import GateManager
+from app.orchestration.code_nodes.query_compare import QueryCompareNodes
+from app.orchestration.code_nodes.write_via_appservice import WriteViaAppService
+from app.orchestration.scenarios import (
+    build_changeover_graph, build_complaint_8d_graph,
+    build_fault_response_graph, build_process_change_graph,
+)
+from app.orchestration.supervisor_graph import SupervisorGraph
+
+
+class Container:
+    """单例容器。首次访问时惰性装配。"""
+
+    def __init__(self) -> None:
+        self.settings = get_settings()
+        # 可观测
+        self.obs = build_observability()
+        # 存储
+        self.redis = get_redis()
+        self.confirmation_store = ConfirmationStore(self.redis, self.settings.confirmation_token_ttl)
+        self.checkpointer = get_checkpointer()
+        self.tool_trace_repo = get_tool_call_trace_repo()
+        self.draft_repo = DraftRepo()
+        self.draft_trace_repo = DraftTraceRepo()
+        self.node_trace_repo = NodeTraceRepo()
+        self.l3_repo = get_l3_repo()
+        # LLM
+        self.llm = get_llm(self.obs)
+        # ACL
+        self.acl = build_acl_clients(
+            mock=self.settings.is_mock, fixtures=None, http=None,
+            confirmation_store=self.confirmation_store,
+        )
+        # 工具注册表
+        self.l1_registry = build_l1_tool_registry(self.acl)
+        self.l3_registry = build_l3_tool_registry(self.acl)
+        # 成本
+        self.eval_gate = EvalGate()
+        self.model_router = ModelRouter(self.eval_gate, allow_mock=self.settings.is_mock)
+        # L1 服务
+        self.diagnosis_service = DiagnosisService(
+            self.l1_registry, self.llm, self.tool_trace_repo, self.obs,
+        )
+        # L2 服务
+        self.builders = {
+            DraftKind.REWORK_ORDER: ReworkOrderDraftBuilder(self.acl.rag, self.acl.process, self.llm),
+            DraftKind.EIGHT_D: EightDDraftBuilder(self.acl.rag, self.acl.doc_rag, self.llm),
+            DraftKind.SOP: SopDraftBuilder(self.acl.doc_rag, self.llm),
+        }
+        self.draft_service = DraftService(
+            self.builders, self.draft_repo, self.draft_trace_repo, self.obs,
+        )
+        # L3 编排
+        self.dispatcher = ActionCardDispatcher(WebSocketManager())
+        self.failure_tracker = FailureTracker(self.l3_repo, self.settings.failure_threshold)
+        self.gate_manager = GateManager(self.l3_repo)
+        self.query_compare = QueryCompareNodes(
+            self.acl.tooling, self.acl.process, self.acl.material, self.l3_repo,
+        )
+        self.write_service = WriteViaAppService(self.l3_registry)
+        self.agents = build_agent_registry(
+            self.llm, self.l3_registry, self.l1_registry, self.tool_trace_repo, self.obs,
+        )
+        self.supervisor = SupervisorGraph(
+            self.query_compare, self.agents, self.gate_manager, self.l3_repo,
+            self.failure_tracker, self.dispatcher, self.write_service,
+        )
+        self.graphs = {
+            "CHANGEOVER": build_changeover_graph(self.supervisor, self.checkpointer),
+            "FAULT_RESPONSE": build_fault_response_graph(self.supervisor, self.checkpointer),
+            "COMPLAINT_8D": build_complaint_8d_graph(self.supervisor, self.checkpointer),
+            "PROCESS_CHANGE": build_process_change_graph(self.supervisor, self.checkpointer),
+        }
+        self.session_manager = SessionManager(self.l3_repo)
+        self.l3_orchestrator = L3Orchestrator(
+            self.graphs, self.session_manager, self.l3_repo,
+            self.confirmation_store, self.dispatcher,
+        )
+
+    # ---- 启动断言 ----
+    def validate_on_startup(self) -> None:
+        """三层写防线启动断言。"""
+        self.l1_registry.validate_on_startup()
+        self.l3_registry.validate_on_startup()
+        self.model_router.validate_on_startup()
+
+    def default_tenant(self) -> TenantContext:
+        s = self.settings
+        return TenantContext(
+            tenant_id=s.default_tenant_id, workshop=s.default_workshop,
+            line=s.default_line, role="ENGINEER", user_id="u_zhang",
+            scopes=TenantContext.default().scopes,
+        )
+
+
+_container: Optional[Container] = None
+
+
+def get_container() -> Container:
+    global _container
+    if _container is None:
+        _container = Container()
+    return _container
+
+
+def reset_container() -> None:
+    """测试用：重置容器（清进程内状态）。"""
+    global _container
+    _container = None
+    # 重置 LLM 单例，确保下次用新容器的 obs
+    from app.infrastructure.ai import llm_factory
+    llm_factory._llm = None

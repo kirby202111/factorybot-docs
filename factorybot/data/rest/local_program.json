@@ -1,0 +1,12 @@
+{
+  "ASSET-01": {
+    "asset_id": "ASSET-01",
+    "program_id": "PB-B-v3",
+    "last_updated": "2026-07-10T08:00:00Z"
+  },
+  "_default": {
+    "asset_id": "ASSET-DEFAULT",
+    "program_id": "PB-B-v4",
+    "last_updated": "2026-07-12T00:00:00Z"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "WO-2026-0701": {
+    "wo_id": "WO-2026-0701",
+    "rework_orders": [
+      {"rework_order_id": "RW-2026-001", "source_wo_id": "WO-2026-0701", "status": "OPEN", "rework_route_id": "RR-RW-1", "created_at": "2026-07-12T14:00:00Z"}
+    ]
+  },
+  "_default": {
+    "wo_id": "WO-DEFAULT",
+    "rework_orders": []
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "B-2026-0701": {
+    "batch_id": "B-2026-0701",
+    "supplier_id": "SUP-001",
+    "received_at": "2026-07-01T09:00:00Z",
+    "upstream_batches": ["SUP-001-LOT-0701", "SUP-001-LOT-0628"]
+  },
+  "_default": {
+    "batch_id": "B-DEFAULT",
+    "supplier_id": "SUP-000",
+    "received_at": "2026-07-01T00:00:00Z",
+    "upstream_batches": []
+  }
+}

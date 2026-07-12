@@ -1,0 +1,25 @@
+{
+  "ASSET-01": {
+    "asset_id": "ASSET-01",
+    "fmea_entries": [
+      {
+        "parameter": "placement_pressure",
+        "failure_mode": "pressure_drift",
+        "effect": "component_shift",
+        "sensitive_product_families": ["0201_fine_pitch"],
+        "severity": "HIGH"
+      },
+      {
+        "parameter": "vacuum_level",
+        "failure_mode": "vacuum_drop",
+        "effect": "no_pickup",
+        "sensitive_product_families": ["0201_fine_pitch", "0603_standard"],
+        "severity": "MEDIUM"
+      }
+    ]
+  },
+  "_default": {
+    "asset_id": "ASSET-DEFAULT",
+    "fmea_entries": []
+  }
+}

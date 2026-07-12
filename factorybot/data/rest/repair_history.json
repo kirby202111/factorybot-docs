@@ -1,0 +1,19 @@
+{
+  "SN-2026-001234": {
+    "sn": "SN-2026-001234",
+    "repairs": [
+      {
+        "repair_task_id": "RT-2026-001",
+        "defect_reason": "焊接不良-锡少",
+        "reentry_point": "OP-REFLOW",
+        "repair_result": "REWORKED",
+        "repaired_at": "2026-07-10T16:00:00Z",
+        "repaired_by": "u_wang"
+      }
+    ]
+  },
+  "_default": {
+    "sn": "SN-DEFAULT",
+    "repairs": []
+  }
+}

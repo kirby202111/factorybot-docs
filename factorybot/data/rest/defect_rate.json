@@ -1,0 +1,26 @@
+{
+  "B-2026-0701": {
+    "scope": "batch:B-2026-0701",
+    "total_units": 1820,
+    "defective_units": 38,
+    "defect_rate": 2.09,
+    "baseline_rate": 0.8,
+    "time_range": {"start": "2026-07-12T06:00:00Z", "end": "2026-07-12T14:00:00Z"}
+  },
+  "WO-2026-0701": {
+    "scope": "workorder:WO-2026-0701",
+    "total_units": 1820,
+    "defective_units": 38,
+    "defect_rate": 2.09,
+    "baseline_rate": 0.8,
+    "time_range": {"start": "2026-07-12T06:00:00Z", "end": "2026-07-12T14:00:00Z"}
+  },
+  "_default": {
+    "scope": "default",
+    "total_units": 1000,
+    "defective_units": 8,
+    "defect_rate": 0.8,
+    "baseline_rate": 0.8,
+    "time_range": {"start": "2026-07-12T00:00:00Z", "end": "2026-07-12T14:00:00Z"}
+  }
+}

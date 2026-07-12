@@ -1,0 +1,12 @@
+{
+  "event_id": "evt-fault-001",
+  "event_type": "EquipmentFault",
+  "asset_id": "ASSET-01",
+  "asset_name": "贴片机#1",
+  "fault_time": "2026-07-12T14:30:00Z",
+  "fault_code": "PLACEMENT_PRESSURE_DRIFT",
+  "fault_description": "贴装压力软漂移",
+  "tenant_id": "WS-A",
+  "workshop": "SMT-1",
+  "line": "L-01"
+}

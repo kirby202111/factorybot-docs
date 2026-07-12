@@ -1,0 +1,13 @@
+{
+  "ASSET-01": {
+    "asset_id": "ASSET-01",
+    "faults": [
+      {"fault_code": "VACUUM_DROP", "occurred_at": "2026-06-20T10:00:00Z", "resolved_at": "2026-06-20T11:00:00Z"},
+      {"fault_code": "PLACEMENT_PRESSURE_DRIFT", "occurred_at": "2026-05-15T08:00:00Z", "resolved_at": "2026-05-15T09:30:00Z"}
+    ]
+  },
+  "_default": {
+    "asset_id": "ASSET-DEFAULT",
+    "faults": []
+  }
+}

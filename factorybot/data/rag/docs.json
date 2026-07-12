@@ -1,0 +1,44 @@
+{
+  "documents": [
+    {
+      "doc_id": "SOP-RR-B-v4",
+      "doc_type": "SOP",
+      "title": "RR-B v4 SMT 作业指导书",
+      "content_snippet": "钢网 ST-B，程序 PB-B-v4；回流焊 zone3 245℃；锡膏型号 Sn63/Pb37，搅拌 30min。",
+      "route_version": "v4",
+      "score": 0.95
+    },
+    {
+      "doc_id": "SOP-RR-B-v3",
+      "doc_type": "SOP",
+      "title": "RR-B v3 SMT 作业指导书（已废止）",
+      "content_snippet": "钢网 ST-B，程序 PB-B-v3；回流焊 zone3 240℃。",
+      "route_version": "v3",
+      "score": 0.60
+    },
+    {
+      "doc_id": "8D-2026-0501",
+      "doc_type": "EIGHT_D",
+      "title": "0201 细间距贴装偏移 8D 报告",
+      "content_snippet": "根因：贴装压力软漂移；纠正：校准压力传感器 + 增加首件 AOI 复检。",
+      "route_version": null,
+      "score": 0.82
+    },
+    {
+      "doc_id": "8D-2026-0312",
+      "doc_type": "EIGHT_D",
+      "title": "锡膏批次虚焊 8D 报告",
+      "content_snippet": "根因：锡膏回温超时导致粘度异常；纠正：严格回温 4h + 粘度抽检。",
+      "route_version": null,
+      "score": 0.88
+    },
+    {
+      "doc_id": "MANUAL-SOLDER-INSPECT",
+      "doc_type": "MANUAL",
+      "title": "焊接不良检验手册",
+      "content_snippet": "锡少/虚焊：检查锡膏批次回温、钢网开口、刮刀压力；多发生在换线后首 50 件。",
+      "route_version": null,
+      "score": 0.78
+    }
+  ]
+}
