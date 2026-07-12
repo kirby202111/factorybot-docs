@@ -52,7 +52,11 @@ L1_SYSTEM_PROMPT = (
     "   示例: {\"summary\":\"...\",\"confidence\":0.72,\"hypotheses\":[{\"category\":\"Material\","
     "\"rank\":1,\"statement\":\"锡膏批次异常\",\"evidence\":[\"trace_id=T-101\"],"
     "\"suggested_action\":\"抽测锡膏粘度\"}],\"subgraph_ref\":\"SUB-A1\",\"route_version\":\"v4\","
-    "\"evidence_refs\":[\"trace_id=T-101\"],\"needs_human_review\":false}"
+    "\"evidence_refs\":[\"trace_id=T-101\"],\"needs_human_review\":false}\n"
+    "6. 证据优先，禁止从问题文本反推不良：若工具返回的追溯图无 BLOCK/不良节点、过点记录均为 PASS、"
+    "无测试 FAIL 等异常证据，则 summary 必须写\"证据不足，未发现异常\"，hypotheses 置空数组 []，"
+    "confidence=0.0，needs_human_review=true。严禁依据 question 中出现的\"焊接不良\"等词假设不良存在，"
+    "严禁编造 serial_no/批次号/设备号等工具未返回的具体值。"
 )
 
 
@@ -88,6 +92,8 @@ def build_diagnosis_graph(
         # 完成：解析 DiagnosisReport
         new_msgs.append(assistant_msg(resp.content))
         report = _parse_report(resp.content, state)
+        # 幻觉护栏：工具未返回任何不良证据时，强制"证据不足"，不信 LLM 编造
+        report = _guard_no_evidence(report, state)
         return {"pending_tool_calls": [], "messages": new_msgs,
                 "step_no": step_no, "report": report.model_dump()}
 
@@ -175,3 +181,67 @@ def _extract_json(content: str) -> Optional[dict]:
                     except (json.JSONDecodeError, TypeError):
                         return None
     return None
+
+
+def _guard_no_evidence(report: DiagnosisReport, state: AgentState) -> DiagnosisReport:
+    """确定性幻觉护栏：若工具未返回任何不良证据（追溯图为空 / 无 BLOCK / 无 FAIL），
+    无论 LLM 输出什么，强制改为"证据不足"，防止从 question 反推编造具体不良。
+
+    prompt 规则 6 已要求 LLM 自行拒答，但思考模型仍可能编造，此为代码级兜底。
+    判据：扫描所有工具返回，未出现 BLOCK/FAIL/DEFECTIVE/不良数>0 即视为无证据。
+    """
+    if _has_defect_evidence(state.get("messages", [])):
+        return report
+    get_logger("diagnosis").warning(
+        "llm.hallucination.guarded", summary_preview=report.summary[:120]
+    )
+    return DiagnosisReport(
+        summary="证据不足：工具未返回任何不良证据（追溯图为空或过点记录均为 PASS），无法定位根因",
+        confidence=0.0,
+        hypotheses=[],
+        subgraph_ref=state.get("subgraph_ref") or "",
+        needs_human_review=True,
+    )
+
+
+def _has_defect_evidence(messages: list) -> bool:
+    """扫描工具返回消息，判断是否存在不良证据（BLOCK / FAIL / DEFECTIVE / 不良数>0）。"""
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get("role") != "tool":
+            continue
+        try:
+            payload = json.loads(m.get("content", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if _payload_has_defect(payload.get("data")):
+            return True
+    return False
+
+
+def _payload_has_defect(data) -> bool:
+    """data 可能是追溯图 dict、过点/测试结果列表、或单视图 dict。"""
+    if isinstance(data, list):
+        return any(_dict_has_defect(d) for d in data if isinstance(d, dict))
+    if isinstance(data, dict):
+        # 追溯图节点（CheckpointRecord.decision / TestResult.raw_verdict / QualityVerdict.verdict）
+        for node in data.get("nodes", []) or []:
+            if isinstance(node, dict) and _dict_has_defect(node.get("properties", {}) or {}):
+                return True
+        # 不良率视图
+        if data.get("defective_units") and data["defective_units"] > 0:
+            return True
+        # 自身或 records/results/repairs/rework_orders 条目
+        if _dict_has_defect(data):
+            return True
+        for key in ("records", "results", "repairs", "rework_orders"):
+            for item in data.get(key, []) or []:
+                if isinstance(item, dict) and _dict_has_defect(item):
+                    return True
+    return False
+
+
+def _dict_has_defect(d: dict) -> bool:
+    decision = str(d.get("decision", "")).upper()
+    verdict = str(d.get("raw_verdict", "")).upper()
+    qverdict = str(d.get("verdict", "")).upper()
+    return decision == "BLOCK" or verdict == "FAIL" or qverdict == "DEFECTIVE"

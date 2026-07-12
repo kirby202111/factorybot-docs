@@ -38,3 +38,30 @@ async def test_l1_tool_call_trace_recorded():
     tool_names = {t.tool_name for t in all_traces}
     assert "query_traceability_graph" in tool_names
     assert "query_pass_records" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_l1_unknown_serial_returns_empty_not_default_impersonation():
+    """未知 serial_no 不应回退到 _default 冒充 SN-DEFAULT，应返回空结果（数据诚实）。
+
+    这是 L1 幻觉根因的回归保护：mock 读在 key 未命中时返回空，而非另一实体的占位数据，
+    让 LLM 看到"证据为空"而非"良性数据"，配合 prompt 规则 6 拒答而非编造。
+    """
+    c = get_container()
+    tenant = c.default_tenant()
+    unknown = "Q123-UNKNOWN"
+
+    # 追溯图：空，不冒充 _default 的 SN-DEFAULT / 3 个节点
+    g = await c.acl.rag.query_traceability_graph(unknown, tenant)
+    assert g.nodes == []
+    assert g.serial_no == ""
+    assert g.subgraph_ref == ""
+
+    # 过点记录：空列表，不冒充 _default 的 PASS 记录
+    pr = await c.acl.pass_execution.query_pass_records(unknown, tenant)
+    pr_list = pr.records if hasattr(pr, "records") else pr
+    assert pr_list == []
+
+    # 其他按 serial_no 查的只读工具同样不应冒充（返回空视图 / 空列表）
+    repair = await c.acl.rework.query_repair_history(unknown, tenant)
+    assert repair.repairs == []

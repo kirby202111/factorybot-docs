@@ -18,7 +18,7 @@ class PassExecutionAclClient(BaseAclClient):
             f"/api/pass-records/{serial_no}", tenant=tenant,
             fixture_rel="rest/pass_records", fixture_key=serial_no,
         )
-        records = dto.get("records", []) if isinstance(dto, dict) else dto
+        records = dto.get("records", []) if isinstance(dto, dict) else (dto or [])
         return [to_view(PassRecordView, r) for r in records]
 
     async def query_test_results(
@@ -28,7 +28,7 @@ class PassExecutionAclClient(BaseAclClient):
             f"/api/test-results/{serial_no}", tenant=tenant,
             fixture_rel="rest/test_results", fixture_key=serial_no,
         )
-        results = dto.get("results", []) if isinstance(dto, dict) else dto
+        results = dto.get("results", []) if isinstance(dto, dict) else (dto or [])
         return [to_view(TestResultView, r) for r in results]
 
 

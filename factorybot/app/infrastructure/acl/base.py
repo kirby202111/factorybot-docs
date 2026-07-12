@@ -33,10 +33,13 @@ class BaseAclClient:
         self, path: str, *, tenant: Optional[TenantContext] = None,
         params: Optional[dict] = None,
         fixture_rel: Optional[str] = None, fixture_key: Optional[str] = None,
+        allow_default: bool = False,
     ) -> Any:
+        """mock 下从 fixtures 取。allow_default=False（默认）：key 未命中返回 None，
+        镜像真实 REST 404，避免用 _default 占位数据冒充查询实体。"""
         if self._mock:
             assert self._fixtures is not None, "mock 模式需要 fixtures"
-            return self._fixtures.lookup(fixture_rel, fixture_key)
+            return self._fixtures.lookup(fixture_rel, fixture_key, allow_default=allow_default)
         assert self._http is not None, "real 模式需要 httpx.AsyncClient"
         headers = tenant.headers() if tenant else {}
         resp = await self._http.get(

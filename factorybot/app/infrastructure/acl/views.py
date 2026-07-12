@@ -277,4 +277,20 @@ class _Mapper:
 
 
 def to_view(view_cls: type[BaseModel], dto: Any) -> Any:
+    if dto is None:
+        return _empty_view(view_cls)
     return _Mapper.to(view_cls, dto)
+
+
+def _empty_view(view_cls: type[BaseModel]) -> Any:
+    """未命中 fixture 时的诚实空视图：必填 str 字段填 ""，其余走默认。
+
+    ACL 读在 key 未命中（allow_default=False）时返回 None，这里集中转成可序列化的
+    空视图，避免每个 ACL 客户端各自兜底。空视图 = 明确的"无数据"，不冒充任何实体，
+    让 LLM 看到"证据为空"而非"另一单件的良性数据"。
+    """
+    empties = {
+        name: "" for name, fi in view_cls.model_fields.items()
+        if fi.is_required() and fi.annotation is str
+    }
+    return view_cls(**empties)

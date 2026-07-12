@@ -43,16 +43,25 @@ class FixtureLoader:
         return self._load(rel)
 
     def lookup(self, rel: str, key: Optional[str] = None,
-               default: str = "_default") -> Any:
-        """取单条；key 缺失时回退 default，再不行回退整文件。"""
+               default: str = "_default", allow_default: bool = True) -> Any:
+        """取单条。
+
+        - key 命中：返回该条。
+        - key 未命中且 allow_default=True：回退 default，再不行回退整文件
+          （供写操作 / 显式以 _default 为 key 的读用）。
+        - key 未命中且 allow_default=False：返回 None（读操作的诚实"未找到"，
+          不冒充另一实体的 _default 数据，镜像真实 REST 404）。
+        """
         data = self._load(rel)
         if key is None:
             return data
         if isinstance(data, dict):
             if key in data:
                 return data[key]
-            if default in data:
+            if allow_default and default in data:
                 return data[default]
+            # 未命中：读(allow_default=False)返回 None；兼容模式返回整文件
+            return None if not allow_default else data
         return data
 
     def has(self, rel: str) -> bool:

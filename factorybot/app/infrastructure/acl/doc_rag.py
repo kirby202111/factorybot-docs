@@ -28,7 +28,7 @@ class DocRagAclClient(BaseAclClient):
         if isinstance(dto, dict):
             docs = dto.get("documents", dto.get("results", []))
         else:
-            docs = dto
+            docs = dto or []
         # 版本过滤（mock 下也可按 route_version 过滤）
         if route_version_filter:
             docs = [

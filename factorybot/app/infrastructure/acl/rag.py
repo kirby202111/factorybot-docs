@@ -45,5 +45,5 @@ class RagAclClient(BaseAclClient):
             f"/rag/trace/subgraph/{subgraph_ref}", tenant=tenant,
             fixture_rel="rag/subgraphs", fixture_key=subgraph_ref,
         )
-        view = to_view(SubgraphView, dto) if isinstance(dto, dict) else SubgraphView(subgraph_ref=subgraph_ref, nodes=dto)
+        view = to_view(SubgraphView, dto) if isinstance(dto, dict) else SubgraphView(subgraph_ref=subgraph_ref, nodes=(dto or []))
         return view.nodes
