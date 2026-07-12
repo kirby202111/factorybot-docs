@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.infrastructure.ai.base import ChatModel
 from app.infrastructure.ai.mock_chat_model import MockChatModel
 from app.infrastructure.ai.observable_chat_model import ObservableChatModel
+from app.infrastructure.obs.logging import get_logger
 
 
 def _build_inner_model() -> ChatModel:
@@ -24,7 +25,8 @@ def _build_inner_model() -> ChatModel:
             from langchain_openai import ChatOpenAI  # type: ignore
             return _LangChainAdapter(ChatOpenAI(model=s.llm_model, api_key=s.llm_api_key,
                                                 base_url=s.llm_base_url or None))
-        except ImportError:
+        except ImportError as e:
+            _warn_provider_fallback("openai", e)
             return MockChatModel()
     if s.llm_provider == "deepseek":
         # DeepSeek 兼容 OpenAI 协议，复用 ChatOpenAI，仅替换 base_url；无需额外依赖
@@ -36,15 +38,33 @@ def _build_inner_model() -> ChatModel:
                 model=model, api_key=s.llm_api_key,
                 base_url=s.llm_base_url or "https://api.deepseek.com",
             ))
-        except ImportError:
+        except ImportError as e:
+            _warn_provider_fallback("deepseek", e)
             return MockChatModel()
     if s.llm_provider == "anthropic":
         try:
             from langchain_anthropic import ChatAnthropic  # type: ignore
             return _LangChainAdapter(ChatAnthropic(model=s.llm_model, api_key=s.llm_api_key))
-        except ImportError:
+        except ImportError as e:
+            _warn_provider_fallback("anthropic", e)
             return MockChatModel()
     return MockChatModel()
+
+
+def _warn_provider_fallback(provider: str, err: Exception) -> None:
+    """配置了真实 provider 但依赖缺失/损坏 -> 回退 mock 时告警。
+
+    避免静默伪装成真实模型：ImportError 可能是未装 [llm] extra，也可能是依赖损坏
+    （如 jiter/openai 版本不匹配导致 `from jiter import from_json` 失败）。后者会让
+    `ChatOpenAI(...)` 构造抛 ImportError，被这里捕获后悄悄回退 mock，表面看 provider
+    配置正确实则跑 MockChatModel。告警让这种情形可见。
+    """
+    get_logger("llm_factory").warning(
+        "llm.provider.fallback_to_mock",
+        provider=provider, error=str(err),
+        hint="配置了真实 LLM 但实际回退 mock：检查 langchain-openai/anthropic 及其依赖"
+             "(openai、jiter 等)是否完整安装且版本兼容",
+    )
 
 
 class _LangChainAdapter:
