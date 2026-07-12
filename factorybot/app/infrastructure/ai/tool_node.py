@@ -58,6 +58,8 @@ class ToolNode:
         for call in state.get("pending_tool_calls", []):
             name = call.get("name") if isinstance(call, dict) else call.name
             args = call.get("args", {}) if isinstance(call, dict) else call.args
+            # 透传 tool_call_id，与 assistant 消息里的 tool_calls 配对（真实 API 多步 ReAct 必需）
+            tool_call_id = call.get("id", "") if isinstance(call, dict) else getattr(call, "id", "")
             descriptor = self._registry.get(name)
             # 权限：必须在 capability 工具集内 + 租户 scope
             allowed = descriptor and descriptor.capability == self._capability \
@@ -69,7 +71,7 @@ class ToolNode:
                 )
                 if self._obs:
                     self._obs.tool_denied(name)
-                new_tool_msgs.append(_tool_msg(name, {"trace_id": tid, "error": "DENIED"}))
+                new_tool_msgs.append(_tool_msg(name, {"trace_id": tid, "error": "DENIED"}, tool_call_id))
                 continue
             t0 = time.perf_counter()
             try:
@@ -88,7 +90,7 @@ class ToolNode:
                 if self._obs:
                     self._obs.tool_ok(name, latency_ms / 1000.0)
                 # 模型看 trace_id + 全文（证据链）；真实模式下可由 ResultCompactor 压缩
-                new_tool_msgs.append(_tool_msg(name, {"trace_id": tid, "data": view_dict}))
+                new_tool_msgs.append(_tool_msg(name, {"trace_id": tid, "data": view_dict}, tool_call_id))
             except Exception as e:
                 if self._obs:
                     self._obs.tool_error(name)
@@ -96,12 +98,13 @@ class ToolNode:
                     tool_name=name, session_id=_sid(state), step_no=step_no,
                     tenant_id=tenant.tenant_id, error=e,
                 )
-                new_tool_msgs.append(_tool_msg(name, {"trace_id": tid, "error": str(e)}))
+                new_tool_msgs.append(_tool_msg(name, {"trace_id": tid, "error": str(e)}, tool_call_id))
         return {"pending_tool_calls": [], "messages": new_tool_msgs}
 
 
-def _tool_msg(name: str, payload: dict) -> dict:
-    return {"role": "tool", "name": name, "content": json.dumps(payload, ensure_ascii=False, default=str)}
+def _tool_msg(name: str, payload: dict, tool_call_id: str = "") -> dict:
+    return {"role": "tool", "name": name, "tool_call_id": tool_call_id,
+            "content": json.dumps(payload, ensure_ascii=False, default=str)}
 
 
 def _serialize(view: Any) -> Any:

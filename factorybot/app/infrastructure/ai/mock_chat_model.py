@@ -55,12 +55,12 @@ class MockChatModel:
         sn = _extract(r"SN-[A-Za-z0-9-]+", user_text) or "SN-2026-001234"
         if step == 0:
             return ModelResponse(
-                tool_calls=[ToolCall(name="query_traceability_graph", args={"serial_no": sn})],
+                tool_calls=[ToolCall(id=f"call_mock_{step}", name="query_traceability_graph", args={"serial_no": sn})],
                 finish_reason="tool_calls",
             )
         if step == 1:
             return ModelResponse(
-                tool_calls=[ToolCall(name="query_pass_records", args={"serial_no": sn})],
+                tool_calls=[ToolCall(id=f"call_mock_{step}", name="query_pass_records", args={"serial_no": sn})],
                 finish_reason="tool_calls",
             )
         # 收集 trace_id 作为证据
@@ -103,7 +103,7 @@ class MockChatModel:
         actual = _extract_kv(user_text, "actual") or "ST-A"
         if step == 0:
             return ModelResponse(
-                tool_calls=[ToolCall(name="query_stencil_lending", args={"stencil_id": actual})],
+                tool_calls=[ToolCall(id=f"call_mock_{step}", name="query_stencil_lending", args={"stencil_id": actual})],
                 finish_reason="tool_calls",
             )
         result = {

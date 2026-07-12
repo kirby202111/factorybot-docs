@@ -47,6 +47,30 @@ def _extract_pending_card(state) -> Optional[ActionCard]:
     return None
 
 
+def _extract_pending_interrupts(state) -> list:
+    """提取所有 pending interrupt 的 (id, card)，用于多并行 gate 的 resume。
+
+    fault_response 等场景 gate_repair ‖ gate_isolation 并行，两个 gate 都 interrupt(value=card)，
+    产生多个 pending interrupt；resume 须对每个按 id 提供值，且各 gate 的 card action 不同，
+    需分别签发匹配 token。
+    """
+    result = []
+    for task in (getattr(state, "tasks", None) or ()):
+        for intr in (getattr(task, "interrupts", None) or ()):
+            val = getattr(intr, "value", None)
+            card = None
+            if isinstance(val, ActionCard):
+                card = val
+            elif isinstance(val, dict):
+                try:
+                    card = ActionCard.model_validate(val)
+                except Exception:
+                    continue
+            if card is not None:
+                result.append((getattr(intr, "id", None), card))
+    return result
+
+
 class L3Orchestrator:
     def __init__(
         self,
@@ -135,12 +159,25 @@ class L3Orchestrator:
         config = {"configurable": {"thread_id": session_id},
                   "recursion_limit": self._recursion_limit}
         state = await graph.aget_state(config)
-        card = _extract_pending_card(state)
-        action = card.writes_via_action() if card else f"{session_id}:{step}"
-        token = await self._store.issue(session_id, step, approved, user_id, action=action)
+        pending = _extract_pending_interrupts(state)
         decision = "PASS" if approved else "REJECT"
+        # 多并行 gate（如 gate_repair ‖ gate_isolation）产生多个 pending interrupt，
+        # 须按 id 映射 resume；各 gate card action 不同，分别签发匹配 token（用 dict 形态
+        # 便于 checkpointer 序列化，GateManager 兼容 dict 解析）
+        if len(pending) <= 1:
+            card = pending[0][1] if pending else None
+            action = card.writes_via_action() if card else f"{session_id}:{step}"
+            token = await self._store.issue(session_id, step, approved, user_id, action=action)
+            resume_value = token
+        else:
+            from dataclasses import asdict
+            resume_value = {}
+            for iid, card in pending:
+                tok = await self._store.issue(
+                    session_id, card.step, approved, user_id, action=card.writes_via_action())
+                resume_value[iid] = asdict(tok)
         try:
-            await graph.ainvoke(Command(resume=token), config=config)
+            await graph.ainvoke(Command(resume=resume_value), config=config)
         except GraphRecursionError:
             await self._repo.mark_failed(session_id, "步数超限")
             return decision

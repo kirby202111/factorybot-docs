@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import operator
+import re
 from typing import Annotated, Any, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -15,6 +16,7 @@ from app.domain.report import DiagnosisReport
 from app.domain.tool import ToolRegistry
 from app.infrastructure.ai.base import assistant_msg, sys_msg, user_msg
 from app.infrastructure.ai.tool_node import ToolNode, tool_to_schema
+from app.infrastructure.obs.logging import get_logger
 from app.infrastructure.persistence.repos import ToolCallTraceRepo
 
 
@@ -39,8 +41,18 @@ L1_SYSTEM_PROMPT = (
     "2. 先调追溯图（query_traceability_graph）建立全链路视图，再按需降级查只读 REST。\n"
     "3. 查工艺必须带 route_version（从过点记录提取）。\n"
     "4. 每个假设必须引用工具返回的证据（trace_id）。\n"
-    "5. 证据充分后输出严格遵循 DiagnosisReport JSON 结构（summary/confidence/hypotheses/"
-    "subgraph_ref/route_version/evidence_refs/needs_human_review），不要再调工具。"
+    "5. 证据充分后输出严格遵循下述 JSON 结构，不要再调工具。字段约束：\n"
+    "   - summary: 字符串，根因总结\n"
+    "   - confidence: 0.0~1.0 浮点（如 0.72），禁止用 高/中/低 等文字\n"
+    "   - hypotheses: 数组，每项必须含字段 category(枚举仅 Man|Machine|Material|Method|"
+    "Measurement|Environment)、rank(整数,1=最可能)、statement(字符串)、evidence(字符串数组,"
+    "每条引用 trace_id 如 trace_id=T-101,至少一条)、suggested_action(字符串)\n"
+    "   - subgraph_ref/route_version/evidence_refs: 从工具结果透传\n"
+    "   - needs_human_review: 布尔\n"
+    "   示例: {\"summary\":\"...\",\"confidence\":0.72,\"hypotheses\":[{\"category\":\"Material\","
+    "\"rank\":1,\"statement\":\"锡膏批次异常\",\"evidence\":[\"trace_id=T-101\"],"
+    "\"suggested_action\":\"抽测锡膏粘度\"}],\"subgraph_ref\":\"SUB-A1\",\"route_version\":\"v4\","
+    "\"evidence_refs\":[\"trace_id=T-101\"],\"needs_human_review\":false}"
 )
 
 
@@ -117,9 +129,11 @@ def _build_user_prompt(state: AgentState) -> str:
 
 def _parse_report(content: str, state: AgentState) -> DiagnosisReport:
     """解析 LLM 输出为 DiagnosisReport；失败则转人工。"""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
+    data = _extract_json(content)
+    if data is None:
+        get_logger("diagnosis").warning(
+            "llm.output.non_json", content_preview=content[:500]
+        )
         return DiagnosisReport.partial("LLM 输出非合法 JSON")
     # 兜底：缺 subgraph_ref/route_version 时从 state 透传
     data.setdefault("subgraph_ref", state.get("subgraph_ref") or "")
@@ -129,3 +143,35 @@ def _parse_report(content: str, state: AgentState) -> DiagnosisReport:
         return DiagnosisReport.model_validate(data)
     except Exception as e:
         return DiagnosisReport.partial(f"DiagnosisReport 校验失败: {e}")
+
+
+def _extract_json(content: str) -> Optional[dict]:
+    """从 LLM 输出提取 JSON 对象：兼容 markdown fence / 前后解释文本。"""
+    if not content:
+        return None
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # ```json ... ``` 代码块
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # 首个平衡 {...}（模型常在 JSON 前后加解释文本）
+    start = content.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(content)):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(content[start : i + 1])
+                    except (json.JSONDecodeError, TypeError):
+                        return None
+    return None

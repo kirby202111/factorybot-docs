@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 
 class ToolCall(BaseModel):
+    id: str = ""  # 真实模型返回的 tool_call_id；多步 ReAct 喂回 API 必需，mock 留空
     name: str
     args: dict = Field(default_factory=dict)
 
@@ -52,5 +53,5 @@ def assistant_msg(content: str = "", tool_calls: Optional[list[dict]] = None) ->
     return {"role": "assistant", "content": content, "tool_calls": tool_calls or []}
 
 
-def tool_msg(name: str, content: str) -> dict:
-    return {"role": "tool", "name": name, "content": content}
+def tool_msg(name: str, content: str, tool_call_id: str = "") -> dict:
+    return {"role": "tool", "name": name, "tool_call_id": tool_call_id, "content": content}

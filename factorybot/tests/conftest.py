@@ -7,6 +7,11 @@ ROOT = Path(__file__).resolve().parents[1]  # factorybot/
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
+# 测试强制 mock 模式，不受项目 .env（可能配真实 provider）影响；env var 优先于 .env
+os.environ["LLM_PROVIDER"] = "mock"
+os.environ["LLM_API_KEY"] = ""
+os.environ["RUN_MODE"] = "mock"
+
 import pytest
 
 

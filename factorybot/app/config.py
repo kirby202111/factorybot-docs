@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # ----- LLM -----
-    llm_provider: str = "mock"  # mock | openai | anthropic | dashscope
+    llm_provider: str = "mock"  # mock | openai | deepseek | anthropic | dashscope
     llm_api_key: str = ""
     llm_model: str = "claude-sonnet-5"
     llm_base_url: str = ""
