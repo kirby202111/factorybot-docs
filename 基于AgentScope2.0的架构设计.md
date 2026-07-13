@@ -47,7 +47,7 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 ┌────────────────────┐   ┌──────────────────────────────────────────┐
 │   rag-service      │   │        agent-service (Python, AgentScope 2.0)│
 │  (AgentScope 2.0)  │◄──┤  统一 Agent 类：L1 诊断 / L2 草稿 / L3 编排 │
-│  A/B/C/D/E 五路线  │   │  Pipeline 协同 + Permission 闸门 + Workspace │
+│  A/B/E 三路线      │   │  Pipeline 协同 + Permission 闸门 + Workspace │
 └─────────┬──────────┘   └──────────────┬───────────────────────────┘
           │ Kafka 事件流投影              │ Tool（httpx）只读 REST + 受限写
           │ (GraphProjector)             │ + Kafka 事件订阅 → 事件系统
@@ -66,9 +66,9 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 | 服务 | 语言/框架 | 职责定位 | 写权限 |
 |------|----------|---------|--------|
 | **agent-service** | Python + AgentScope 2.0 | 把"查 → 诊断 → 草拟处置 → 推动作"串成自动链；写闸门由 **Permission 系统**承载 | L1 全程只读；L2 仅产草稿不落库；L3 受限写 + Permission gate |
-| **rag-service** | Python + AgentScope 2.0（RAG 模块 / Toolkit） | 把"工程师手动查 5 个界面"变成一次问答；五路线分线落地 | 全程只读 |
+| **rag-service** | Python + AgentScope 2.0（RAG 模块 / Toolkit） | 把"工程师手动查 5 个界面"变成一次问答；三路线分线落地 | 全程只读 |
 | **MES 主体服务** | Java/Spring | 14 个限界上下文核心业务与写路径 | 唯一业务写权限，聚合根不变式 + 事务发件箱 |
-| **mes-eval** | Python + AgentScope 评测/OpenJudge | RAG 五路线 + Agent 三层级评测、标定、漂移、CI 门禁 | 只读评测 |
+| **mes-eval** | Python + AgentScope 评测/OpenJudge | RAG 三路线 + Agent 三层级评测、标定、漂移、CI 门禁 | 只读评测 |
 
 ### 1.3 跨语言协作模型（Python Agent ↔ Java MES）
 
@@ -254,17 +254,15 @@ agent_service/app/
 | `POST /agent/l3/{session_id}/confirm` | L3 | Permission gate 确认，由事件系统触发续跑（替换 `Command(resume=token)`） |
 | `GET /agent/l3/{session_id}/events` | L3 | 事件流订阅（AGUI），动作卡实时推送 |
 
-### 3.2 `rag-service` 模块结构（五路线，接入 AgentScope RAG/Toolkit）
+### 3.2 `rag-service` 模块结构（三路线，接入 AgentScope RAG/Toolkit）
 
 | 路线 | 子模块 | 职责 | 技术形态（AgentScope 2.0 版） |
 |------|--------|------|------------------------------|
 | **A 追溯型** | `RAG服务/追溯型 RAG/` | 全链路追溯，5M1E 根因串联 | GraphRAG + Neo4j Cypher + 事件流预投影，封装为 **Tool** |
 | **B 文档型** | `RAG服务/文档型 RAG/` | SOP/手册/标准/8D 检索 | AgentScope **RAG 模块 + Embedding** + 版本过滤 + 事件驱动重索引 |
-| **C 数据型** | `RAG服务/数据型 RAG/` | 自然语言转 SQL | Text2SQL + 语义层视图 + 只读账号 + 表白名单，封装为 **Tool**（Permission 限只读） |
-| **D 防错即时辅助** | `RAG服务/防错即时辅助 RAG/` | 过点拦截推辅助到工位 | 事件系统驱动 + 预计算缓存 + 命中即推 |
-| **E Agentic RAG** | `RAG服务/Agentic RAG/` | 统一入口路由 A/B/C/D | **统一 Agent 类 + Routing/Handoffs + Toolkit 工具选择** |
+| **E Agentic RAG** | `RAG服务/Agentic RAG/` | 统一入口路由 A/B | **统一 Agent 类 + Routing/Handoffs + Toolkit 工具选择** |
 
-> 路线 E 由 AgentScope 的 **Routing / Handoffs** workflow 天然承载，替换原自研路由逻辑。引入顺序不变：B → A → C → D → E。
+> 路线 E 由 AgentScope 的 **Routing / Handoffs** workflow 天然承载，替换原自研路由逻辑。引入顺序不变：B -> A -> E。
 
 ### 3.3 `mes-eval` 评测库模块结构（对接 OpenJudge）
 
@@ -276,7 +274,7 @@ agent_service/app/
 | **CalibrationService / DriftDetector** | 置信度标定（ECE/Platt/isotonic）/ 漂移（PSI） | 统计层，OpenJudge 之上 |
 | **SafetyChecker / VersionAnchorChecker** | 安全红线硬断言 / 版本锚点比对 | 保留（MES 专用硬门禁） |
 | **CIGate** | CI 门禁（hard/soft gate） | 保留 |
-| **EvalTarget 适配器** | 8 个被测对象各一适配器 | 适配到 AgentScope Agent/Tool 接口 |
+| **EvalTarget 适配器** | 6 个被测对象各一适配器 | 适配到 AgentScope Agent/Tool 接口 |
 
 ### 3.4 模块间集成点与接口契约
 
@@ -434,7 +432,7 @@ L3 Pipeline → sequential/fanout 调度确定性步骤 + 多 Agent 能力 A/B/C
 
 - `整体技术选型与模块划分.md` — 原（LangGraph 版）总览，本文的重构基线
 - `AGENT服务/` — L1/L2/L3 分层与三大横切能力设计
-- `RAG与Agent协同/`、`RAG与Agent评测/`、`RAG服务/` — 协同、评测、五路线
+- `RAG与Agent协同/`、`RAG与Agent评测/`、`RAG服务/` — 协同、评测、三路线
 - `领域模型/`、`实现说明/` — MES 主体（Java）14 个限界上下文与基础设施
 
 > 说明：本文为**技术选型重设计稿**，AgentScope 2.0 组件名以官方文档为准（统一 Agent 类、Content、Permission、Middleware、Pipeline、Plan、Session、Workspace、Toolkit/MCP/Skills、Model/Embedding、RAG、Tracing/Studio、智能体评测/OpenJudge）。落地前建议对齐目标版本的 API 细节。

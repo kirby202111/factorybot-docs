@@ -362,7 +362,6 @@ agent-service 订阅只读领域事件，把 Agent 从"被动问答"变"主动�
 - 订阅 `ProcessRouteActivated`（工艺升版 v4→v5）→ 触发 L3 `process_change` 编排（草拟新 SOP + 核对操作工资质 + 新工艺首件验证）/ 触发 L2 SOP 草拟
 - 订阅 `equipment.fault`（设备故障，Kafka topic 或维修看板手动触发）→ 触发 L3 `fault_response` 故障复产编排
 - 订阅不良率突增事件 → 触发 L1 同批次诊断（`DefectRateSpikeListener`）
-- 订阅 `CheckpointBlocked`（过点拦截）→ 触发防错即时辅助 RAG 推处置卡片（模式 I 的变体，见下）
 
 **Kafka 核心使用方式与作用**
 
@@ -565,7 +564,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | 维修 `repair.*` | | ✓（试产验证） | | | | | | | | ✓（完成→恢复/报废） | ✓（保养建议） | | — | |
 | 设备数据接入 `dc.*` | | ✓（实时数据 REST） | | | | | ✓（线边仓事件） | | ✓（采样） | ✓（通信/报警/度量） | | | | — |
 
-> Python 旁路消费：rag-service GraphProjector 消费 `mes.*`/`process.*`/`material.*`/`quality.*`；agent-service 消费 `process.route.lifecycle`/`equipment.fault`/不良率突增等；防错 RAG 消费 `mes.checkpoint.lifecycle`（CheckpointBlocked）。均不在上表（上下文外，复用契约）。
+> Python 旁路消费：rag-service GraphProjector 消费 `mes.*`/`process.*`/`material.*`/`quality.*`；agent-service 消费 `process.route.lifecycle`/`equipment.fault`/不良率突增等。均不在上表（上下文外，复用契约）。
 
 ---
 
