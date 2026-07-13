@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from app.routes.document.domain.chunk import ChunkLocator, DocumentChunk
-from app.routes.document.infrastructure.chromadb.retriever import VectorRetriever
+from app.routes.document.infrastructure.chunk_filter import ChunkFilter
 from app.shared.tenant.context import TenantContext
 
 
@@ -59,11 +59,10 @@ def test_to_metadata_dict_fields_complete():
 
 
 def test_build_where_enforces_published_and_route_version_equality(tenant: TenantContext):
-    """VectorRetriever._build_where 强制 state=PUBLISHED + route_version 等值（非 $in）。"""
-    retriever = VectorRetriever(collection=None, embedder=None)
-    where = retriever._build_where(
-        tenant, route_version="v3", asset_id=None, doc_types=["SOP"]
-    )
+    """ChunkFilter.to_where 强制 state=PUBLISHED + route_version 等值（非 $in）。"""
+    where = ChunkFilter(
+        tenant=tenant, route_version="v3", asset_id=None, doc_types=("SOP",)
+    ).to_where()
     assert where["state"] == "PUBLISHED"
     assert where["route_version"] == "v3"                       # 版本等值，非 {"$in": [...]}
     assert where["doc_type"] == {"$in": ["SOP"]}
@@ -72,8 +71,9 @@ def test_build_where_enforces_published_and_route_version_equality(tenant: Tenan
 
 def test_build_where_without_route_version_still_enforces_published(tenant: TenantContext):
     """不带 route_version 时仍强制 state=PUBLISHED，且不把版本加入过滤。"""
-    retriever = VectorRetriever(collection=None, embedder=None)
-    where = retriever._build_where(tenant, route_version=None, asset_id="A-1", doc_types=None)
+    where = ChunkFilter(
+        tenant=tenant, route_version=None, asset_id="A-1", doc_types=()
+    ).to_where()
     assert where["state"] == "PUBLISHED"
     assert "route_version" not in where                         # 不带版本则不过滤
     assert where["binding_asset_id"] == "A-1"

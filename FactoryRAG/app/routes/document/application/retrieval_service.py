@@ -20,6 +20,7 @@ from app.routes.document.domain.answer import (
     DocSearch,
 )
 from app.routes.document.domain.document import DocumentCategory
+from app.routes.document.domain.retriever_port import RetrieverPort
 from app.shared.obs.port import ObservabilityPort
 from app.shared.tenant.context import TenantContext
 
@@ -35,7 +36,7 @@ class DocumentRetrievalService:
     def __init__(
         self,
         *,
-        retriever: Any,
+        retriever: RetrieverPort,
         reranker: Any,
         llm: Any,
         redis: Any,

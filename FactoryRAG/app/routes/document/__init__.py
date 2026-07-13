@@ -12,10 +12,13 @@ MySQL（幂等/位点/审计）+ Redis（检索缓存）。
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.shared.web.container import Container
+
+logger = logging.getLogger(__name__)
 
 
 async def build_document_services(container: "Container") -> tuple[Any, Any, Any]:
@@ -45,10 +48,36 @@ async def build_document_services(container: "Container") -> tuple[Any, Any, Any
         bucket=settings.minio.bucket,
         secure=settings.minio.secure,
     )
-    chunk_repo = ChunkRepo(collection=container.chroma_collection)
     document_repo = DocumentRepo(session_factory=session_factory)
-    retriever = VectorRetriever(collection=container.chroma_collection, embedder=container.embedding)
     chunk_selector = ChunkStrategySelector()
+
+    # 第一阶段召回（粗排）：hybrid_recall_enabled -> BM25 稀疏 + Dense 稠密 + RRF 融合；
+    # 否则纯稠密（VectorRetriever，历史行为）。collection 由 lifespan init_route_schemas 注入。
+    doc_settings = settings.document
+    collection = container.chroma_collection
+    if doc_settings.hybrid_recall_enabled and collection is not None:
+        from app.routes.document.application.hybrid_retriever import HybridRetriever
+        from app.routes.document.infrastructure.bm25 import Bm25Index, Bm25Retriever, Tokenizer
+
+        tokenizer = Tokenizer()
+        bm25_index = Bm25Index(tokenizer)
+        await bm25_index.build_from_collection(collection)
+        chunk_repo = ChunkRepo(collection=collection, bm25_index=bm25_index)
+        retriever = HybridRetriever(
+            dense=VectorRetriever(collection=collection, embedder=container.embedding),
+            sparse=Bm25Retriever(index=bm25_index),
+            rrf_k=doc_settings.rrf_k,
+            dense_weight=doc_settings.dense_weight,
+            bm25_weight=doc_settings.bm25_weight,
+            candidate_k=doc_settings.recall_candidate_k,
+        )
+        logger.info("B 粗排召回：Hybrid（BM25+Dense+RRF），BM25 索引 size=%d", bm25_index.size)
+    else:
+        if doc_settings.hybrid_recall_enabled and collection is None:
+            logger.warning("hybrid_recall_enabled=true 但 chroma_collection 未就绪，降级纯稠密召回")
+        chunk_repo = ChunkRepo(collection=collection)
+        retriever = VectorRetriever(collection=collection, embedder=container.embedding)
+        logger.info("B 粗排召回：纯稠密（VectorRetriever）")
 
     ingestion_svc = DocumentIngestionService(
         object_store=object_store,

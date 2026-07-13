@@ -127,3 +127,7 @@ class BgeReranker:
         if isinstance(scores, float):
             scores = [scores]
         return [float(s) for s in scores]
+
+    async def close(self) -> None:
+        """no-op：BgeReranker 用临时 httpx（async with），无持久资源需释放。"""
+        return None

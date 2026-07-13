@@ -24,9 +24,11 @@ async def lifespan(app: FastAPI, settings: RagSettings, container: Container) ->
     顺序：
     1. 启动断言（只读红线，§3）-- 任一失败即拒绝启动（fail-fast）；
     2. 存储就绪探测（按路线降级，§3.3）；
-    3. 路线装配（按开关 wire_routes）；
-    4. 路线专属 schema 初始化（Neo4j SchemaInitializer / ChromaDB collection）；
-    5. 按路线开关启停 consumer；
+    3. 路线专属 schema 初始化（Neo4j SchemaInitializer / ChromaDB collection）；
+       须先于 wire_routes：B 组合根读取 ``container.chroma_collection`` 构造
+       ChunkRepo/VectorRetriever/BM25 投影，collection 在此步注入；
+    4. 路线装配（按开关 wire_routes）；
+    5. 装配后启动断言（B 摄入/E 工具注册）；
     yield；
     6. 关闭 consumer / 引擎。
     """
@@ -40,14 +42,14 @@ async def lifespan(app: FastAPI, settings: RagSettings, container: Container) ->
         logger.warning("启动期存储不可用，对应路线将降级: %s", unhealthy)
     app.state.storage_health = health
 
-    # 3. 路线装配（按开关）
+    # 3. 路线专属 schema 初始化（须先于 wire_routes：组合根依赖 container.chroma_collection）
+    await init_route_schemas(container)
+
+    # 4. 路线装配（按开关）
     await container.wire_routes()
 
-    # 3b. 启动断言 -- 装配后阶段（B 摄入/E 工具注册）
+    # 4b. 启动断言 -- 装配后阶段（B 摄入/E 工具注册）
     await run_assertions(container.collect_post_wiring_gates(), "post-wiring")
-
-    # 4. 路线专属 schema 初始化
-    await init_route_schemas(container)
 
     # 5. consumer 启停
     await container.start_consumers()

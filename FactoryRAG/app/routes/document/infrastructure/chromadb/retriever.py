@@ -1,7 +1,9 @@
-"""ChromaDB 向量检索器。
+"""ChromaDB 向量检索器（稠密路）。
 
 构建 ``where`` pre-filter（强制带 state=PUBLISHED + route_version 等值 + tenant_scope + doc_type），
 调用 ``collection.query`` 返回 ``list[ChunkHit]``。
+
+过滤判据收敛到 ``ChunkFilter``，与 BM25 稀疏路共享同一真相源（见 ``infrastructure.chunk_filter``）。
 """
 from __future__ import annotations
 
@@ -10,13 +12,14 @@ import time
 from typing import Any
 
 from app.routes.document.domain.answer import ChunkHit
+from app.routes.document.infrastructure.chunk_filter import ChunkFilter
 from app.shared.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
 
 
 class VectorRetriever:
-    """B 向量检索器（ChromaDB）。"""
+    """B 向量检索器（ChromaDB，稠密路）。满足 ``RetrieverPort``。"""
 
     def __init__(self, collection: Any, embedder: Any) -> None:
         self._collection = collection
@@ -33,7 +36,12 @@ class VectorRetriever:
         top_k: int = 20,
     ) -> list[ChunkHit]:
         query_vec = await self._embedder.embed_one(query)
-        where = self._build_where(tenant, route_version, asset_id, doc_types)
+        where = ChunkFilter(
+            tenant=tenant,
+            route_version=route_version,
+            asset_id=asset_id,
+            doc_types=tuple(doc_types) if doc_types else (),
+        ).to_where()
 
         started = time.perf_counter()
         result = self._collection.query(
@@ -46,29 +54,6 @@ class VectorRetriever:
         logger.debug("ChromaDB 检索 latency=%dms where=%s", latency_ms, where)
 
         return self._map_hits(result)
-
-    def _build_where(
-        self,
-        tenant: TenantContext,
-        route_version: str | None,
-        asset_id: str | None,
-        doc_types: list[str] | None,
-    ) -> dict[str, Any]:
-        """``where`` pre-filter（强制带 state=PUBLISHED + 版本等值 + tenant_scope）。
-
-        版本过滤退化成单字段等值（ChromaDB ``where`` 能做且 pre-filter）。
-        """
-        where: dict[str, Any] = {"state": "PUBLISHED"}
-        if route_version:
-            where["route_version"] = route_version
-        if asset_id:
-            where["binding_asset_id"] = asset_id
-        scopes = tenant.chroma_scopes()
-        if scopes:
-            where["tenant_scope"] = {"$in": scopes}
-        if doc_types:
-            where["doc_type"] = {"$in": doc_types}
-        return where
 
     def _map_hits(self, result: dict[str, Any]) -> list[ChunkHit]:
         ids_batch = result.get("ids", [[]])

@@ -7,8 +7,12 @@ services:
     image: rag-service:latest
     environment:
       RAG_LLM__PROVIDER: deepseek
-      RAG_LLM__MODEL_NAME: deepseek-chat
-      RAG_EMBEDDING__BASE_URL: http://bge-inference:8080
+      RAG_LLM__MODEL_NAME: deepseek-v4-flash   # DeepSeek 最新模型
+      RAG_EMBEDDING__PROVIDER: bailian
+      RAG_EMBEDDING__BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+      RAG_EMBEDDING__MODEL: text-embedding-v4
+      RAG_EMBEDDING__RERANKER_MODEL: gte-rerank-v2
+      RAG_EMBEDDING__API_KEY: ${DASHSCOPE_API_KEY:-}
       RAG_NEO4J__URI: bolt://neo4j:7687
       RAG_NEO4J__USERNAME: neo4j
       RAG_NEO4J__PASSWORD: rag
@@ -24,14 +28,10 @@ services:
       RAG_DOCUMENT__ENABLED: "true"
       RAG_TRACEABILITY__ENABLED: "false"
       RAG_AGENTIC__ENABLED: "false"
-    depends_on: [neo4j, mysql, redis, kafka, minio, bge-inference]
+    depends_on: [neo4j, mysql, redis, kafka, minio]
     volumes:
       - chromadata:/data/chroma
     ports: ["8000:8000"]
-
-  bge-inference:                    # bge-m3 + reranker 本地化推理 sidecar（车间网隔离必备）
-    image: michaelfeil/infinity:latest
-    ports: ["8080:8080"]
 
   neo4j:
     image: neo4j:5.20

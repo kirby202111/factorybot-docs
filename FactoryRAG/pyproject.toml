@@ -49,6 +49,8 @@ dependencies = [
     "unstructured>=0.14",            # [B] 文档解析
     "pypdf>=4.0",                    # [B]
     "python-docx>=1.1",              # [B]
+    "rank-bm25>=0.2",                # [B] 稀疏检索（混合召回第一阶段）
+    "jieba>=0.42",                   # [B] 中文分词（BM25 词项化）
 
     # ── E Agentic ──
     "langgraph>=0.2",                # [E] 统一口径（Command(resume=…) 语义依赖）

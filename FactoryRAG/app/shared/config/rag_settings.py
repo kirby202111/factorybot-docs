@@ -24,6 +24,13 @@ class DocSettings(BaseModel):
     rerank_top_n: int = 5
     cache_ttl_seconds: int = 300
 
+    # ── 粗排召回（Hybrid Search：BM25 稀疏 + Embedding 稠密 + RRF 融合）──
+    hybrid_recall_enabled: bool = True
+    dense_weight: float = 1.0           # RRF 稠密路权重
+    bm25_weight: float = 1.0            # RRF 稀疏路权重
+    rrf_k: int = 60                     # RRF 常数（标准 60）
+    recall_candidate_k: int = 50        # 每路过取数；融合后截断到 retrieval_top_k
+
 
 class AgenticSettings(BaseModel):
     """E Agentic 子配置。"""

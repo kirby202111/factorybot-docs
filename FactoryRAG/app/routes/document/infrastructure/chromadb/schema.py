@@ -11,7 +11,7 @@ from typing import Any
 class ChromaCollectionInitializer:
     """启动时幂等创建/获取 collection。
 
-    distance = cosine（bge-m3 1024 维）。chunk 不可变：collection 无 schema 演进，
+    distance = cosine（embedding 1024 维，默认百炼 text-embedding-v4）。chunk 不可变：collection 无 schema 演进，
     版本隔离靠查询 ``where`` pre-filter，不靠 collection 重建。
     """
 

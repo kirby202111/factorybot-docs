@@ -23,12 +23,20 @@ class LlmSettings(BaseModel):
 
 
 class EmbeddingSettings(BaseModel):
-    """bge-m3 本地化推理配置。"""
+    """向量化 + 精排配置。provider 无关、可插拔。
 
-    base_url: str = "http://bge-inference:8080"
-    model: str = "bge-m3"
+    - provider=bailian（默认）：百炼 text-embedding-v4（1024 维）+ gte-rerank-v2，走云 API，
+      需 ``api_key``；``base_url`` 指百炼 OpenAI 兼容端点。
+    - provider=bge：bge-m3 + bge-reranker-v2-m3 本地 sidecar（车间网隔离场景），
+      ``base_url`` 指 sidecar（如 http://bge-inference:8080），无需 ``api_key``。
+    """
+
+    provider: str = "bailian"  # bailian | bge
+    api_key: str = ""  # 百炼 DASHSCOPE_API_KEY（bailian 用）
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: str = "text-embedding-v4"
     dim: int = 1024
-    reranker_model: str = "bge-reranker-v2-m3"
+    reranker_model: str = "gte-rerank-v2"
     batch_size: int = 32
 
 

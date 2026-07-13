@@ -18,7 +18,7 @@ from app.shared.acl import (
 from app.shared.acl.ports import DocRagPort, TraceRagPort
 from app.shared.ai import llm_factory
 from app.shared.config.rag_settings import RagSettings
-from app.shared.embedding import BgeClient, BgeReranker
+from app.shared.embedding import build_embedding, build_reranker
 from app.shared.obs import Observability
 from app.shared.persistence.db import DbEngines
 from app.shared.tenant.propagation import TenantPropagator
@@ -37,8 +37,8 @@ class Container:
         self.obs = Observability(service_name=settings.otel.service_name)
         self.engines = DbEngines(settings)
         self.llm = llm_factory(settings.llm, self.obs)
-        self.embedding = BgeClient(settings.embedding)
-        self.reranker = BgeReranker(settings.embedding)
+        self.embedding = build_embedding(settings.embedding)
+        self.reranker = build_reranker(settings.embedding)
         self.tenant_propagator = TenantPropagator()
 
         self._http = httpx.AsyncClient(timeout=30.0)
@@ -157,3 +157,4 @@ class Container:
         await self.engines.dispose()
         await self._http.aclose()
         await self.embedding.close()
+        await self.reranker.close()
