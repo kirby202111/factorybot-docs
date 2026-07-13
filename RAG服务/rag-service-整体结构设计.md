@@ -19,7 +19,7 @@
 |---|------|------|
 | 1 | **模块化单体 + 共享内核（Shared Kernel）** | 三路线运行时 profile 同质（均为 FastAPI + 事件订阅 + 检索/编排），合并单服务可消除各路线文档中重复的 `llm_factory` / `bge_client` / `obs` / `config` / `kafka` 基类；与总览 §1.2 单服务表述一致 |
 | 2 | **可拆性是硬约束** | 每路线模块自包含（自带 application/domain），依赖只指向 `shared/` 的 Protocol（Port），路线间调用走 Port/Adapter；未来任一路线可零成本抽成独立微服务（strangler），只需把 InProcess Adapter 换成 Http Adapter |
-| 3 | **多存储共存于单进程** | A 用 Neo4j、B 用 PGVector(PostgreSQL)、元数据/审计用 MySQL、缓存用 Redis；单服务集中了存储依赖，但每条存储链路在 `shared/persistence/` 与各路线 `infrastructure/` 间用 Port 隔离，故障域不扩散（如 Neo4j 不可用返回 503，不拖垮 B/E） |
+| 3 | **多存储共存于单进程** | A 用 Neo4j、B 用 ChromaDB、元数据/审计用 MySQL、缓存用 Redis；单服务集中了存储依赖，但每条存储链路在 `shared/persistence/` 与各路线 `infrastructure/` 间用 Port 隔离，故障域不扩散（如 Neo4j 不可用返回 503，不拖垮 B/E） |
 | 4 | **只读红线靠启动断言兜底，不靠自觉** | 统一的 `ReadOnly*Gate` 体系（投影/摄入/工具三类 gate）在 lifespan 启动期扫描，发现任何写动作/原始数据流订阅即拒绝启动 |
 
 > **不选多服务**：三路线基础设施 90% 同构（同 LLM 抽象、同 bge-m3、同 OTel/prometheus、同 pydantic-settings、同 Kafka envelope/幂等模式），拆三服务会把这 90% 复制三份，违背 DRY 与 SRP；总览 §1.2 也只列了一个 rag-service。
@@ -207,12 +207,12 @@ rag_service/
 
 | 组件 | 职责 |
 |------|------|
-| `db` | AsyncEngine 工厂：MySQL 主库（元数据/审计/幂等/位点）、PostgreSQL+PGVector（B 的向量库），按 config 懒初始化 |
-| `base` | SQLAlchemy 2.0 `DeclarativeBase`（async + asyncmy / asyncpg） |
+| `db` | AsyncEngine 工厂：MySQL 主库（元数据/审计/幂等/位点）+ ChromaDB persistent client（B 的向量库），按 config 懒初始化 |
+| `base` | SQLAlchemy 2.0 `DeclarativeBase`（async + asyncmy，MySQL） |
 | `migrations/` | Alembic 统一管理多 schema（见 §9） |
 
 > 现状：各路线用原始 SQL DDL，无迁移工具。本文引入 Alembic 统一管理（§9）。
-> 多 DB 注意：单进程同时持有 Neo4j driver + PG asyncpg + MySQL asyncmy + Redis client，连接池分别配额，lifespan 启动期做就绪探测，任一不可用按路线降级（不拖垮其他路线）。
+> 多 DB 注意：单进程同时持有 Neo4j driver + ChromaDB client + MySQL asyncmy + Redis client，连接池分别配额，lifespan 启动期做就绪探测，任一不可用按路线降级（不拖垮其他路线）。
 
 ### 3.8 `shared/tenant/` -- 租户上下文 + 跨服务传递
 
@@ -266,10 +266,10 @@ rag_service/
 |----|---------|------------|
 | domain | `KnowledgeDocument`(聚合根)/`DocumentVersion`/`DocumentChunk`/`DocumentBinding`/`ChunkLocator`、`DocAnswer`/`DocCitation`、`ReindexHandler`/`ReadOnlyIngestionGate` | tenant |
 | application | `DocumentIngestionService`、`DocumentRetrievalService`、`ReindexCoordinator`、`ChunkStrategySelector` | ai、embedding、obs |
-| infrastructure | `pgvector/`(driver/schema/retriever/document_repo)、`minio_/`(object_store)、`acl/` | kafka、persistence、acl、obs |
+| infrastructure | `chromadb/`(client/schema/retriever/document_repo)、`minio_/`(object_store)、`acl/` | kafka、persistence、acl、obs |
 
 **对外端点**：`POST /rag/docs/query`（检索+综合）、`POST /rag/docs/search`（只检索 chunks）、`POST /rag/docs/ingest`（文档摄入）。
-**存储**：PGVector（文档元数据+版本+向量同库，HNSW 索引）、MinIO（原始文件）、MySQL（幂等/位点）、Redis（检索缓存）。
+**存储**：ChromaDB（chunk 向量 + metadata，chunk 不可变 + 版本隔离靠查询过滤）、MinIO（原始文件）、MySQL（幂等/位点/审计）、Redis（检索缓存）。
 **重索引触发**：订阅 `process.route.lifecycle` + A 发布的 `rag.reindex.request` 内部事件。
 **审核流**：工艺绑定型文档（SOP/检验标准）随 `ProcessRouteActivated` **联动 PUBLISHED**（工艺生效即文档生效，责任归工艺 owner，决策 #3）；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED。
 **版本绑定**：检验标准文档 MVP 按 `route_version`，`DocumentBinding` 预留 `rule_id`+`rule_version` 双轨字段并订阅 `quality.gate.lifecycle`，评测后切换（决策 #2）。
@@ -384,11 +384,11 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 |--------|---------|------|
 | `rag_shared` | shared | `DomainEvent` 幂等/位点基表（若统一） |
 | `rag_trace` | A | `index_idempotency`/`index_offset`/`subgraph_audit` |
-| `rag_doc` | B | 文档元数据/版本/chunk（PGVector，同库） |
+| `rag_doc` | B | ChromaDB collection（chunk 向量+metadata，非 Alembic）；幂等/位点归 `rag_shared` |
 | `rag_agentic` | E | `answer_audit`/`route_trace` |
 
 - **MySQL**（A/E 元数据与审计）：Alembic 管理 schema 演进。
-- **PGVector**（B）：Alembic 管理 HNSW 索引与表结构（`asyncpg` 方言）。
+- **ChromaDB**（B）：非 Alembic，collection 由代码初始化，Parquet 文件持久化（chunk 不可变）。
 - **Neo4j**（A）：`SchemaInitializer` 启动时幂等执行约束/索引/向量索引 DDL（非 Alembic，图库 DDL 幂等即可）。
 
 ---
@@ -451,9 +451,9 @@ rag-service 是 mes-eval 的被测对象，3 条路线各一个 `EvalTarget` 适
 | 1 | **单服务·三路线模块 + 共享内核** | 消除三路线 90% 同构基础设施的重复；与总览 §1.2 一致；每路线模块自包含可拆 |
 | 2 | **路线间调用走 Port/Adapter，禁止直 import** | 把"现在单服务、将来可拆"从口号变成结构属性；拆服务只换 Adapter 绑定 |
 | 3 | **shared 只放 ≥2 路线复用的设施** | 避免共享内核膨胀；单路线专属设施留路线 `infrastructure/` |
-| 4 | **多 DB 共存，按路线降级** | 单进程集中存储依赖（Neo4j/PG/MySQL/Redis），但 Port 隔离故障域，任一 DB 不可用不拖垮其他路线 |
+| 4 | **多 DB 共存，按路线降级** | 单进程集中存储依赖（Neo4j/ChromaDB/MySQL/Redis），但 Port 隔离故障域，任一 DB 不可用不拖垮其他路线 |
 | 5 | **统一 ReadOnly*Gate 启动断言** | 只读红线靠结构兜底不靠自觉；fail-fast 拒绝启动 |
-| 6 | **Alembic 统一管多 schema** | 补齐各路线无迁移工具的缺口；Neo4j 除外（幂等 DDL） |
+| 6 | **Alembic 统一管多 schema** | 补齐各路线无迁移工具的缺口；Neo4j/ChromaDB 除外（幂等 DDL / collection 代码初始化） |
 | 7 | **统一健康检查 + DI 容器 + router 注册** | 补齐三路线均缺失的运维底座 |
 | 8 | **租户跨服务传递协议一处定义** | 补齐各路线各自定义 TenantContext、无传递协议的缺口 |
 | 9 | **C/D 暂不建设（descoped）** | rag-service MVP 收窄为 A/B/E；C（NL2SQL 旁路）、D（实时推送）暂不建设，本文档不涉及 |
