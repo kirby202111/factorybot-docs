@@ -1,0 +1,93 @@
+"""E LangGraph ``StateGraph`` 构建器。"""
+from __future__ import annotations
+
+import logging
+from typing import Any, TypedDict
+
+from app.routes.agentic.domain.intent import IntentCategory
+
+logger = logging.getLogger(__name__)
+
+
+class AgentState(TypedDict, total=False):
+    """路由图状态。"""
+
+    question: str
+    intent: IntentCategory
+    tenant: Any
+    session_id: str
+    traceparent: str
+    tool_result: Any
+    tool_chain: list[str]
+    answer: str
+
+
+class RouteGraphBuilder:
+    """构建 E 轻量路由图。
+
+    节点：router -> {tool | delegate | converge} -> converge -> END。
+    LangGraph 不可用时降级为简单顺序执行器（保持可跑）。
+    """
+
+    def __init__(self, *, tool_executor: Any, delegator: Any) -> None:
+        self._tool_executor = tool_executor
+        self._delegator = delegator
+
+    def build(self, intent: IntentCategory, tenant: Any) -> Any:
+        try:
+            from langgraph.graph import END, StateGraph
+
+            graph = StateGraph(AgentState)
+            graph.add_node("router", self._router_node)
+            graph.add_node("tool", self._tool_executor)
+            graph.add_node("delegate", self._delegator)
+            graph.add_node("converge", self._converge_node)
+            graph.set_entry_point("router")
+            graph.add_conditional_edges(
+                "router",
+                lambda s: self._route_decision(s.get("intent")),
+                {"tool": "tool", "delegate": "delegate", "unknown": "converge"},
+            )
+            graph.add_edge("tool", "converge")
+            graph.add_edge("delegate", "converge")
+            graph.add_edge("converge", END)
+            return graph.compile()
+        except Exception as exc:  # langgraph 不可用 -> 降级
+            logger.warning("LangGraph 不可用，RouteGraphBuilder 降级为顺序执行: %s", exc)
+            return _FallbackGraph(self, intent)
+
+    @staticmethod
+    def _route_decision(intent: IntentCategory | None) -> str:
+        if intent is None:
+            return "unknown"
+        if intent.is_delegation():
+            return "delegate"
+        if intent == IntentCategory.UNKNOWN:
+            return "unknown"
+        return "tool"
+
+    async def _router_node(self, state: AgentState) -> AgentState:
+        # 透传：意图已在 GatewayService 分类完成
+        return state
+
+    async def _converge_node(self, state: AgentState) -> AgentState:
+        if not state.get("answer") and state.get("tool_result") is None:
+            state["answer"] = "未产生结果，建议转人工。"
+        return state
+
+
+class _FallbackGraph:
+    """LangGraph 不可用时的顺序执行降级图。"""
+
+    def __init__(self, builder: RouteGraphBuilder, intent: IntentCategory) -> None:
+        self._builder = builder
+        self._intent = intent
+
+    async def ainvoke(self, state: dict, config: dict | None = None) -> dict:
+        decision = RouteGraphBuilder._route_decision(self._intent)
+        if decision == "tool":
+            state = await self._builder._tool_executor(state)
+        elif decision == "delegate":
+            state = await self._builder._delegator(state)
+        state = await self._builder._converge_node(state)
+        return state

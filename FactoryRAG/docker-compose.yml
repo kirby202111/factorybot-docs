@@ -1,0 +1,75 @@
+# rag-service 部署形态。
+# B 用 ChromaDB 嵌入式，无需独立向量库 service；Parquet 持久化挂卷。
+# 口径见《rag-service-技术选型和实现方案》§1.4。
+services:
+  rag-service:
+    build: .
+    image: rag-service:latest
+    environment:
+      RAG_LLM__PROVIDER: deepseek
+      RAG_LLM__MODEL_NAME: deepseek-chat
+      RAG_EMBEDDING__BASE_URL: http://bge-inference:8080
+      RAG_NEO4J__URI: bolt://neo4j:7687
+      RAG_NEO4J__USERNAME: neo4j
+      RAG_NEO4J__PASSWORD: rag
+      RAG_MYSQL__DSN: mysql+asyncmy://rag:rag@mysql:3306/rag
+      RAG_REDIS__URL: redis://redis:6379/0
+      RAG_KAFKA__BOOTSTRAP: kafka:9092
+      RAG_MINIO__ENDPOINT: minio:9000
+      RAG_MINIO__ACCESS_KEY: minioadmin
+      RAG_MINIO__SECRET_KEY: minioadmin
+      RAG_CHROMA__PERSIST_DIR: /data/chroma
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # 路线级开关（灰度引入：先 B 再 A，E 收口）
+      RAG_DOCUMENT__ENABLED: "true"
+      RAG_TRACEABILITY__ENABLED: "false"
+      RAG_AGENTIC__ENABLED: "false"
+    depends_on: [neo4j, mysql, redis, kafka, minio, bge-inference]
+    volumes:
+      - chromadata:/data/chroma
+    ports: ["8000:8000"]
+
+  bge-inference:                    # bge-m3 + reranker 本地化推理 sidecar（车间网隔离必备）
+    image: michaelfeil/infinity:latest
+    ports: ["8080:8080"]
+
+  neo4j:
+    image: neo4j:5.20
+    environment:
+      NEO4J_AUTH: neo4j/rag
+    ports: ["7474:7474", "7687:7687"]
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rag
+      MYSQL_DATABASE: rag
+      MYSQL_USER: rag
+      MYSQL_PASSWORD: rag
+    ports: ["3306:3306"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+    ports: ["9092:9092"]
+
+volumes:
+  chromadata:
