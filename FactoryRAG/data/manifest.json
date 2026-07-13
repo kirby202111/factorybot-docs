@@ -1,0 +1,123 @@
+{
+  "_comment": "B 文档型 RAG 模拟数据清单。每条 = 一份车间文档的元数据 + 原文文件。loader 读取后用真实 ChunkStrategySelector.split() 切分为 DocumentChunk（与 IngestionService 同路径）。",
+  "documents": [
+    {
+      "doc_id": "sop-smt-reflow",
+      "title": "SMT 回流焊工艺标准作业指导书",
+      "category": "PROCESS_BOUND",
+      "doc_type": "SOP",
+      "tenant_scope": "workshop:PCBA",
+      "file": "documents/sop_smt_reflow_v3.md",
+      "version_id": "sop-reflow-v3",
+      "route_version": "v3",
+      "route_id": "route-smt-reflow",
+      "state": "PUBLISHED",
+      "bindings": [
+        {"binding_type": "ROUTE_VERSION", "target_ref": {"route_id": "route-smt-reflow", "route_version": "v3"}}
+      ]
+    },
+    {
+      "doc_id": "sop-smt-reflow-v4",
+      "title": "SMT 回流焊工艺标准作业指导书 v4",
+      "category": "PROCESS_BOUND",
+      "doc_type": "SOP",
+      "tenant_scope": "workshop:PCBA",
+      "file": "documents/sop_smt_reflow_v4.md",
+      "version_id": "sop-reflow-v4",
+      "route_version": "v4",
+      "route_id": "route-smt-reflow",
+      "state": "PUBLISHED",
+      "bindings": [
+        {"binding_type": "ROUTE_VERSION", "target_ref": {"route_id": "route-smt-reflow", "route_version": "v4"}}
+      ]
+    },
+    {
+      "doc_id": "sop-smt-reflow-v2-deprecated",
+      "title": "SMT 回流焊工艺标准作业指导书 v2（已废弃）",
+      "category": "PROCESS_BOUND",
+      "doc_type": "SOP",
+      "tenant_scope": "workshop:PCBA",
+      "file": "documents/sop_smt_reflow_v2_deprecated.md",
+      "version_id": "sop-reflow-v2",
+      "route_version": "v2",
+      "route_id": "route-smt-reflow",
+      "state": "DEPRECATED",
+      "bindings": [
+        {"binding_type": "ROUTE_VERSION", "target_ref": {"route_id": "route-smt-reflow", "route_version": "v2"}}
+      ]
+    },
+    {
+      "doc_id": "sop-box-build",
+      "title": "整机组装（Box Build）标准作业指导书",
+      "category": "PROCESS_BOUND",
+      "doc_type": "SOP",
+      "tenant_scope": "workshop:BOX",
+      "file": "documents/sop_box_build_assembly_v2.md",
+      "version_id": "sop-boxbuild-v2",
+      "route_version": "v2",
+      "route_id": "route-box-build",
+      "state": "PUBLISHED",
+      "bindings": [
+        {"binding_type": "ROUTE_VERSION", "target_ref": {"route_id": "route-box-build", "route_version": "v2"}}
+      ]
+    },
+    {
+      "doc_id": "manual-reflow-oven-eq001",
+      "title": "回流焊炉 EQ-REFLOW-001 维修手册",
+      "category": "ASSET_BOUND",
+      "doc_type": "MANUAL",
+      "tenant_scope": "workshop:PCBA",
+      "file": "documents/manual_reflow_oven_eq001.md",
+      "version_id": "manual-reflow-v1",
+      "route_version": null,
+      "route_id": null,
+      "asset_id": "EQ-REFLOW-001",
+      "state": "PUBLISHED",
+      "bindings": [
+        {"binding_type": "ASSET", "target_ref": {"asset_id": "EQ-REFLOW-001"}}
+      ]
+    },
+    {
+      "doc_id": "manual-pickplace-eq002",
+      "title": "贴片机 EQ-PICK-002 维护手册",
+      "category": "ASSET_BOUND",
+      "doc_type": "MANUAL",
+      "tenant_scope": "workshop:PCBA",
+      "file": "documents/manual_pickplace_eq002.md",
+      "version_id": "manual-pickplace-v1",
+      "route_version": null,
+      "route_id": null,
+      "asset_id": "EQ-PICK-002",
+      "state": "PUBLISHED",
+      "bindings": [
+        {"binding_type": "ASSET", "target_ref": {"asset_id": "EQ-PICK-002"}}
+      ]
+    },
+    {
+      "doc_id": "standard-ipc-a610",
+      "title": "IPC-A-610 焊点质量验收标准",
+      "category": "GENERAL",
+      "doc_type": "STANDARD",
+      "tenant_scope": "workshop:PCBA",
+      "file": "documents/standard_ipc_a610.md",
+      "version_id": "standard-ipc-v1",
+      "route_version": null,
+      "route_id": null,
+      "state": "PUBLISHED",
+      "bindings": []
+    },
+    {
+      "doc_id": "standard-esd",
+      "title": "ESD 防静电操作规范",
+      "category": "GENERAL",
+      "doc_type": "STANDARD",
+      "tenant_scope": "workshop:PCBA",
+      "file": "documents/standard_esd.md",
+      "version_id": "standard-esd-v1",
+      "route_version": null,
+      "route_id": null,
+      "state": "PUBLISHED",
+      "bindings": []
+    }
+  ]
+}

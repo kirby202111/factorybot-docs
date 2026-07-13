@@ -1,0 +1,59 @@
+{
+  "_comment": "B 文档型 RAG 期望查询集。每条 = 一个查询 + 过滤条件 + 期望命中（top-N 含 expect_doc_ids、不含 exclude_doc_ids、top hit 文本含 expect_keywords）。用于断言检索相关性与版本/资产隔离红线。",
+  "queries": [
+    {
+      "query": "回流焊峰值温度设多少",
+      "doc_category": "PROCESS_BOUND",
+      "route_version": "v3",
+      "expect_doc_ids": ["sop-smt-reflow"],
+      "exclude_doc_ids": ["sop-smt-reflow-v4", "sop-smt-reflow-v2-deprecated"],
+      "expect_keywords": ["峰值温度", "245"]
+    },
+    {
+      "query": "回流焊 v4 工艺链速多少",
+      "doc_category": "PROCESS_BOUND",
+      "route_version": "v4",
+      "expect_doc_ids": ["sop-smt-reflow-v4"],
+      "exclude_doc_ids": ["sop-smt-reflow", "sop-smt-reflow-v2-deprecated"],
+      "expect_keywords": ["250", "链速"]
+    },
+    {
+      "query": "整机组装螺丝扭矩多少",
+      "doc_category": "PROCESS_BOUND",
+      "route_version": "v2",
+      "expect_doc_ids": ["sop-box-build"],
+      "exclude_doc_ids": ["sop-smt-reflow"],
+      "expect_keywords": ["扭矩"]
+    },
+    {
+      "query": "回流焊炉 E001 故障怎么处理",
+      "doc_category": "ASSET_BOUND",
+      "asset_id": "EQ-REFLOW-001",
+      "expect_doc_ids": ["manual-reflow-oven-eq001"],
+      "exclude_doc_ids": ["manual-pickplace-eq002"],
+      "expect_keywords": ["E001", "超温"]
+    },
+    {
+      "query": "贴片机吸嘴堵塞怎么处理",
+      "doc_category": "ASSET_BOUND",
+      "asset_id": "EQ-PICK-002",
+      "expect_doc_ids": ["manual-pickplace-eq002"],
+      "exclude_doc_ids": ["manual-reflow-oven-eq001"],
+      "expect_keywords": ["E101", "吸嘴"]
+    },
+    {
+      "query": "焊点锡量验收标准是多少",
+      "doc_category": "GENERAL",
+      "expect_doc_ids": ["standard-ipc-a610"],
+      "exclude_doc_ids": ["standard-esd"],
+      "expect_keywords": ["锡量"]
+    },
+    {
+      "query": "防静电腕带接地电阻要求",
+      "doc_category": "GENERAL",
+      "expect_doc_ids": ["standard-esd"],
+      "exclude_doc_ids": ["standard-ipc-a610"],
+      "expect_keywords": ["腕带", "接地电阻"]
+    }
+  ]
+}

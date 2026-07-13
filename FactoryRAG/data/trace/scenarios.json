@@ -1,0 +1,111 @@
+{
+  "_comment": "A 追溯型 RAG 模拟数据：5M1E 子图场景。每个场景 = seed + TraceSubgraph（与领域模型同构）+ 期望断言。FakeGraphRetriever 按 seed 返回对应子图，route_version 过滤走 Method 维度快照节点。场景1 锁定 v3 快照（status=DEPRECATED 历史快照，但仍是生产时锁定版本，非当前 ACTIVE）。",
+  "scenarios": [
+    {
+      "seed": {"kind": "WipUnit", "value": "SN-2024-001"},
+      "expected": {
+        "route_version_locked": "v3",
+        "defect_code": "SW-001",
+        "defect_name": "锡桥",
+        "root_cause_category": "Material",
+        "evidence_node_ids": ["InventoryBatch:B-77", "DefectCatalog:SW-001"]
+      },
+      "subgraph": {
+        "as_of": "2024-06-10T10:00:00Z",
+        "projection_lag_ms": 120,
+        "seed": {
+          "label": "WipUnit", "bounded_context": "在制品执行",
+          "node_id": "WipUnit:SN-2024-001",
+          "props": {"sn": "SN-2024-001", "wo": "WO-2024-001", "tenant_scope": "workshop:PCBA", "seed_kind": "WipUnit", "seed_value": "SN-2024-001"},
+          "source_event_id": "evt-wip-001"
+        },
+        "clusters": {
+          "man": [
+            {"label": "CheckpointRecord", "bounded_context": "在制品执行", "node_id": "CheckpointRecord:CP-20240610-01", "props": {"station_id": "SMT-1", "scanned_by": "OP-023", "decision": "PASS", "occurred_at": "2024-06-10T09:00:00Z", "route_version": "v3"}, "source_event_id": "evt-cp-01"},
+            {"label": "CheckpointRecord", "bounded_context": "在制品执行", "node_id": "CheckpointRecord:CP-20240610-02", "props": {"station_id": "AOI-1", "scanned_by": "OP-023", "decision": "FAIL", "occurred_at": "2024-06-10T09:10:00Z", "route_version": "v3"}, "source_event_id": "evt-cp-02"}
+          ],
+          "machine": [
+            {"label": "Asset", "bounded_context": "设备管理", "node_id": "Asset:EQ-REFLOW-001", "props": {"asset_id": "EQ-REFLOW-001", "status": "RUNNING"}, "source_event_id": "evt-asset-001"}
+          ],
+          "material": [
+            {"label": "InventoryBatch", "bounded_context": "物料管理", "node_id": "InventoryBatch:B-77", "props": {"batch_no": "B-77", "material": "焊锡膏 SAC305", "supplier": "S-ACME", "location": "COLD-01", "available_qty": 120}, "source_event_id": "evt-batch-77"},
+            {"label": "WorkOrder", "bounded_context": "生产计划", "node_id": "WorkOrder:WO-2024-001", "props": {"wo": "WO-2024-001", "qty": 500}, "source_event_id": "evt-wo-001"},
+            {"label": "Bom", "bounded_context": "物料管理", "node_id": "Bom:BOM-REFLOW-001", "props": {"bom_id": "BOM-REFLOW-001"}, "source_event_id": "evt-bom-001"}
+          ],
+          "method": [
+            {"label": "RouteVersion", "bounded_context": "工艺管理", "node_id": "RouteVersion:route-smt-reflow@v3", "props": {"route_id": "route-smt-reflow", "route_version": "v3", "status": "DEPRECATED"}, "source_event_id": "evt-rv-snap-v3"},
+            {"label": "RouteStep", "bounded_context": "工艺管理", "node_id": "RouteStep:RS-3", "props": {"step_no": 3, "operation_id": "OP-REFLOW"}, "source_event_id": "evt-rs-3"}
+          ],
+          "measurement": [
+            {"label": "TestResult", "bounded_context": "质量检测", "node_id": "TestResult:TR-001", "props": {"test_id": "TR-001", "test_type": "AOI", "raw_verdict": "FAIL"}, "source_event_id": "evt-tr-001"},
+            {"label": "QualityVerdict", "bounded_context": "质量判定", "node_id": "QualityVerdict:QV-001", "props": {"verdict_id": "QV-001", "business_verdict": "REJECT"}, "source_event_id": "evt-qv-001"},
+            {"label": "DefectCatalog", "bounded_context": "质量判定", "node_id": "DefectCatalog:SW-001", "props": {"defect_code": "SW-001", "name": "锡桥", "severity": "MAJOR"}, "source_event_id": "evt-dc-001"}
+          ],
+          "environment": []
+        },
+        "edges": [
+          {"rel": "SNAPSHOT_OF_ROUTE", "from_id": "CheckpointRecord:CP-20240610-01", "to_id": "RouteVersion:route-smt-reflow@v3", "version": "v3"},
+          {"rel": "SNAPSHOT_OF_ROUTE", "from_id": "CheckpointRecord:CP-20240610-02", "to_id": "RouteVersion:route-smt-reflow@v3", "version": "v3"},
+          {"rel": "FOR_UNIT", "from_id": "CheckpointRecord:CP-20240610-01", "to_id": "WipUnit:SN-2024-001"},
+          {"rel": "FOR_UNIT", "from_id": "CheckpointRecord:CP-20240610-02", "to_id": "WipUnit:SN-2024-001"},
+          {"rel": "PRODUCED_TESTRESULT", "from_id": "CheckpointRecord:CP-20240610-02", "to_id": "TestResult:TR-001"},
+          {"rel": "JUDGED_BY", "from_id": "TestResult:TR-001", "to_id": "QualityVerdict:QV-001"},
+          {"rel": "CITES_DEFECT", "from_id": "QualityVerdict:QV-001", "to_id": "DefectCatalog:SW-001"},
+          {"rel": "CONSUMED_BATCH", "from_id": "WipUnit:SN-2024-001", "to_id": "InventoryBatch:B-77"},
+          {"rel": "BELONGS_TO", "from_id": "WipUnit:SN-2024-001", "to_id": "WorkOrder:WO-2024-001"},
+          {"rel": "BINDS_BOM", "from_id": "WorkOrder:WO-2024-001", "to_id": "Bom:BOM-REFLOW-001"},
+          {"rel": "USED_EQUIPMENT", "from_id": "CheckpointRecord:CP-20240610-01", "to_id": "Asset:EQ-REFLOW-001"}
+        ]
+      }
+    },
+    {
+      "seed": {"kind": "WipUnit", "value": "SN-2024-009"},
+      "expected": {
+        "route_version_locked": "v4",
+        "defect_code": "SW-002",
+        "defect_name": "立碑",
+        "root_cause_category": "Method",
+        "evidence_node_ids": ["RouteVersion:route-smt-reflow@v4", "DefectCatalog:SW-002"]
+      },
+      "subgraph": {
+        "as_of": "2024-06-12T10:00:00Z",
+        "projection_lag_ms": 110,
+        "seed": {
+          "label": "WipUnit", "bounded_context": "在制品执行",
+          "node_id": "WipUnit:SN-2024-009",
+          "props": {"sn": "SN-2024-009", "wo": "WO-2024-009", "tenant_scope": "workshop:PCBA", "seed_kind": "WipUnit", "seed_value": "SN-2024-009"},
+          "source_event_id": "evt-wip-009"
+        },
+        "clusters": {
+          "man": [
+            {"label": "CheckpointRecord", "bounded_context": "在制品执行", "node_id": "CheckpointRecord:CP-20240612-01", "props": {"station_id": "SMT-1", "scanned_by": "OP-031", "decision": "FAIL", "occurred_at": "2024-06-12T09:05:00Z", "route_version": "v4"}, "source_event_id": "evt-cp-12-01"}
+          ],
+          "machine": [
+            {"label": "Asset", "bounded_context": "设备管理", "node_id": "Asset:EQ-REFLOW-001", "props": {"asset_id": "EQ-REFLOW-001", "status": "RUNNING"}, "source_event_id": "evt-asset-001"}
+          ],
+          "material": [
+            {"label": "InventoryBatch", "bounded_context": "物料管理", "node_id": "InventoryBatch:B-88", "props": {"batch_no": "B-88", "material": "焊锡膏 SAC305", "supplier": "S-ACME", "location": "COLD-01", "available_qty": 80}, "source_event_id": "evt-batch-88"}
+          ],
+          "method": [
+            {"label": "RouteVersion", "bounded_context": "工艺管理", "node_id": "RouteVersion:route-smt-reflow@v4", "props": {"route_id": "route-smt-reflow", "route_version": "v4", "status": "ACTIVATED"}, "source_event_id": "evt-rv-snap-v4"},
+            {"label": "RouteStep", "bounded_context": "工艺管理", "node_id": "RouteStep:RS-3", "props": {"step_no": 3, "operation_id": "OP-REFLOW"}, "source_event_id": "evt-rs-3b"}
+          ],
+          "measurement": [
+            {"label": "TestResult", "bounded_context": "质量检测", "node_id": "TestResult:TR-009", "props": {"test_id": "TR-009", "test_type": "AOI", "raw_verdict": "FAIL"}, "source_event_id": "evt-tr-009"},
+            {"label": "QualityVerdict", "bounded_context": "质量判定", "node_id": "QualityVerdict:QV-009", "props": {"verdict_id": "QV-009", "business_verdict": "REJECT"}, "source_event_id": "evt-qv-009"},
+            {"label": "DefectCatalog", "bounded_context": "质量判定", "node_id": "DefectCatalog:SW-002", "props": {"defect_code": "SW-002", "name": "立碑", "severity": "MAJOR"}, "source_event_id": "evt-dc-002"}
+          ],
+          "environment": []
+        },
+        "edges": [
+          {"rel": "SNAPSHOT_OF_ROUTE", "from_id": "CheckpointRecord:CP-20240612-01", "to_id": "RouteVersion:route-smt-reflow@v4", "version": "v4"},
+          {"rel": "FOR_UNIT", "from_id": "CheckpointRecord:CP-20240612-01", "to_id": "WipUnit:SN-2024-009"},
+          {"rel": "PRODUCED_TESTRESULT", "from_id": "CheckpointRecord:CP-20240612-01", "to_id": "TestResult:TR-009"},
+          {"rel": "JUDGED_BY", "from_id": "TestResult:TR-009", "to_id": "QualityVerdict:QV-009"},
+          {"rel": "CITES_DEFECT", "from_id": "QualityVerdict:QV-009", "to_id": "DefectCatalog:SW-002"},
+          {"rel": "CONSUMED_BATCH", "from_id": "WipUnit:SN-2024-009", "to_id": "InventoryBatch:B-88"}
+        ]
+      }
+    }
+  ]
+}
