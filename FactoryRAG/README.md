@@ -85,14 +85,27 @@ FactoryRAG/
 
 ## 3. 启动
 
-### 3.1 依赖
+### 3.1 依赖（uv 管理）
+
+项目用 [uv](https://docs.astral.sh/uv/) 管理虚拟环境与依赖锁。Python 版本锁定为 **3.12**
+（见 `.python-version`，满足 `requires-python>=3.11`；uv 复用本地已装的 cpython-3.12，
+无需联网下载解释器）。生产镜像 `Dockerfile` 仍用 `python:3.11-slim`，二者均在受支持区间内。
 
 ```bash
-pip install -e ".[dev]"
+uv sync                # 建 .venv、解析依赖、生成 uv.lock、装 dev 组
 ```
 
+常用命令：
+
+| 操作 | 命令 |
+|------|------|
+| 同步环境（按 `uv.lock`） | `uv sync` |
+| 加 / 升依赖 | `uv add <pkg>` / `uv add --dev <pkg>` |
+| 在 venv 内跑命令 | `uv run <cmd>`（如 `uv run pytest`、`uv run uvicorn ...`） |
+| 升级锁文件 | `uv lock --upgrade` |
+
 重依赖（chromadb / neo4j / langgraph / minio / aiokafka / langchain）均在函数内懒导入，
-模块导入不触发；运行时按启用的路线需要对应依赖就绪。
+模块导入不触发；运行时按启用的路线需要对应依赖就绪。`uv.lock` 提交进库以锁定可复现环境。
 
 ### 3.2 配置
 
@@ -116,9 +129,9 @@ docker-compose up -d              # mysql/redis/neo4j/minio/kafka/bge-inference
 首次启动前跑 MySQL 迁移（见 §4）。随后本地起服务：
 
 ```bash
-gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b :8000
+uv run gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b :8000
 # 或开发期
-uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
 健康检查：`GET /health`（存活）、`GET /ready`（就绪，含各存储/路线降级状态）、`GET /metrics`（prometheus）。
@@ -131,13 +144,13 @@ Alembic 管 MySQL 4 schema / 6 表；DB URL 从 `RAG_MYSQL__DSN` 注入（覆盖
 
 ```bash
 # 升级到最新
-alembic upgrade head
+uv run alembic upgrade head
 
 # 回滚
-alembic downgrade base
+uv run alembic downgrade base
 
 # 生成新迁移（模型变更后）
-alembic revision --autogenerate -m "describe change"
+uv run alembic revision --autogenerate -m "describe change"
 ```
 
 `0001_initial` 建 `rag_shared`（index_idempotency / index_offset）、`rag_trace`（subgraph_audit）、
@@ -148,8 +161,8 @@ alembic revision --autogenerate -m "describe change"
 ## 5. 测试
 
 ```bash
-pytest                    # 全量（需装齐重依赖）
-pytest tests/ -v          # 单元测试（红线不变式，不触重依赖）
+uv run pytest             # 全量（需装齐重依赖）
+uv run pytest tests/ -v   # 单元测试（红线不变式，不触重依赖）
 ```
 
 | 测试 | 锁住的不变式 |

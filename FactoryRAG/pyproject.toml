@@ -54,7 +54,8 @@ dependencies = [
     "langgraph>=0.2",                # [E] 统一口径（Command(resume=…) 语义依赖）
 ]
 
-[project.optional-dependencies]
+# dev 工具组（PEP 735）。`uv sync` 默认安装 dev 组。
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -71,3 +72,9 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# ── uv 索引镜像（国内下载加速）──
+# default=true 替换默认 PyPI；如需容灾可再追加一条不带 default 的镜像源。
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
