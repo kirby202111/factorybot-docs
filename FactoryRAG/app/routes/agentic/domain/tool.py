@@ -7,13 +7,15 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.shared.acl.gates import StartupAssertionError
 
 
 class ToolDescriptor(BaseModel):
     """工具描述符。"""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str
     description: str
@@ -22,9 +24,6 @@ class ToolDescriptor(BaseModel):
     args_schema: type | None = None
     required_tenant_scopes: list[str] = []
     handler: Callable[..., Awaitable[Any]] | None = None
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class ReadOnlyToolGate(StartupAssertionError):
@@ -64,32 +63,28 @@ class ToolRegistry:
         registry.validate_on_startup()
 
     def build_default(self, *, trace_rag_port: Any, doc_rag_port: Any) -> None:
-        """注册 E 默认工具：A ``query_traceability_graph`` + B ``search_docs``。"""
+        """注册 E 默认工具：A ``query_traceability_graph`` + B ``search_docs``。
+
+        工具 handler 只传原语给 Port（路线间禁止直 import 对方 domain）：
+        - seed kind 用枚举值字符串 ``"WipUnit"`` 等（TraceRagPort 契约）；
+        - doc types 用枚举值字符串列表 ``["SOP"]`` 等（DocRagPort 契约）。
+        """
         from datetime import datetime
 
-        from app.routes.document.domain.answer import DocSearch
-        from app.routes.document.domain.document import DocumentCategory, DocType
-        from app.routes.traceability.domain.seed import ExpandRequest, SeedKind
-
         async def _query_traceability_graph(
-            *, seed_value: str, seed_kind: SeedKind, tenant: Any, as_of: datetime | None = None
+            *, seed_value: str, seed_kind: str, tenant: Any, as_of: datetime | None = None
         ) -> Any:
             # 经 TraceRagPort InProcess 调 A（决策 #4，不走本机 REST）
             return await trace_rag_port.expand(
-                ExpandRequest(kind=seed_kind, value=seed_value, as_of=as_of), tenant
+                seed_kind, seed_value, tenant, as_of=as_of
             )
 
         async def _search_docs(
-            *, query: str, route_version: str, tenant: Any, doc_types: list[DocType] | None = None
+            *, query: str, route_version: str, tenant: Any, doc_types: list[str] | None = None
         ) -> Any:
             # 经 DocRagPort InProcess 调 B（决策 #4）
             return await doc_rag_port.search(
-                DocSearch(
-                    question=query,
-                    route_version=route_version,
-                    doc_types=doc_types,
-                ),
-                tenant,
+                query, tenant, route_version=route_version or None, doc_types=doc_types
             )
 
         self.register(

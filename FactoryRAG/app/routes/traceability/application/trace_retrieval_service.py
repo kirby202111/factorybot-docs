@@ -132,19 +132,18 @@ class TraceRetrievalService:
     async def _enrich_suggested_action(
         self, hypotheses: list[RootCauseHypothesis], route_version: str, tenant: TenantContext
     ) -> None:
-        """A -> B：经 DocRagPort 拉 SOP 片段补充 suggested_action。"""
-        from app.routes.document.domain.answer import DocQuery
-        from app.routes.document.domain.document import DocumentCategory
+        """A -> B：经 DocRagPort 拉 SOP 片段补充 suggested_action。
 
+        只传原语（DocRagPort 契约），不 import B 的 domain（路线间禁止直 import）。
+        ``doc_category="PROCESS_BOUND"`` + ``route_version`` 命中 B 的工艺绑定型 SOP。
+        """
         for h in hypotheses:
             try:
                 doc_answer = await self._doc_rag.query(
-                    DocQuery(
-                        question=f"{h.category.value} 根因处置 SOP：{h.statement}",
-                        doc_category=DocumentCategory.PROCESS_BOUND,
-                        route_version=route_version,
-                    ),
+                    f"{h.category.value} 根因处置 SOP：{h.statement}",
                     tenant,
+                    route_version=route_version,
+                    doc_category="PROCESS_BOUND",
                 )
                 if doc_answer.citations:
                     h.suggested_action = f"{h.suggested_action}\n（参考 SOP：{doc_answer.citations[0].quoted_text}）"

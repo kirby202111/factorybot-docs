@@ -50,18 +50,21 @@ async def build_trace_services(container: "Container") -> Any:
         obs=container.obs,
     )
 
-    _wire_trace_consumer(container=container, session_factory=session_factory, trace_svc=trace_svc)
+    _wire_trace_consumer(
+        container=container, driver=driver, session_factory=session_factory, trace_svc=trace_svc
+    )
     return trace_svc
 
 
-def _wire_trace_consumer(*, container: "Container", session_factory: Any, trace_svc: Any) -> None:
+def _wire_trace_consumer(
+    *, container: "Container", driver: Any, session_factory: Any, trace_svc: Any
+) -> None:
     """构造 A 的 GraphProjector ConsumerGroup（MVP 4 上下文）并注册到 container.consumers。"""
     from app.routes.traceability.infrastructure.neo4j.projections.registry import (
         build_projection_registry,
     )
     from app.shared.kafka import ConsumerGroup, IdempotencyRepo, OffsetRepo
 
-    driver = container.engines._neo4j_driver  # lifespan 已初始化
     registry = build_projection_registry(driver=driver, embedder=container.embedding, trace_svc=trace_svc)
     group_id = f"{container.settings.kafka.consumer_group_prefix}-trace"
     idem_repo = IdempotencyRepo(consumer_group=group_id)
@@ -71,10 +74,9 @@ def _wire_trace_consumer(*, container: "Container", session_factory: Any, trace_
         return registry.handler_for(event_type)
 
     async def tx_provider(session: Any) -> Any:
-        # A：图投影用 Neo4j session（第二层幂等靠 MERGE）；幂等/位点在 MySQL session
-        from neo4j import AsyncGraphDatabase  # type: ignore  # noqa: F401
-
-        return driver  # GraphProjector 内部自行开 session
+        # A：图投影用 Neo4j session（第二层幂等靠 MERGE）；幂等/位点在 MySQL session。
+        # 返回 driver，GraphProjector 内部自行开 session。
+        return driver
 
     consumer = ConsumerGroup(
         topics=registry.topics,

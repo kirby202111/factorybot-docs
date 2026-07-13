@@ -51,15 +51,16 @@ class GatewayService:
         except Exception:
             pass
 
-        # 3. trace_id + traceparent（决策 #1）
+        # 3. trace_id + traceparent（决策 #1）；audit_id 预先生成以串联 route_trace
         trace_id = uuid4().hex
         traceparent = self._build_traceparent(trace_id)
+        audit_id = str(uuid4())
 
         # 4. LangGraph 路由图（recursion_limit=6 硬上限靠框架兜底）
-        answer = await self._run_graph(request, intent, tenant, trace_id, traceparent)
+        answer = await self._run_graph(request, intent, tenant, trace_id, traceparent, audit_id)
 
         # 5. 审计 + 缓存
-        await self._audit_repo.record(request, intent, answer, tenant)
+        await self._audit_repo.record(request, intent, answer, tenant, audit_id=audit_id)
         await self._cache.set(request, tenant, answer)
         return answer
 
@@ -70,6 +71,7 @@ class GatewayService:
         tenant: TenantContext,
         trace_id: str,
         traceparent: str,
+        audit_id: str,
     ) -> AgentAnswer:
         graph = self._graph_builder.build(intent, tenant)
         initial = {
@@ -77,7 +79,9 @@ class GatewayService:
             "intent": intent,
             "tenant": tenant,
             "session_id": request.session_id or trace_id,
+            "trace_id": trace_id,
             "traceparent": traceparent,
+            "audit_id": audit_id,
             "tool_result": None,
             "tool_chain": [],
             "answer": None,

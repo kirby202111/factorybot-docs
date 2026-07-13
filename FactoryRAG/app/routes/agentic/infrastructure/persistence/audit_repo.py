@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy import select
 
@@ -22,8 +21,17 @@ class AnswerAuditRepo:
     def __init__(self, session_factory: Any) -> None:
         self._sf = session_factory
 
-    async def record(self, request: Any, intent: Any, answer: Any, tenant: Any) -> str:
-        audit_id = str(uuid4())
+    async def record(
+        self,
+        request: Any,
+        intent: Any,
+        answer: Any,
+        tenant: Any,
+        *,
+        audit_id: str,
+    ) -> str:
+        """持久化答案审计行。``audit_id`` 由 GatewayService 预先生成并下传，
+        使 route_trace 行能与之关联（``/agent/explain/{audit_id}`` 证据链）。"""
         async with self._sf() as session:
             session.add(
                 AnswerAuditModel(
@@ -83,36 +91,102 @@ class AnswerAuditRepo:
 
 
 class RouteTraceRepo:
-    """路由 trace 仓库（每次工具/委托调用记录一行）。"""
+    """路由 trace 仓库（每次工具/委托调用记录一行）。
+
+    ``audit_id`` / ``traceparent`` / ``tenant_id`` 由调用方（ToolExecutor / Delegator）
+    从图状态取出传入，使 route_trace 行与 answer_audit 关联 + 保留 traceparent 全链路（决策#1）。
+    """
 
     def __init__(self, session_factory: Any) -> None:
         self._sf = session_factory
 
-    async def _save(self, *, tool_name: str, status: str, latency_ms: int,
-                    view_summary: str | None, error_message: str | None) -> None:
+    async def _save(
+        self,
+        *,
+        tool_name: str,
+        status: str,
+        latency_ms: int,
+        view_summary: str | None,
+        error_message: str | None,
+        audit_id: str,
+        traceparent: str,
+        tenant_id: str,
+    ) -> None:
         async with self._sf() as session:
             session.add(
                 RouteTraceModel(
-                    audit_id="",  # 与 answer_audit 关联由 AnswerAuditRepo.record 后回填（MVP 简化）
+                    audit_id=audit_id,
                     tool_name=tool_name,
                     status=status,
                     latency_ms=latency_ms,
                     view_summary=view_summary,
                     error_message=error_message,
+                    traceparent=traceparent,
+                    tenant_id=tenant_id,
                     created_at=datetime.now(timezone.utc),
                 )
             )
             await session.commit()
 
-    async def save_ok(self, tool_name: str, view: Any, latency_ms: int) -> None:
+    async def save_ok(
+        self,
+        tool_name: str,
+        view: Any,
+        latency_ms: int,
+        *,
+        audit_id: str,
+        traceparent: str,
+        tenant_id: str,
+    ) -> None:
         summary = str(view)[:500] if view is not None else None
-        await self._save(tool_name=tool_name, status="ok", latency_ms=latency_ms,
-                         view_summary=summary, error_message=None)
+        await self._save(
+            tool_name=tool_name,
+            status="ok",
+            latency_ms=latency_ms,
+            view_summary=summary,
+            error_message=None,
+            audit_id=audit_id,
+            traceparent=traceparent,
+            tenant_id=tenant_id,
+        )
 
-    async def save_error(self, tool_name: str, message: str, latency_ms: int) -> None:
-        await self._save(tool_name=tool_name, status="error", latency_ms=latency_ms,
-                         view_summary=None, error_message=message)
+    async def save_error(
+        self,
+        tool_name: str,
+        message: str,
+        latency_ms: int,
+        *,
+        audit_id: str,
+        traceparent: str,
+        tenant_id: str,
+    ) -> None:
+        await self._save(
+            tool_name=tool_name,
+            status="error",
+            latency_ms=latency_ms,
+            view_summary=None,
+            error_message=message,
+            audit_id=audit_id,
+            traceparent=traceparent,
+            tenant_id=tenant_id,
+        )
 
-    async def save_denied(self, tool_name: str, reason: str) -> None:
-        await self._save(tool_name=tool_name, status="denied", latency_ms=0,
-                         view_summary=None, error_message=reason)
+    async def save_denied(
+        self,
+        tool_name: str,
+        reason: str,
+        *,
+        audit_id: str,
+        traceparent: str,
+        tenant_id: str,
+    ) -> None:
+        await self._save(
+            tool_name=tool_name,
+            status="denied",
+            latency_ms=0,
+            view_summary=None,
+            error_message=reason,
+            audit_id=audit_id,
+            traceparent=traceparent,
+            tenant_id=tenant_id,
+        )

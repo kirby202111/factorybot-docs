@@ -8,9 +8,9 @@ class Base(DeclarativeBase):
     """所有 MySQL ORM 模型的基类。
 
     schema 分配（§5.1）：
-    - ``rag_shared``：DomainEvent 幂等/位点基表（A/B 共用）
-    - ``rag_trace``：A 的 index_idempotency/index_offset/subgraph_audit
-    - ``rag_doc``：B 的治理/审计聚合导出表
+    - ``rag_shared``：幂等/位点基表 index_idempotency/index_offset（A/B 共用）
+    - ``rag_trace``：A 的 subgraph_audit
+    - ``rag_doc``：B 的 knowledge_document/document_version
     - ``rag_agentic``：E 的 answer_audit/route_trace
 
     各模型用 ``__table_args__ = {"schema": "rag_xxx"}`` 显式归属 schema。

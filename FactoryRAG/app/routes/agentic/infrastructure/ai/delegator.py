@@ -35,6 +35,8 @@ class SubAgentDelegator:
         intent: IntentCategory = state.get("intent")
         tenant = state.get("tenant")
         traceparent = state.get("traceparent", "")
+        audit_id = state.get("audit_id", "")
+        tenant_id = tenant.tenant_id if tenant is not None else ""
         question = state.get("question", "")
         started = time.perf_counter()
         try:
@@ -50,7 +52,10 @@ class SubAgentDelegator:
                 state["answer"] = "无可委托的子代理，建议转人工。"
                 return state
             latency_ms = int((time.perf_counter() - started) * 1000)
-            await self._trace_repo.save_ok(tool_chain[0], view, latency_ms)
+            await self._trace_repo.save_ok(
+                tool_chain[0], view, latency_ms,
+                audit_id=audit_id, traceparent=traceparent, tenant_id=tenant_id,
+            )
             try:
                 self._obs.metrics.agent_delegation_duration.labels(kind=tool_chain[0]).observe(latency_ms / 1000)
             except Exception:
@@ -59,7 +64,10 @@ class SubAgentDelegator:
             state["tool_chain"] = tool_chain
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
-            await self._trace_repo.save_error("delegation", str(exc), latency_ms)
+            await self._trace_repo.save_error(
+                "delegation", str(exc), latency_ms,
+                audit_id=audit_id, traceparent=traceparent, tenant_id=tenant_id,
+            )
             state["answer"] = f"子代理委托超时/失败，已转人工：{exc}"
             state["tool_chain"] = ["delegation:failed"]
         return state
