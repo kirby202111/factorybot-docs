@@ -85,6 +85,38 @@ FactoryRAG/
 
 ## 3. 启动
 
+### 3.0 快速开始（Quick Start）
+
+前置：已装 [uv](https://docs.astral.sh/uv/)（`pip install uv` 或见官网安装脚本）与 Docker（起基础设施用）。
+Python 由 `.python-version` 锁定为 3.12，uv 复用本地已装解释器，无需手动安装。
+
+```bash
+# 1) 安装依赖（建 .venv + 生成 uv.lock + 装 dev 组）
+uv sync
+
+# 2) 准备配置（按需改 MySQL/Redis/Neo4j/MinIO/Kafka 连接 + 路线开关）
+cp .env.example .env
+
+# 3) 起基础设施：mysql/redis/neo4j/minio/kafka/bge-inference
+docker-compose up -d
+
+# 4) 首次：跑 MySQL 迁移（DB URL 取自 RAG_MYSQL__DSN，覆盖 alembic.ini 占位）
+uv run alembic upgrade head
+
+# 5) 起服务
+uv run uvicorn app.main:app --reload                      # 开发热重载
+# uv run gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b :8000   # 类生产
+
+# 6) 验证
+curl http://localhost:8000/health        # 存活
+curl http://localhost:8000/ready         # 就绪（各存储/路线降级状态）
+uv run pytest                            # 跑测试（单元红线不变式，不触重依赖/外部基础设施）
+```
+
+> 默认仅 **B（document）** 开；A/E 经 `RAG_TRACEABILITY__ENABLED` / `RAG_AGENTIC__ENABLED` 灰度打开，见 §3.2、§7。
+> 重依赖（chromadb / neo4j / langgraph / minio / aiokafka / langchain）均懒导入，模块导入不触发；
+> 运行时按启用的路线需要对应依赖就绪。下文 §3.1–§3.3 为各步详细说明。
+
 ### 3.1 依赖（uv 管理）
 
 项目用 [uv](https://docs.astral.sh/uv/) 管理虚拟环境与依赖锁。Python 版本锁定为 **3.12**
