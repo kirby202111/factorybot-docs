@@ -39,9 +39,7 @@ class PassExecutionWriteAclClient(BaseAclClient):
         self, work_order_id: str, confirmation, tenant: TenantContext,
     ) -> dict:
         """POST /api/pass-execution/release，header 带 X-Confirmation-Token。"""
-        expected = f"release:{confirmation.session_id}"
-        if not confirmation.valid_for(expected):
-            raise PermissionError(f"token action 不匹配: expected={expected}")
+        await self._validate_confirmation(confirmation, "release")
         return await self._post(
             "/api/pass-execution/release",
             body={

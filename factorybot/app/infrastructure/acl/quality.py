@@ -5,7 +5,7 @@ from typing import Optional
 
 from app.domain.tenant import TenantContext
 from app.infrastructure.acl.base import BaseAclClient
-from app.infrastructure.acl.views import DefectRateView, to_view
+from app.infrastructure.acl.views import DefectRateView
 
 
 class QualityAclClient(BaseAclClient):
@@ -19,13 +19,11 @@ class QualityAclClient(BaseAclClient):
         time_range_end: Optional[str] = None,
     ) -> DefectRateView:
         key = batch_no or work_order_id or "_default"
-        dto = await self._get(
-            "/api/quality/defect-rate",
-            tenant=tenant,
+        return await self._get_view(
+            DefectRateView, "/api/quality/defect-rate", tenant=tenant,
             params={
                 "batch_no": batch_no, "wo_id": work_order_id,
                 "from": time_range_start, "to": time_range_end,
             },
             fixture_rel="rest/defect_rate", fixture_key=key,
         )
-        return to_view(DefectRateView, dto)

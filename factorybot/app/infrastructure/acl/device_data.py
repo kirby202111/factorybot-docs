@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app.domain.tenant import TenantContext
 from app.infrastructure.acl.base import BaseAclClient
-from app.infrastructure.acl.views import AssetStatusView, DeviceParamsView, to_view
+from app.infrastructure.acl.views import AssetStatusView, DeviceParamsView
 
 
 class DeviceDataAclClient(BaseAclClient):
@@ -13,13 +13,11 @@ class DeviceDataAclClient(BaseAclClient):
         self, asset_id: str, time_range_start: str, time_range_end: str,
         tenant: TenantContext,
     ) -> DeviceParamsView:
-        dto = await self._get(
-            f"/api/device-data/{asset_id}/params",
-            tenant=tenant,
+        return await self._get_view(
+            DeviceParamsView, f"/api/device-data/{asset_id}/params", tenant=tenant,
             params={"from": time_range_start, "to": time_range_end},
             fixture_rel="rest/device_params", fixture_key=asset_id,
         )
-        return to_view(DeviceParamsView, dto)
 
 
 class EquipmentAssetLedgerAclClient(BaseAclClient):
@@ -28,8 +26,7 @@ class EquipmentAssetLedgerAclClient(BaseAclClient):
     async def query_asset_status(
         self, asset_id: str, tenant: TenantContext,
     ) -> AssetStatusView:
-        dto = await self._get(
-            f"/api/assets/{asset_id}/status", tenant=tenant,
+        return await self._get_view(
+            AssetStatusView, f"/api/assets/{asset_id}/status", tenant=tenant,
             fixture_rel="rest/asset_status", fixture_key=asset_id,
         )
-        return to_view(AssetStatusView, dto)

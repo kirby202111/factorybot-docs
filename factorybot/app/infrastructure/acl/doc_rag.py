@@ -15,34 +15,22 @@ class DocRagAclClient(BaseAclClient):
         self, query: str, tenant: Optional[TenantContext] = None,
         version_anchor: Optional[VersionAnchor] = None,
     ) -> list[dict]:
-        """GET /rag/docs/search -- 返回 DocSearchHit 形状列表。
+        """POST /rag/docs/search -- 返回 ChunkHit 形状列表。
 
-        version_anchor 确保检索到的 SOP/工艺/手册文档与版本一致（route/bom/rule/asset/standard）。
+        版本一致性由服务端按 version/version_kind/version_ref_id 锚点过滤
+        （FactoryRAG DocumentRetrievalService 已实现），ACL 侧不再重复过滤。
+        body 字段对齐 FactoryRAG DocSearch（question + 版本锚点三字段）。
         """
-        params: dict = {"query": query}
+        body: dict = {"question": query}
         if version_anchor is not None:
-            params["version"] = version_anchor.version
-            params["version_kind"] = version_anchor.kind.value
-            params["version_ref_id"] = version_anchor.ref_id
-        dto = await self._get(
-            "/rag/docs/search",
-            tenant=tenant,
-            params=params,
+            body["version"] = version_anchor.version
+            body["version_kind"] = version_anchor.kind.value
+            body["version_ref_id"] = version_anchor.ref_id
+        dto = await self._post_read(
+            "/rag/docs/search", body, tenant=tenant,
             fixture_rel="rag/docs", fixture_key="_default",
         )
-        # fixture 可能是 {documents: [...]} 或 list
+        # fixture 可能是 {documents: [...]} / {results: [...]} / list；real 返回 list[ChunkHit]
         if isinstance(dto, dict):
-            docs = dto.get("documents", dto.get("results", []))
-        else:
-            docs = dto or []
-        # 版本过滤（mock 下也按锚点三字段过滤）
-        if version_anchor is not None and version_anchor.is_bound:
-            docs = [
-                d for d in docs
-                if not d.get("version") or (
-                    d.get("version") == version_anchor.version
-                    and (not d.get("version_kind")
-                         or d.get("version_kind") == version_anchor.kind.value)
-                )
-            ]
-        return docs
+            return dto.get("documents", dto.get("results", []))
+        return dto or []

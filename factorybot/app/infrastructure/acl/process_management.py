@@ -10,7 +10,9 @@ from __future__ import annotations
 from app.domain.tenant import TenantContext
 from app.infrastructure.acl.base import BaseAclClient
 from app.infrastructure.acl.views import (
-    FirstArticleView, ProcessRouteView, QualificationView, to_view,
+    FirstArticleView,
+    ProcessRouteView,
+    QualificationView,
 )
 
 
@@ -27,13 +29,11 @@ class ProcessManagementAclClient(BaseAclClient):
         # route_version 强制：空则拒绝（红线）
         if not route_version:
             raise ValueError(f"查工艺必须带 route_version: route_id={route_id}")
-        dto = await self._get(
-            f"/api/process-routes/{route_id}",
-            tenant=tenant, params={"version": route_version},
-            fixture_rel="rest/process_routes",
-            fixture_key=f"{route_id}:{route_version}",
+        view = await self._get_view(
+            ProcessRouteView, f"/api/process-routes/{route_id}", tenant=tenant,
+            params={"version": route_version},
+            fixture_rel="rest/process_routes", fixture_key=f"{route_id}:{route_version}",
         )
-        view = to_view(ProcessRouteView, dto)
         # ACTIVE 校验：失效工艺物理拒绝
         if view.status != "ACTIVE":
             raise InactiveRouteError(
@@ -44,22 +44,19 @@ class ProcessManagementAclClient(BaseAclClient):
     async def query_first_article_status(
         self, work_order_id: str, tenant: TenantContext,
     ) -> FirstArticleView:
-        dto = await self._get(
-            f"/api/work-orders/{work_order_id}/first-article", tenant=tenant,
+        return await self._get_view(
+            FirstArticleView, f"/api/work-orders/{work_order_id}/first-article", tenant=tenant,
             fixture_rel="rest/first_article", fixture_key=work_order_id,
         )
-        return to_view(FirstArticleView, dto)
 
     async def check_qualification(
         self, route_id: str, route_version: str, tenant: TenantContext,
     ) -> QualificationView:
-        dto = await self._get(
-            f"/api/process-routes/{route_id}/qualification",
-            tenant=tenant, params={"version": route_version},
-            fixture_rel="rest/qualification",
-            fixture_key=f"{route_id}:{route_version}",
+        return await self._get_view(
+            QualificationView, f"/api/process-routes/{route_id}/qualification", tenant=tenant,
+            params={"version": route_version},
+            fixture_rel="rest/qualification", fixture_key=f"{route_id}:{route_version}",
         )
-        return to_view(QualificationView, dto)
 
 
 class ProcessWriteAclClient(BaseAclClient):
@@ -68,9 +65,7 @@ class ProcessWriteAclClient(BaseAclClient):
     async def activate_route(
         self, route_id: str, version: str, confirmation, tenant: TenantContext,
     ) -> dict:
-        expected = f"activate_route:{confirmation.session_id}"
-        if not confirmation.valid_for(expected):
-            raise PermissionError(f"token action 不匹配: expected={expected}")
+        await self._validate_confirmation(confirmation, "activate_route")
         return await self._post(
             f"/api/process-routes/{route_id}/activate",
             body={
@@ -86,9 +81,7 @@ class ProcessWriteAclClient(BaseAclClient):
         self, route_id: str, version: str, sop_content: dict,
         confirmation, tenant: TenantContext,
     ) -> dict:
-        expected = f"publish_sop:{confirmation.session_id}"
-        if not confirmation.valid_for(expected):
-            raise PermissionError(f"token action 不匹配: expected={expected}")
+        await self._validate_confirmation(confirmation, "publish_sop")
         return await self._post(
             "/api/sop/publish",
             body={

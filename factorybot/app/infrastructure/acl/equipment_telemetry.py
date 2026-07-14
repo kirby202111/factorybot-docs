@@ -4,7 +4,9 @@ from __future__ import annotations
 from app.domain.tenant import TenantContext
 from app.infrastructure.acl.base import BaseAclClient
 from app.infrastructure.acl.views import (
-    EquipmentTelemetryView, ProcessFmeaView, ProductSensitivityView, to_view,
+    EquipmentTelemetryView,
+    ProcessFmeaView,
+    ProductSensitivityView,
 )
 
 
@@ -15,16 +17,16 @@ class EquipmentTelemetryAclClient(BaseAclClient):
         self, asset_id: str, start: str, end: str,
         tenant: TenantContext | None = None,
     ) -> EquipmentTelemetryView:
-        dto = await self._get(
-            f"/api/equipment/{asset_id}/telemetry",
-            tenant=tenant, params={"from": start, "to": end},
+        return await self._get_view(
+            EquipmentTelemetryView, f"/api/equipment/{asset_id}/telemetry", tenant=tenant,
+            params={"from": start, "to": end},
             fixture_rel="rest/equipment_telemetry", fixture_key=asset_id,
         )
-        return to_view(EquipmentTelemetryView, dto)
 
     async def query_fault_history(
         self, asset_id: str, tenant: TenantContext | None = None,
     ) -> dict:
+        # 返回原始 dict（非 View），不走 _get_view
         return await self._get(
             f"/api/equipment/{asset_id}/fault-history", tenant=tenant,
             fixture_rel="rest/fault_history", fixture_key=asset_id,
@@ -33,15 +35,15 @@ class EquipmentTelemetryAclClient(BaseAclClient):
     async def query_process_fmea(
         self, asset_id: str, tenant: TenantContext | None = None,
     ) -> ProcessFmeaView:
-        dto = await self._get(
-            f"/api/equipment/{asset_id}/fmea", tenant=tenant,
+        return await self._get_view(
+            ProcessFmeaView, f"/api/equipment/{asset_id}/fmea", tenant=tenant,
             fixture_rel="rest/process_fmea", fixture_key=asset_id,
         )
-        return to_view(ProcessFmeaView, dto)
 
     async def query_batches_in_window(
         self, start: str, end: str, tenant: TenantContext | None = None,
     ) -> dict:
+        # 返回原始 dict（非 View），不走 _get_view
         return await self._get(
             "/api/wip/batches-in-window",
             tenant=tenant, params={"from": start, "to": end},
@@ -51,9 +53,8 @@ class EquipmentTelemetryAclClient(BaseAclClient):
     async def query_product_sensitivity(
         self, batch_ids: list[str], tenant: TenantContext | None = None,
     ) -> ProductSensitivityView:
-        dto = await self._get(
-            "/api/products/sensitivity",
-            tenant=tenant, params={"batch_ids": ",".join(batch_ids)},
+        return await self._get_view(
+            ProductSensitivityView, "/api/products/sensitivity", tenant=tenant,
+            params={"batch_ids": ",".join(batch_ids)},
             fixture_rel="rest/product_sensitivity", fixture_key="_default",
         )
-        return to_view(ProductSensitivityView, dto)

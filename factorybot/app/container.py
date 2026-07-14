@@ -8,6 +8,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Optional
 
+import httpx
+
 from app.application.action_card_dispatcher import ActionCardDispatcher, WebSocketManager
 from app.application.diagnosis_service import DiagnosisService
 from app.application.draft_service import DraftService
@@ -37,10 +39,7 @@ from app.orchestration.code_nodes.barrier import FailureTracker
 from app.orchestration.code_nodes.gate import GateManager
 from app.orchestration.code_nodes.query_compare import QueryCompareNodes
 from app.orchestration.code_nodes.write_via_appservice import WriteViaAppService
-from app.orchestration.scenarios import (
-    build_changeover_graph, build_complaint_8d_graph,
-    build_fault_response_graph, build_process_change_graph,
-)
+from app.orchestration.scenarios import SCENARIO_SPECS, ScenarioGraphBuilder
 from app.orchestration.supervisor_graph import SupervisorGraph
 
 
@@ -62,9 +61,10 @@ class Container:
         self.orchestration_repo = get_orchestration_repo()
         # LLM
         self.llm = get_llm(self.obs)
-        # ACL
+        # ACL（real 模式共享 httpx.AsyncClient；shutdown 时由 Container 统一 aclose）
+        self._http = None if self.settings.is_mock else httpx.AsyncClient(timeout=3.0)
         self.acl = build_acl_clients(
-            mock=self.settings.is_mock, fixtures=None, http=None,
+            mock=self.settings.is_mock, fixtures=None, http=self._http,
             confirmation_store=self.confirmation_store,
         )
         # 工具注册表
@@ -72,7 +72,10 @@ class Container:
         self.orchestration_registry = build_orchestration_tool_registry(self.acl)
         # 成本
         self.eval_gate = EvalGate()
-        self.model_router = ModelRouter(self.eval_gate, allow_mock=self.settings.is_mock)
+        self.model_router = ModelRouter(
+            self.eval_gate, allow_mock=self.settings.is_mock,
+            active_model=self.settings.llm_model,
+        )
         # 诊断 服务
         self.diagnosis_service = DiagnosisService(
             self.diagnosis_registry, self.llm, self.tool_trace_repo, self.obs,
@@ -101,11 +104,9 @@ class Container:
             self.query_compare, self.agents, self.gate_manager, self.orchestration_repo,
             self.failure_tracker, self.dispatcher, self.write_service,
         )
+        _scenario_builder = ScenarioGraphBuilder(self.supervisor, self.checkpointer)
         self.graphs = {
-            "CHANGEOVER": build_changeover_graph(self.supervisor, self.checkpointer),
-            "FAULT_RESPONSE": build_fault_response_graph(self.supervisor, self.checkpointer),
-            "COMPLAINT_8D": build_complaint_8d_graph(self.supervisor, self.checkpointer),
-            "PROCESS_CHANGE": build_process_change_graph(self.supervisor, self.checkpointer),
+            name: _scenario_builder.build(spec) for name, spec in SCENARIO_SPECS.items()
         }
         self.session_manager = SessionManager(self.orchestration_repo)
         self.orchestration_service = OrchestrationService(
@@ -119,6 +120,12 @@ class Container:
         self.diagnosis_registry.validate_on_startup()
         self.orchestration_registry.validate_on_startup()
         self.model_router.validate_on_startup()
+
+    async def shutdown(self) -> None:
+        """释放资源：httpx AsyncClient 连接池（real 模式下由 ACL 共享）。"""
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     def default_tenant(self) -> TenantContext:
         s = self.settings

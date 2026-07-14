@@ -24,6 +24,7 @@ async def lifespan(app: FastAPI):
         mock=c.settings.is_mock,
     )
     yield
+    await c.shutdown()
     get_logger("shutdown").info("shutdown")
 
 
