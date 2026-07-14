@@ -134,7 +134,7 @@
 | 设备数据接入 | `query_device_params(asset_id, time_range)` | 贴片机当时参数 |
 | 设备工装台账 | `query_asset_status(asset_id)` | 设备当时状态 |
 | 返修 / 返工 | `query_repair_history(serial_no)` / `query_rework_orders(wo_id)` | 历史返修返工 |
-| RAG 服务 | `search_docs(query, route_version_filter)` | 文档检索（路线 B），带版本过滤 |
+| RAG 服务 | `search_docs(query, version_anchor)` | 文档检索（路线 B），带版本过滤 |
 
 ### 4.2 工具元数据
 
@@ -272,7 +272,7 @@ class PassExecutionAclClient:
 ### 5.5 与 RAG 服务的复用
 
 - L1 不重建向量库，文档检索通过 httpx 调 [RAG服务](../../RAG服务/) 的检索接口（路线 B）。
-- `search_docs` 工具封装该 HTTP 调用，`route_version_filter` 透传，保证检索到的 SOP / 工艺文档与生产执行侧缓存版本一致（§5.1）。
+- `search_docs` 工具封装该 HTTP 调用，`version_anchor` 透传，保证检索到的 SOP / 工艺文档与生产执行侧缓存版本一致（§5.1）。
 
 ---
 

@@ -27,7 +27,7 @@
 | **只检索 + 草拟，不落库** | L2 产出 `intent + draft`，`requires_confirmation=True` 恒成立 | `DraftService` 只产出 `Draft`；L2 服务**不持有任何写 HTTP client**，`infrastructure/acl/` 全是只读 client |
 | **不旁路应用服务写** | 落库走返工/工单/质量上下文的正常应用服务，过聚合根不变式 + 事务发件箱 | confirmation gate 的下达动作由**前端**调 MES 正式 API，L2 服务完全不参与写路径（[AGENT 路线 §4](../AGENT服务引入路线.md)） |
 | **不进过点主事务** | L2 草拟异步，与过点判定解耦 | L2 草拟秒级；过点 P99 ≤200ms 不受影响 |
-| **版本一致性** | 草稿锁定的工艺版本透传自 L1 证据，不自行指定 | `Draft.route_version` 来自 `DiagnosisReport`；返工单引用返工工艺路线 `ReworkRoute`（🔴 版本规则待明确，§11） |
+| **版本一致性** | 草稿锁定的工艺版本透传自 L1 证据，不自行指定 | `Draft.version`（版本锚点）来自 `DiagnosisReport`；返工单引用返工工艺路线 `ReworkRoute`（🔴 版本规则待明确，§11） |
 | **权限隔离** | 草拟前按车间/产线/角色过滤，证据回查带租户上下文 | `DraftRequest.tenant` 透传到图回查 / 文档检索 / 草稿落库全程 |
 | **可观测兜底** | 每份草稿带证据链 + 置信度，低置信度不推荐下达 | `Draft.evidence_refs` 引用 `subgraph_ref`/`node_id`；`confidence < 0.5` 标 `needs_review` |
 | **不直查图** | L2 只按 L1 传来的 `subgraph_ref` 回查图节点（只读），不独立调 `query_traceability_graph` | L2 的图回查是 `fetch_subgraph_nodes(subgraph_ref)`，不是开放图检索 |
@@ -140,7 +140,7 @@
 | 工具 | 调用方 | 用途 | 写动词 |
 |------|--------|------|--------|
 | `fetch_subgraph_nodes(subgraph_ref)` | `RagAclClient` | 按 L1 传来的 `subgraph_ref` 回查图节点，提取证据字段 | 无（只读） |
-| `search_docs(query, route_version_filter)` | `DocRagAclClient` | 文档型 RAG 检索历史 8D / 现有 SOP | 无（只读） |
+| `search_docs(query, version_anchor)` | `DocRagAclClient` | 文档型 RAG 检索历史 8D / 现有 SOP | 无（只读） |
 | `fetch_route_version(route_id, route_version)` | `ProcessManagementAclClient` | 锁定返工/SOP 草稿的工艺版本 | 无（只读） |
 
 > L2 **没有** `query_traceability_graph`（开放图检索归 L1）、**没有任何** `create/update/delete` client。`NoWriteClientGate` 启动断言扫描所有 ACL client 方法名，禁止写动词。
@@ -148,7 +148,7 @@
 ### 4.3 权限与版本
 
 - **权限**：`DraftRequest.tenant` 透传到 `fetch_subgraph_nodes` / `search_docs` / `fetch_route_version` 的 header（`X-Tenant-*`），下游服务前置过滤。L2 服务本身不做权限拦截（只读检索，权限由下游兜）。
-- **版本**：`Draft.route_version` 来自 L1 的 `DiagnosisReport`（透传自图 `SNAPSHOT_OF_ROUTE`），L2 不自行指定。返工单引用 `ReworkRoute`（返工专用路线，🔴 版本规则待工艺管理上下文明确，§11）。
+- **版本**：`Draft.version`（版本锚点）来自 L1 的 `DiagnosisReport`（透传自图 `SNAPSHOT_OF_ROUTE`），L2 不自行指定。返工单引用 `ReworkRoute`（返工专用路线，🔴 版本规则待工艺管理上下文明确，§11）。
 
 ---
 
@@ -197,7 +197,9 @@ class Draft(BaseModel):
     intent: str                        # "对 WO-2026-0707-001 的 12 件 SN 执行焊接返工，再入点 ST-05"
     payload: dict                      # 草稿结构化内容（返工单字段 / 8D 段落 / SOP 步骤）
     evidence_refs: list[str]           # ["subgraph_ref=...", "node_id=CheckpointRecord:..."]
-    route_version: str | None = None   # 草稿锁定的工艺版本（透传自 L1）
+    version: str | None = None          # 版本锚点·版本号（透传自 L1，三段链第三段）
+    version_kind: str | None = None     # route|bom|rule|asset|standard
+    version_ref_id: str | None = None   # route_id / asset_id / standard_id ...
     confidence: float                  # 0.0 ~ 1.0
     requires_confirmation: bool = True # L2 恒为 True
     needs_review: bool = False         # confidence < 0.5 时 True
@@ -260,7 +262,7 @@ L2 产出 Draft（requires_confirmation=True）
 
 - **L1 -> L2**：L1 诊断产出的 `DiagnosisReport` 带 `subgraph_ref`（[结合方案 §4.2](../../RAG与Agent协同/GraphRAG与Agent结合-落地方案.md)）。L2 入参 `DraftRequest.diagnosis_report` 即它。L1->L2 的触发方式（自动续接 vs 人工发起）🔴 待定（§11）。
 - **L2 -> 图**：只按 `subgraph_ref` 回查（`fetch_subgraph_nodes`），不调 `query_traceability_graph`。图的 `/rag/trace/subgraph/{ref}` 是 L2 专用的只读回查端点（图服务需补，🔴）。
-- **L2 -> 文档型 RAG**：`search_docs(query, route_version_filter)` 调路线 B，版本过滤对齐 `route_version`（[结合方案 §4.4](../../RAG与Agent协同/GraphRAG与Agent结合-落地方案.md)）。
+- **L2 -> 文档型 RAG**：`search_docs(query, version_anchor)` 调路线 B，版本过滤对齐版本锚点（[结合方案 §4.4](../../RAG与Agent协同/GraphRAG与Agent结合-落地方案.md)）。
 
 ---
 
@@ -364,15 +366,15 @@ class ReworkOrderDraftBuilder:
         source_wo = self._extract(nodes, "WorkOrder", "work_order_id")
         sn_list = self._extract_sn_list(nodes)              # 受影响 SN 清单
         reentry_point = self._infer_reentry_point(report)   # 从 L1 假设推再入点
-        route_version = self._extract_route_version(report) # 透传自 L1 证据
+        anchor = self._extract_version_anchor(report) # 透传自 L1 证据
         # 2. 返工工艺路线引用（ReworkRoute，独立于正常 RouteVersion，🔴 版本规则待明确）
-        rework_route_ref = await self._resolve_rework_route(source_wo, route_version, tenant)
+        rework_route_ref = await self._resolve_rework_route(source_wo, anchor, tenant)
         # 3. LLM 综合成草稿
         draft = await self._llm.with_structured_output(Draft).ainvoke(
             self._build_prompt(report, source_wo, sn_list, reentry_point, rework_route_ref)
         )
         draft.draft_kind = self.draft_kind
-        draft.route_version = route_version
+        self._apply_version_anchor(draft, anchor)   # 版本锚点透传（三段链第三段）
         draft.evidence_refs = [f"subgraph_ref={report.subgraph_ref}"] + report.evidence_refs
         return draft
 
@@ -405,16 +407,16 @@ class EightDDraftBuilder:
     async def build(self, report: DiagnosisReport, tenant: TenantContext) -> Draft:
         nodes = await self._rag.fetch_subgraph_nodes(report.subgraph_ref, tenant)
         five_m1e = self._cluster_5m1e(nodes)               # 按 5M1E 聚类证据
-        route_version = self._extract_route_version(report)
+        anchor = self._extract_version_anchor(report)
         # 检索历史同类 8D（路线 B，带版本过滤）
         history = await self._doc_rag.search_docs(
-            query=report.summary, route_version_filter=route_version, tenant=tenant
+            query=report.summary, version_anchor=anchor, tenant=tenant
         )
         draft = await self._llm.with_structured_output(Draft).ainvoke(
             self._build_prompt(report, five_m1e, history)
         )
         draft.draft_kind = self.draft_kind
-        draft.route_version = route_version
+        self._apply_version_anchor(draft, anchor)   # 版本锚点透传（三段链第三段）
         return draft
 ```
 
@@ -433,15 +435,15 @@ class SopDraftBuilder:
     async def build_from_route_activated(
         self, route_id: str, route_version: str, tenant: TenantContext
     ) -> Draft:
-        # 检索现有 SOP（路线 B，按 route_version 过滤旧版本）
+        # 检索现有 SOP（路线 B，不带版本过滤拉旧版本）
         existing = await self._doc_rag.search_docs(
-            query=f"SOP route={route_id}", route_version_filter=None, tenant=tenant
+            query=f"SOP route={route_id}", version_anchor=None, tenant=tenant
         )
         draft = await self._llm.with_structured_output(Draft).ainvoke(
             self._build_prompt(route_id, route_version, existing)
         )
         draft.draft_kind = self.draft_kind
-        draft.route_version = route_version                # 锁定新版本
+        self._apply_version_anchor(draft, VersionAnchor(VersionKind.ROUTE, route_id, route_version))  # 锁定 ROUTE 锚点
         draft.intent = f"基于工艺升版 {route_id} v{route_version} 草拟新 SOP"
         return draft
 ```
@@ -545,7 +547,7 @@ L2 复用 L1 的可观测底座（OTel trace / `agent_*` 指标 / `Observability
 ### 阶段二：8D / SOP 草拟 + 文档型 RAG 协同（2 周）
 5. 对接路线 B `search_docs`，实现 `EightDDraftBuilder`（§7.3）。
 6. 实现 `SopDraftBuilder` + 订阅 `ProcessRouteActivated` 主动触发（§7.4/§7.7）。
-7. 验证版本透传：L1 `route_version` -> `Draft.route_version` -> 文档检索版本过滤。
+7. 验证版本透传：L1 版本锚点 -> `Draft.version` -> 文档检索版本过滤。
 
 ### 阶段三：confirmation gate + 存档（2 周）
 8. 实现草稿存档表 + 工程师 UI 展示草稿 + 证据链回溯。
@@ -564,7 +566,7 @@ L2 复用 L1 的可观测底座（OTel trace / `agent_*` 指标 / `Observability
 - [ ] `Draft.requires_confirmation` 恒为 `True`；草稿只落存档表，不落 MES 业务库。
 - [ ] confirmation gate 下达动作由前端调 MES 正式 API，L2 服务不参与写路径；落库过聚合根不变式 + 事务发件箱。
 - [ ] L2 不调 `query_traceability_graph`（开放图检索归 L1），只按 `subgraph_ref` 回查图节点（`fetch_subgraph_nodes`）。
-- [ ] `Draft.route_version` 透传自 L1 `DiagnosisReport`，L2 不自行指定版本；返工单引用 `ReworkRoute`（🔴 版本规则待明确）。
+- [ ] `Draft.version`（版本锚点）透传自 L1 `DiagnosisReport`，L2 不自行指定版本；返工单引用 `ReworkRoute`（🔴 版本规则待明确）。
 - [ ] 返工单草稿字段对齐 `BatchReworkOrder`：`source_work_order_id` / `affected_sn_list` / `reentry_point` / `rework_route_ref`。
 - [ ] `DraftRequest.tenant` 透传到图回查 / 文档检索 / 草稿落库全程。
 - [ ] `confidence < 0.5` -> `needs_review=True`，不进 confirmation gate 下达流程。

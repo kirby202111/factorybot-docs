@@ -29,7 +29,7 @@
 |------|------|-------------|
 | **只读 / 不旁路写** | L1 只读，L2 草稿不落库，L3 写过 gate | 降本手段不改写路径；缓存只缓存只读结果 |
 | **不进过点主事务** | 过点 P99 ≤200ms（[领域总览.md](../领域模型/领域总览.md) §4.1） | 降本不在过点路径上挂任何同步 LLM 调用 |
-| **版本一致性** | 查工艺必须带 `route_version`（§5.1） | 缓存 key 必须含 `route_version`，禁命中错版本 |
+| **版本一致性** | 查工艺必须带 `route_version`（§5.1） | 缓存 key 必须含 `version_anchor`，禁命中错版本 |
 | **证据不可空** | 每条 hypothesis 至少引用 1 条 trace | 工具结果摘要只喂给模型，**trace 落库仍存全文**，证据链不丢 |
 | **质量不退** | 根因准确率 / 草稿采纳率不因降本下降 | 换模型 / 改提示词 / 加截断 必须过 `EvalRunner` 回归（§10） |
 
@@ -109,7 +109,7 @@ L2 的成本集中在**单次大输入 + 单次大输出**，没有 ReAct 的滚
 | **L4** | 缓存层 | 这次的调用能不能整个跳过？ | 中--命中即归零，但有正确性风险 |
 | 闭环 | 观测驱动 | 省了之后怎么验证没退步、怎么持续找下一桶？ | 持续 |
 
-下面逐层展开实现细节与代码骨架。所有代码骨架与现有 [L1 §7](L1诊断型Agent/L1诊断型Agent-实现方案.md) / [可观测性 §8.4](Agent可观测性-设计与实现方案.md) 的抽象对齐：`ObservableChatModel`、`ToolDescriptor` / `ToolRegistry`、`ToolNode`、`ObservabilityPort`、`llm_factory`、`prompt_version`、`TenantContext`、`route_version`。
+下面逐层展开实现细节与代码骨架。所有代码骨架与现有 [L1 §7](L1诊断型Agent/L1诊断型Agent-实现方案.md) / [可观测性 §8.4](Agent可观测性-设计与实现方案.md) 的抽象对齐：`ObservableChatModel`、`ToolDescriptor` / `ToolRegistry`、`ToolNode`、`ObservabilityPort`、`llm_factory`、`prompt_version`、`TenantContext`、`version_anchor`。
 
 ---
 
@@ -493,7 +493,7 @@ class EarlyStopDetector:
 ```python
 # app/infrastructure/redis_/tool_cache.py
 class ToolResultCache:
-    """工具结果缓存。cache key 含 route_version 等版本维度，禁命中错版本。"""
+    """工具结果缓存。cache key 含 version_anchor 等版本维度，禁命中错版本。"""
 
     def __init__(self, redis: Redis, ttl_policy: dict) -> None:
         self._redis = redis
@@ -518,7 +518,7 @@ class ToolResultCache:
 
 #### 8.1.3 MES 约束（版本一致性红线）
 
-- **`route_version` 必须进 key**：工艺查询的缓存 key 含 `route_version`，不同版本不串台。这是 §5.1 版本一致性红线在缓存层的延伸。
+- **`version_anchor` 必须进 key**：工具结果缓存 key 含版本锚点 `version_anchor`，不同版本不串台。这是 §5.1 版本一致性红线在缓存层的延伸。
 - **持续追加的数据慎缓存**：过点记录、不良记录会持续追加，缓存易脏。这类工具要么不缓存，要么用 `max_ts`（缓存时记录的最大时间戳）进 key，查询时若要更新数据则 miss。
 - **缓存失效与领域事件**：订阅 `ProcessRouteActivated`（新工艺版本）等事件主动失效相关缓存--但工艺版本不可变，新版本是新 key，无需失效旧 key。物料批次台账变更若发事件，可订阅失效。🔴 失效策略按工具逐个定。
 
@@ -694,7 +694,7 @@ llm_call_log
 ## 13. 约束落地检查清单
 
 - [ ] 降本不碰只读 / 不旁路写 / 不进过点 / 版本一致性 / 证据不可空任一红线。
-- [ ] 工具结果缓存 cache key 含 `route_version` 等版本维度，禁命中错版本。
+- [ ] 工具结果缓存 cache key 含 `version_anchor` 等版本维度，禁命中错版本。
 - [ ] `ResultCompactor` 喂模型摘要，`tool_call_trace` 落完整 view，证据链不丢。
 - [ ] 截断列表标注 `_truncated` / `_omitted_count`，不让模型基于"数据不全"错误推理。
 - [ ] prompt caching 只标记 `system` / `tools` 稳定块，动态上下文不进缓存块。

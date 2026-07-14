@@ -305,6 +305,30 @@ A：MES 防错理念是宁可拦下让人判、不可错放。AI 在证据不足
 **Q25：这套评测上线了吗？**
 A：这是设计阶段的引入规划，不是已落地。重点是三件事的架构判断：**版本锚定的金标准**（每条用例钉死 route_version，把版本一致性变成可断言规则）、**安全硬失败用例集**（7 项红线零容忍 CI 阻断）、**转人工反馈闭环**（线上真实问题回流成样本）。落地顺序先建金标准集与离线骨架、再接 judge 与标定、再跑 CI 门禁与人工闭环、最后漂移与影子。v1 阈值已落定但标注"上线 3 个月后按数据迭代"。诚实 + 体现"评测是 MES 防错理念在 AI 侧的延伸"，比硬吹"已建成全自动评测拦截发版"得分高（[评测方案](../RAG与Agent评测/RAG与Agent评测-设计与实现方案.md) §14、§1.4 口径纪律）。
 
+### 11.9 版本锚点通用化权衡（设计判断题）
+
+**Q26：route_version 通用化成 VersionAnchor(kind, ref_id, version)，但代码里还留了一堆 route_version（WorkOrder / PassRecord / ProcessRouteActivated 事件 / 图 RouteVersion 节点 / find_by_route…），是没改干净、通用化不彻底吗？**
+
+A：不是没改干净，是刻意划了边界。通用化的对象是**"绑定到版本的锁"**--这个锁会随文档类型变 kind（SOP 绑 route、设备手册绑 asset、IPC 标准绑 standard），所以必须多态成 VersionAnchor（覆盖 route/bom/rule/asset/standard 五类）。但 MES 领域里那些**"本身就是工艺路线版本"**的实体保留 route-specific，因为它们的 kind 恒为 ROUTE，套 VersionAnchor 是假多态。
+
+判据一句话：**kind 真的会变的地方才通用化；kind 恒为 ROUTE 的保留 route-specific，中间靠 ACL 防腐层翻译。**
+
+| 通用化为 VersionAnchor（kind 会变） | 保留 route-specific（kind 恒 ROUTE） |
+|---|---|
+| 文档 chunk 锚点（SOP/手册/标准各绑不同 kind） | WorkOrder/PassRecord/WipPosition.route_version（MES 事实字段） |
+| L1 证据 / L2 草稿的版本锁（三段链 2/3 段） | ProcessRouteActivated 事件 payload（跨服务契约） |
+| RAG 检索过滤（ChunkFilter）/ 重索引事件 anchor | 图 RouteVersion 节点 / SNAPSHOT_OF_ROUTE 边（已落库图 schema） |
+|  | process_management ACL（MES REST 查工艺）/ find_*_by_route（route 升版触发器专用） |
+
+四条硬理由：
+
+1. **语义不失真**：WorkOrder.route_version 是"工单按某 route 某版本下发"的 MES 事实，不是"可能绑 5 类的版本锁"。套 VersionAnchor 后 kind 永远 ROUTE -> 死字段 + footgun（类型系统本该禁止的非法状态--给工单设 kind=ASSET--变成了可表达状态）。
+2. **限界上下文不塌缩**：route_version 属工艺管理 / 工单上下文（MES 领域），VersionAnchor 是 RAG / agent 跨切面关注（版本一致性三段链）。把 MES 域也改了等于把两个限界上下文合并，破坏 DDD 边界。两者通过 ACL 防腐层翻译，正是"防腐层处理外部依赖"的落地。
+3. **契约稳定**：ProcessRouteActivated 是跨服务消费的领域事件，payload 字段名（route_id / version）是契约；它语义就是"工艺路线激活"，改成通用 anchor 既破坏消费者又歪曲语义。
+4. **YAGNI**：find_*_by_route 只有 route 升版触发器调（今天只有 route 升版会发 rag.reindex.request 触发重索引）。等 asset / standard 升版触发器出现再泛化成 find_by_anchor，不为单一调用方提前建通用路径。
+
+> **一句话话术**："通用化的是'绑定到版本的锁'--这个锁会随文档类型变（SOP 绑 route、手册绑 asset、标准绑 standard），所以用 VersionAnchor 多态。但 MES 里工单 / 过点记录的 route_version 本身就是工艺路线版本，kind 永远是 route，套通用锚点是假多态还引入 footgun。判据是 kind 会不会变：会变的通用化，恒 route 的保留 route-specific，中间靠 ACL 防腐层翻译--比'一刀切全通用化'或'全不动'都更体现边界判断力。"
+
 ---
 
 ## 12. 红线（评测版口径纪律）

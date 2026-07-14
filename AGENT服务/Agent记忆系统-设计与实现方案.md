@@ -27,7 +27,7 @@
 
 ### 1.1 记忆的红线（一开口就要讲）
 
-1. **版本一致性红线**：`route_version` 必须出现在 state 字段、工具入参、缓存 key、trace 全链路。MES 追溯不允许"查错版本"。
+1. **版本一致性红线**：版本锚点（`version_anchor`，route/bom/rule/asset/standard）必须贯穿 state 字段、工具入参、缓存 key、trace 全链路。MES 追溯不允许"查错版本"。
 2. **时变性红线**：MES 追溯答案随新数据到达而漂移，**语义缓存默认关闭**。只对时不变场景（不可变工艺版本、稳定模板）灰度开启。
 3. **证据不空红线**：每个根因假设必须引用 `trace_id`；`tool_call_trace` 永远存全文，工程师 UI 读 trace 不读压缩版。
 4. **写需确认红线**：任何写动作必须经 gate 人确认 + confirmation token，token 同时是下游应用服务的幂等键。
@@ -83,7 +83,7 @@
    └──────────────────────────┬───────────────────────────────────────┘
                               │ 同步落 trace
    ┌──────────────────────────┴───────────────────────────────────────┐
-   │  L4 跨会话缓存（Redis）  ToolResultCache  key=tc:{tenant}:{tool}:{hash(args+route_version)} │
+   │  L4 跨会话缓存（Redis）  ToolResultCache  key=tc:{tenant}:{tool}:{hash(args+version_anchor)} │
    └──────────────────────────────────────────────────────────────────┘
 
    ┌──────────────────────────────────────────────────────────────────┐
@@ -305,7 +305,7 @@ FIELD_WHITELIST: dict[str, list[str]] = {
     "query_pass_records": ["sn", "work_order_id", "station_id", "equipment_id",
                            "route_version", "decision", "blocking_reason"],
     "query_test_results": ["test_id", "station_id", "test_type", "raw_verdict"],
-    "query_traceability_graph": ["serial_no", "subgraph_ref", "route_version"],
+    "query_traceability_graph": ["serial_no", "subgraph_ref", "version", "version_kind", "version_ref_id"],
 }
 LIST_TRUNCATE = 5  # 列表最多保留前 5 项
 
@@ -423,18 +423,18 @@ real 模式落 MySQL（[models.py](../factorybot/app/infrastructure/persistence/
 
 ```python
 class ToolResultCache:
-    def _key(self, tenant_id, tool_name, args, route_version) -> str:
-        payload = json.dumps({"t": tenant_id, "a": args, "r": route_version}, sort_keys=True)
+    def _key(self, tenant_id, tool_name, args, version_anchor) -> str:
+        payload = json.dumps({"t": tenant_id, "a": args, "v": version_anchor.model_dump_json() if version_anchor else ""}, sort_keys=True)
         digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
         return f"tc:{tenant_id}:{tool_name}:{digest}"
 
-    async def get(self, tenant_id, tool_name, args, route_version=None): ...
-    async def set(self, tenant_id, tool_name, args, value, route_version=None, ttl=None): ...
+    async def get(self, tenant_id, tool_name, args, version_anchor=None): ...
+    async def set(self, tenant_id, tool_name, args, value, version_anchor=None, ttl=None): ...
 ```
 
 ### 6.1 版本化精确缓存
 
-- `route_version` **必须进 key 的哈希 payload**--版本一致性红线延伸到缓存层
+- `version_anchor` **必须进 key 的哈希 payload**--版本一致性红线延伸到缓存层
 - 按 key 精确缓存，非语义缓存；命中即归零（省一次 ACL 调用 + 一次 LLM 回灌）
 
 ### 6.2 可缓存性按工具分级
@@ -556,7 +556,7 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 | `failure_count` | MySQL (app, via L3Repo) | 失败计数 | (session_id, capability) | 会话级 | L5 故障隔离 | ✅ |
 | `confirm:{token_id}` | Redis | 确认令牌 payload | token_id | 30min | L5 写动作闸门 | ✅ |
 | `confirm:session:{sid}:{step}` | Redis | 防重复确认 | (session_id, step) | 30min | L5 幂等 | ✅ |
-| `tc:{tenant}:{tool}:{hash}` | Redis | 工具结果缓存 | tenant+tool+args+route_version | 按 tool 策略 | L4 降本 | 🔧 灰度 |
+| `tc:{tenant}:{tool}:{hash}` | Redis | 工具结果缓存 | tenant+tool+args+version_anchor | 按 tool 策略 | L4 降本 | 🔧 灰度 |
 | `llm_call_log` | MySQL (app) | LLM 调用指标 | call_id | 永久 | 可观测/降本归因 | ✅ |
 | `_active_tasks` | 进程内 dict | session_id→Task | session_id | 进程寿命 | 活跃任务跟踪 | ✅ |
 | prompt cache | provider 侧 | system prompt+工具定义 | 内容哈希 | 5m/1h | L2 降本 | 🔧 待接线 |
