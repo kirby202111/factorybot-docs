@@ -1,7 +1,10 @@
-"""L1 诊断 ReAct 图构建：agent 节点 -> 工具节点 -> 回模型，条件边 + recursion_limit。
+"""L1 诊断图配置：系统提示 / 首轮 user / 终止收尾（parse + 幻觉护栏）。
 
-StateGraph 把"模型思考 -> 工具执行 -> 回模型"做成显式图，可对每条边加条件路由/超时/
-递归上限。recursion_limit=20 是硬上限靠框架兜底。不引入 Celery/AgentExecutor。
+图骨架委托 app.infrastructure.ai.react_graph.build_react_graph；本模块只持有 L1 专属的
+提示词与收尾逻辑。_guard_no_evidence 作为 l1_finalize 的一部分，是 L1/C 专属护栏，
+不下沉通用基座（draft 类开放生成 agent 不应被误伤）。
+
+recursion_limit=20 硬上限靠框架兜底；DiagnosisService 外层再加 asyncio.wait_for 整体超时。
 """
 from __future__ import annotations
 
@@ -10,12 +13,9 @@ import operator
 import re
 from typing import Annotated, Any, Optional, TypedDict
 
-from langgraph.graph import END, START, StateGraph
-
 from app.domain.report import DiagnosisReport
 from app.domain.tool import ToolRegistry
-from app.infrastructure.ai.base import assistant_msg, sys_msg, user_msg
-from app.infrastructure.ai.tool_node import ToolNode, tool_to_schema
+from app.infrastructure.ai.react_graph import build_react_graph
 from app.infrastructure.obs.logging import get_logger
 from app.infrastructure.persistence.repos import ToolCallTraceRepo
 
@@ -68,60 +68,40 @@ def build_diagnosis_graph(
     llm, registry: ToolRegistry, trace_repo: ToolCallTraceRepo, obs=None,
     capability: str = "l1", recursion_limit: int = 20,
 ):
-    """构建并编译 L1 诊断图（无 checkpointer，同步跑完）。"""
-    tool_node = ToolNode(registry, trace_repo, obs, capability)
+    """构建 L1 诊断图：build_react_graph + L1 专属钩子（prompt/user/finalize）。
 
-    async def agent_node(state: AgentState) -> dict:
-        tools = [tool_to_schema(d) for d in registry.tools_for(capability, state["tenant"])]
-        history = state.get("messages") or []
-        messages = [sys_msg(L1_SYSTEM_PROMPT)]
-        new_msgs: list[dict] = []
-        if history:
-            messages.extend(history)
-        else:
-            um = user_msg(_build_user_prompt(state))
-            messages.append(um)
-            new_msgs.append(um)  # 首轮持久化 user 消息，供后续步引用
-        obs_ctx = state.get("obs_ctx")
-        # ObservableChatModel.ainvoke 接受 obs_ctx；裸 ChatModel 不接受（_ainvoke 兼容两者）
-        resp = await _ainvoke(llm, messages, tools, obs_ctx)
-        step_no = state.get("step_no", 0) + 1
-        if resp.tool_calls:
-            new_msgs.append(assistant_msg(resp.content, [tc.model_dump() for tc in resp.tool_calls]))
-            return {
-                "pending_tool_calls": [tc.model_dump() for tc in resp.tool_calls],
-                "messages": new_msgs,
-                "step_no": step_no,
-            }
-        # 完成：解析 DiagnosisReport
-        new_msgs.append(assistant_msg(resp.content))
-        report = _parse_report(resp.content, state)
-        # 幻觉护栏：工具未返回任何不良证据时，强制"证据不足"，不信 LLM 编造
-        report = _guard_no_evidence(report, state)
-        return {"pending_tool_calls": [], "messages": new_msgs,
-                "step_no": step_no, "report": report.model_dump()}
-
-    def route(state: AgentState) -> str:
-        return "tools" if state.get("pending_tool_calls") else END
-
-    g = StateGraph(AgentState)
-    g.add_node("agent", agent_node)
-    g.add_node("tools", tool_node)
-    g.add_edge(START, "agent")
-    g.add_conditional_edges("agent", route, ["tools", END])
-    g.add_edge("tools", "agent")
-    compiled = g.compile()
-    compiled.recursion_limit = recursion_limit
-    return compiled
+    L1（DiagnosisService）与 C（TraceabilityAgent）共用此入口，共享 l1_finalize
+    （含 _guard_no_evidence 护栏）。无 checkpointer，同步跑完。
+    """
+    return build_react_graph(
+        llm, registry, trace_repo, obs,
+        capability=capability,
+        prompt_fn=l1_prompt,
+        user_prompt_fn=l1_user_prompt,
+        finalize_fn=l1_finalize,
+        state_schema=AgentState,
+        recursion_limit=recursion_limit,
+    )
 
 
-async def _ainvoke(llm, messages, tools, obs_ctx):
-    """兼容 ObservableChatModel（接受 obs_ctx）与裸 ChatModel。"""
-    try:
-        return await llm.ainvoke(messages, tools, obs_ctx=obs_ctx)
-    except TypeError:
-        return await llm.ainvoke(messages, tools)
+# ---- L1 钩子（注入 build_react_graph）----
 
+def l1_prompt(state) -> str:
+    return L1_SYSTEM_PROMPT
+
+
+def l1_user_prompt(state) -> str:
+    return _build_user_prompt(state)
+
+
+def l1_finalize(content: str, state) -> dict:
+    """终止步：解析 DiagnosisReport + 幻觉护栏，返回 {"report": ...}。"""
+    report = _parse_report(content, state)
+    report = _guard_no_evidence(report, state)
+    return {"report": report.model_dump()}
+
+
+# ---- L1 专属实现：提示构造 / 报告解析 / 护栏 ----
 
 def _build_user_prompt(state: AgentState) -> str:
     q = state.get("question", "")

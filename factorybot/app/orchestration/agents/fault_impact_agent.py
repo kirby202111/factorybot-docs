@@ -4,15 +4,16 @@
 """
 from __future__ import annotations
 
-from app.orchestration.agents.base import build_agent_subgraph, to_tenant
+from app.infrastructure.ai.react_graph import build_react_graph, to_tenant
 
 
 class FaultImpactAgent:
     CAPABILITY = "fault_impact"
 
     def __init__(self, llm, registry, trace_repo, obs) -> None:
-        self._graph = build_agent_subgraph(
-            llm, registry, trace_repo, obs, self.CAPABILITY, self._prompt,
+        self._graph = build_react_graph(
+            llm, registry, trace_repo, obs,
+            capability=self.CAPABILITY, prompt_fn=self._prompt,
         )
 
     async def ainvoke(self, state: dict, config: dict | None = None) -> dict:

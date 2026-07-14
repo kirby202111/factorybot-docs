@@ -1,7 +1,7 @@
 """能力 D：生成类（SOP / 8D / 返工工艺草拟）。开放生成，代码完全做不了。"""
 from __future__ import annotations
 
-from app.orchestration.agents.base import build_agent_subgraph, to_tenant
+from app.infrastructure.ai.react_graph import build_react_graph, to_tenant
 
 
 class DraftAgent:
@@ -10,8 +10,9 @@ class DraftAgent:
     def __init__(self, capability: str, llm, registry, trace_repo, obs) -> None:
         self.CAPABILITY = capability
         self._kind = capability
-        self._graph = build_agent_subgraph(
-            llm, registry, trace_repo, obs, capability, self._prompt,
+        self._graph = build_react_graph(
+            llm, registry, trace_repo, obs,
+            capability=capability, prompt_fn=self._prompt,
         )
 
     async def ainvoke(self, state: dict, config: dict | None = None) -> dict:
