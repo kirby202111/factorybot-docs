@@ -1,8 +1,8 @@
 """A seed + 请求 DTO。
 
 Seed：图检索入口（WipUnit/WorkOrder/InventoryBatch/Defect/Asset）。
-版本一致性：``TraceQuery.route_version`` 可选锁定具体版本做历史回溯；
-不传则从图的 ``SNAPSHOT_OF_ROUTE{route_version}`` 快照边属性取生产时锁定版本。
+版本一致性：``TraceQuery.version``+``version_kind`` 可选锁定具体版本做历史回溯；
+不传则从图的 ``SNAPSHOT_OF_{kind}{version}`` 快照边属性取生产时锁定版本。
 """
 from __future__ import annotations
 
@@ -35,7 +35,8 @@ class TraceQuery(BaseModel):
     question: str
     seed: Seed | None = None            # 显式 seed，覆盖 NL 解析
     as_of: datetime | None = None       # 时间窗截止；默认 now()
-    route_version: str | None = None    # 可选：锁定具体版本做历史回溯
+    version: str | None = None          # 可选：锁定具体版本做历史回溯
+    version_kind: str | None = None     # route|bom|rule（MVP 图仅支持 route）
 
 
 class ExpandRequest(BaseModel):
@@ -44,4 +45,5 @@ class ExpandRequest(BaseModel):
     kind: SeedKind
     value: str
     as_of: datetime | None = None
-    route_version: str | None = None
+    version: str | None = None
+    version_kind: str | None = None

@@ -2,13 +2,14 @@
 
 包结构投影到 rag-service 整体结构设计 §2/§11；``llm_factory``/``embedding``/
 ``obs``/``config``/``kafka`` 基类见 shared/。PGVector -> ChromaDB 改造已完成
-（chunk 不可变 + 强制带 route_version + MinIO 重建兜底）。
+（chunk 不可变 + 强制带版本锚点 + MinIO 重建兜底）。
 
 存储：ChromaDB（chunk 向量+metadata，chunk 不可变）+ MinIO（原始文件）+
 MySQL（幂等/位点/审计）+ Redis（检索缓存）。
 审核流：工艺绑定型文档随 ProcessRouteActivated **联动 PUBLISHED**（决策 #3），
 去掉 SUBMITTED/PENDING_REBIND 中间态；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED。
-版本绑定：MVP 按 route_version，DocumentBinding 预留 rule_id+rule_version 双轨字段（决策 #2）。
+版本绑定通用化：``DocumentBinding`` 经 ``get_version_anchor()`` 产出统一 ``VersionAnchor``
+（route/bom/rule/asset/standard），MVP 工艺绑定型按 route，决策 #2 预留 rule 双轨。
 """
 from __future__ import annotations
 

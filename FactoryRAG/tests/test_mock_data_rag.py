@@ -11,6 +11,7 @@ import pytest
 
 from app.routes.document.domain.answer import DocQuery
 from app.routes.document.domain.document import DocumentCategory
+from app.shared.events.version_contract import VersionAnchor, VersionKind
 from app.shared.tenant.context import TenantContext
 from _mock_rag_infra import (
     build_bm25,
@@ -22,6 +23,22 @@ from _mock_rag_infra import (
 
 # 全车间租户：可见 PCBA + BOX 全部文档（tenant_scope 过滤不误伤）
 TENANT = TenantContext(tenant_id="t-mock", tenant_scopes=["workshop:PCBA", "workshop:BOX", "line:SMT-1"])
+
+
+def _anchor_from_query(q: dict) -> VersionAnchor | None:
+    """从 queries.json 条目的 version_kind/version/version_ref_id 构造锚点。"""
+    vk = q.get("version_kind")
+    ver = q.get("version")
+    if not vk or not ver:
+        return None
+    try:
+        return VersionAnchor(
+            kind=VersionKind(vk),
+            ref_id=q.get("version_ref_id", "") or "",
+            version=ver,
+        )
+    except ValueError:
+        return None
 
 
 # ── 数据加载 sanity ──
@@ -50,8 +67,7 @@ async def test_recall_relevance(backend: str):
         hits = await retriever.retrieve(
             query=q["query"],
             tenant=TENANT,
-            route_version=q.get("route_version"),
-            asset_id=q.get("asset_id"),
+            version_anchor=_anchor_from_query(q),
             doc_types=q.get("doc_types"),
             top_k=20,
         )
@@ -71,16 +87,19 @@ async def test_recall_relevance(backend: str):
             assert kw in top_n_text, f"[{backend}] {q['query']!r}: top-5 缺关键词 {kw!r}"
 
 
-# ── 版本隔离红线（PROCESS_BOUND route_version 等值过滤）──
+# ── 版本隔离红线（PROCESS_BOUND ROUTE 版本等值过滤）──
 async def test_version_isolation_v3_only():
-    """查 v3 -> 仅回 route_version==v3 的 chunk，v4/v2-deprecated 不泄漏。"""
+    """查 v3 -> 仅回 version==v3 的 chunk，v4/v2-deprecated 不泄漏。"""
     chunks, _ = load_doc_chunks()
     _, retriever = await build_bm25(chunks)
     hits = await retriever.retrieve(
-        query="回流焊峰值温度", tenant=TENANT, route_version="v3", top_k=20,
+        query="回流焊峰值温度",
+        tenant=TENANT,
+        version_anchor=VersionAnchor(kind=VersionKind.ROUTE, ref_id="route-smt-reflow", version="v3"),
+        top_k=20,
     )
     assert hits, "v3 应有命中"
-    assert all(h.route_version == "v3" for h in hits), "v3 查询泄漏了非 v3 chunk"
+    assert all(h.version == "v3" for h in hits), "v3 查询泄漏了非 v3 chunk"
     assert all(h.doc_id != "sop-smt-reflow-v4" for h in hits)
 
 
@@ -88,10 +107,13 @@ async def test_version_isolation_v4_only():
     chunks, _ = load_doc_chunks()
     _, retriever = await build_bm25(chunks)
     hits = await retriever.retrieve(
-        query="回流焊链速", tenant=TENANT, route_version="v4", top_k=20,
+        query="回流焊链速",
+        tenant=TENANT,
+        version_anchor=VersionAnchor(kind=VersionKind.ROUTE, ref_id="route-smt-reflow", version="v4"),
+        top_k=20,
     )
     assert hits
-    assert all(h.route_version == "v4" for h in hits)
+    assert all(h.version == "v4" for h in hits)
     assert all(h.doc_id != "sop-smt-reflow" for h in hits)
 
 
@@ -108,13 +130,16 @@ async def test_deprecated_never_returned():
     assert all(h.state == "PUBLISHED" for h in hits)
 
 
-# ── 资产隔离红线（ASSET_BOUND asset_id 过滤）──
+# ── 资产隔离红线（ASSET_BOUND version_ref_id 过滤）──
 async def test_asset_isolation():
     chunks, _ = load_doc_chunks()
     _, retriever = await build_bm25(chunks)
     # 查 EQ-REFLOW-001 -> 仅回流焊炉手册，不混入贴片机手册
     hits = await retriever.retrieve(
-        query="故障处理", tenant=TENANT, asset_id="EQ-REFLOW-001", top_k=20,
+        query="故障处理",
+        tenant=TENANT,
+        version_anchor=VersionAnchor(kind=VersionKind.ASSET, ref_id="EQ-REFLOW-001", version=""),
+        top_k=20,
     )
     assert hits
     assert all(h.doc_id == "manual-reflow-oven-eq001" for h in hits)
@@ -128,7 +153,6 @@ async def test_doc_type_filter():
         query="工艺标准", tenant=TENANT, doc_types=["SOP"], top_k=20,
     )
     assert hits
-    assert all(h.doc_type == "SOP" for h in hits if hasattr(h, "doc_type")) or True
     # ChunkHit 无 doc_type 字段 -> 用 doc_id 推断：SOP 文档 id 集合
     sop_doc_ids = {"sop-smt-reflow", "sop-smt-reflow-v4", "sop-box-build"}
     assert all(h.doc_id in sop_doc_ids for h in hits)
@@ -142,12 +166,18 @@ async def test_tenant_scope_isolation():
     box_tenant = TenantContext(tenant_id="t-box", tenant_scopes=["workshop:BOX"])
     # 整机组装（BOX）可见
     hits = await retriever.retrieve(
-        query="整机组装扭矩", tenant=box_tenant, route_version="v2", top_k=20,
+        query="整机组装扭矩",
+        tenant=box_tenant,
+        version_anchor=VersionAnchor(kind=VersionKind.ROUTE, ref_id="route-box-build", version="v2"),
+        top_k=20,
     )
     assert any(h.doc_id == "sop-box-build" for h in hits)
     # 回流焊（PCBA）被 tenant_scope 过滤 -> 空
     hits_pcba = await retriever.retrieve(
-        query="回流焊峰值温度", tenant=box_tenant, route_version="v3", top_k=20,
+        query="回流焊峰值温度",
+        tenant=box_tenant,
+        version_anchor=VersionAnchor(kind=VersionKind.ROUTE, ref_id="route-smt-reflow", version="v3"),
+        top_k=20,
     )
     assert hits_pcba == []
 
@@ -160,14 +190,16 @@ async def test_end_to_end_doc_answer():
     req = DocQuery(
         question="回流焊峰值温度设多少",
         doc_category=DocumentCategory.PROCESS_BOUND,
-        route_version="v3",
+        version="v3",
+        version_kind="route",
+        version_ref_id="route-smt-reflow",
         top_k=20,
         top_n=5,
     )
     answer = await svc.query(req, TENANT)
     assert answer.citations, "应有引用"
     assert answer.citations[0].document_id == "sop-smt-reflow"
-    assert answer.route_version_filter == "v3"
+    assert answer.version_filter == "v3"
     assert answer.needs_human_review is False  # confidence 0.75 + 有引用
 
 
@@ -176,6 +208,6 @@ async def test_process_bound_missing_version_still_enforced():
     chunks, _ = load_doc_chunks()
     retriever = await build_hybrid_retriever(chunks)
     svc = build_doc_svc(retriever)
-    req = DocQuery(question="回流焊", doc_category=DocumentCategory.PROCESS_BOUND)  # 缺 route_version
-    with pytest.raises(ValueError, match="route_version"):
+    req = DocQuery(question="回流焊", doc_category=DocumentCategory.PROCESS_BOUND)  # 缺版本锚点
+    with pytest.raises(ValueError, match="ROUTE 版本锚点"):
         await svc.query(req, TENANT)

@@ -1,10 +1,11 @@
 {
-  "_comment": "A 追溯型 RAG 模拟数据：5M1E 子图场景。每个场景 = seed + TraceSubgraph（与领域模型同构）+ 期望断言。FakeGraphRetriever 按 seed 返回对应子图，route_version 过滤走 Method 维度快照节点。场景1 锁定 v3 快照（status=DEPRECATED 历史快照，但仍是生产时锁定版本，非当前 ACTIVE）。",
+  "_comment": "A 追溯型 RAG 模拟数据：5M1E 子图场景。每个场景 = seed + TraceSubgraph（与领域模型同构）+ 期望断言。FakeGraphRetriever 按 seed 返回对应子图，version 过滤走 Method 维度 RouteVersion 快照节点。场景1 锁定 v3 快照（status=DEPRECATED 历史快照，但仍是生产时锁定版本，非当前 ACTIVE）。expected.version_locked 为物理锁定的版本号（version_kind=route）。图节点 props/边属性仍用 route_version/version 键（图 schema 不变）。",
   "scenarios": [
     {
       "seed": {"kind": "WipUnit", "value": "SN-2024-001"},
       "expected": {
-        "route_version_locked": "v3",
+        "version_locked": "v3",
+        "version_kind": "route",
         "defect_code": "SW-001",
         "defect_name": "锡桥",
         "root_cause_category": "Material",
@@ -61,7 +62,8 @@
     {
       "seed": {"kind": "WipUnit", "value": "SN-2024-009"},
       "expected": {
-        "route_version_locked": "v4",
+        "version_locked": "v4",
+        "version_kind": "route",
         "defect_code": "SW-002",
         "defect_name": "立碑",
         "root_cause_category": "Method",

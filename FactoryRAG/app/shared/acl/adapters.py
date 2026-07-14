@@ -41,7 +41,8 @@ class InProcessTraceRagAdapter:
         seed_kind: str | None = None,
         seed_value: str | None = None,
         as_of: datetime | None = None,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> Any:
         from app.routes.traceability.domain.seed import Seed, SeedKind, TraceQuery
 
@@ -49,7 +50,11 @@ class InProcessTraceRagAdapter:
         if seed_kind and seed_value:
             seed = Seed(kind=SeedKind(seed_kind), value=seed_value)
         req = TraceQuery(
-            question=question, seed=seed, as_of=as_of, route_version=route_version or None
+            question=question,
+            seed=seed,
+            as_of=as_of,
+            version=version or None,
+            version_kind=version_kind or None,
         )
         return await self._svc.retrieve_and_synthesize(req, tenant)
 
@@ -60,12 +65,17 @@ class InProcessTraceRagAdapter:
         tenant: TenantContext,
         *,
         as_of: datetime | None = None,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> Any:
         from app.routes.traceability.domain.seed import ExpandRequest, SeedKind
 
         req = ExpandRequest(
-            kind=SeedKind(kind), value=value, as_of=as_of, route_version=route_version or None
+            kind=SeedKind(kind),
+            value=value,
+            as_of=as_of,
+            version=version or None,
+            version_kind=version_kind or None,
         )
         return await self._svc.expand_subgraph(req, tenant)
 
@@ -89,12 +99,14 @@ class HttpTraceRagAdapter:
         seed_kind: str | None = None,
         seed_value: str | None = None,
         as_of: datetime | None = None,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "question": question,
             "as_of": _iso(as_of),
-            "route_version": route_version,
+            "version": version,
+            "version_kind": version_kind,
         }
         if seed_kind and seed_value:
             payload["seed"] = {"kind": seed_kind, "value": seed_value}
@@ -114,9 +126,16 @@ class HttpTraceRagAdapter:
         tenant: TenantContext,
         *,
         as_of: datetime | None = None,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> dict[str, Any]:
-        payload = {"kind": kind, "value": value, "as_of": _iso(as_of), "route_version": route_version}
+        payload = {
+            "kind": kind,
+            "value": value,
+            "as_of": _iso(as_of),
+            "version": version,
+            "version_kind": version_kind,
+        }
         resp = await self._client.post(
             f"{self._base_url}/rag/trace/expand",
             json=payload,
@@ -131,7 +150,7 @@ class InProcessDocRagAdapter:
     """单服务内：直调 B 的 DocumentRetrievalService（决策 #4）。
 
     原语 -> B 的 ``DocQuery`` / ``DocSearch``（方法体内懒 import）。
-    ``doc_category`` 缺省归 ``GENERAL``；``route_version`` 空串归一化为 None。
+    ``doc_category`` 缺省归 ``GENERAL``；``version`` 空串归一化为 None。
     """
 
     def __init__(self, svc: Any) -> None:
@@ -142,9 +161,10 @@ class InProcessDocRagAdapter:
         question: str,
         tenant: TenantContext,
         *,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
+        version_ref_id: str | None = None,
         doc_category: str | None = None,
-        asset_id: str | None = None,
         doc_types: list[str] | None = None,
     ) -> Any:
         from app.routes.document.domain.answer import DocQuery
@@ -153,8 +173,9 @@ class InProcessDocRagAdapter:
         req = DocQuery(
             question=question,
             doc_category=DocumentCategory(doc_category) if doc_category else DocumentCategory.GENERAL,
-            route_version=route_version or None,
-            asset_id=asset_id or None,
+            version=version or None,
+            version_kind=version_kind or None,
+            version_ref_id=version_ref_id or None,
             doc_types=[DocType(dt) for dt in doc_types] if doc_types else None,
         )
         return await self._svc.retrieve_and_synthesize(req, tenant)
@@ -164,8 +185,9 @@ class InProcessDocRagAdapter:
         query: str,
         tenant: TenantContext,
         *,
-        route_version: str | None = None,
-        asset_id: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
+        version_ref_id: str | None = None,
         doc_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list[Any]:
@@ -174,8 +196,9 @@ class InProcessDocRagAdapter:
 
         req = DocSearch(
             question=query,
-            route_version=route_version or None,
-            asset_id=asset_id or None,
+            version=version or None,
+            version_kind=version_kind or None,
+            version_ref_id=version_ref_id or None,
             doc_types=[DocType(dt) for dt in doc_types] if doc_types else None,
             top_k=top_k,
         )
@@ -198,15 +221,17 @@ class HttpDocRagAdapter:
         question: str,
         tenant: TenantContext,
         *,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
+        version_ref_id: str | None = None,
         doc_category: str | None = None,
-        asset_id: str | None = None,
         doc_types: list[str] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "question": question,
-            "route_version": route_version,
-            "asset_id": asset_id,
+            "version": version,
+            "version_kind": version_kind,
+            "version_ref_id": version_ref_id,
             "doc_types": doc_types,
         }
         if doc_category:
@@ -225,15 +250,17 @@ class HttpDocRagAdapter:
         query: str,
         tenant: TenantContext,
         *,
-        route_version: str | None = None,
-        asset_id: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
+        version_ref_id: str | None = None,
         doc_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list[dict[str, Any]]:
         payload = {
             "question": query,
-            "route_version": route_version,
-            "asset_id": asset_id,
+            "version": version,
+            "version_kind": version_kind,
+            "version_ref_id": version_ref_id,
             "doc_types": doc_types,
             "top_k": top_k,
         }

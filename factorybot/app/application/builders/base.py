@@ -6,6 +6,7 @@ from typing import Protocol
 from app.domain.draft import Draft
 from app.domain.report import DiagnosisReport
 from app.domain.tenant import TenantContext
+from app.domain.version import VersionAnchor
 
 
 class DraftBuilder(Protocol):
@@ -32,5 +33,14 @@ def extract_sn_list(nodes: list[dict]) -> list[str]:
     return out
 
 
-def extract_route_version(report: DiagnosisReport) -> str | None:
-    return report.route_version
+def extract_version_anchor(report: DiagnosisReport) -> VersionAnchor | None:
+    """从 L1 报告提取版本锚点（三段链第三段透传源）。"""
+    return report.version_anchor()
+
+
+def apply_version_anchor(draft: Draft, anchor: VersionAnchor | None) -> None:
+    """把版本锚点写回草稿（三段链第三段，覆盖 LLM 可能的空缺/错填）。"""
+    if anchor:
+        draft.version = anchor.version
+        draft.version_kind = anchor.kind.value
+        draft.version_ref_id = anchor.ref_id

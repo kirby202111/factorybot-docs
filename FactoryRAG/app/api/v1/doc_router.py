@@ -28,7 +28,7 @@ def doc_router() -> APIRouter:
         tenant: TenantContext = Depends(get_tenant),
         svc=Depends(get_doc_retrieval_svc),
     ) -> DocAnswer:
-        """检索 + LLM 综合。工艺绑定型 route_version 必填（入口校验拒绝缺失）。"""
+        """检索 + LLM 综合。工艺绑定型需 ROUTE 版本锚点（version+version_kind='route'，入口校验拒绝缺失）。"""
         return await svc.retrieve_and_synthesize(req, tenant)
 
     @router.post("/search", response_model=list[ChunkHit])

@@ -49,7 +49,7 @@ MES 对错误答案零容忍（错给一条失效工艺 → 批量不良），"L
 
 DDD 写侧已保证版本一致（INV-09：过点记录绑 `routeVersion`）。但**检索时取当时版本**在跨服务场景下很难——要知道记录绑的是哪个版本，再去工艺服务查那个版本详情，还容易取成"当前生效版"。
 
-图用**版本即节点 + `SNAPSHOT_OF_ROUTE` 快照边**，把"历史单件按当时工艺回放"变成带 `route_version` 过滤的一跳查询；工艺变更只新增版本节点、历史边不动。通用 RAG 检索文档不分版本会答出失效工艺，图从结构上杜绝这件事。
+图用**版本即节点 + `SNAPSHOT_OF_ROUTE` 快照边**，把"历史单件按当时工艺回放"变成带版本锚点过滤的一跳查询；工艺变更只新增版本节点、历史边不动。通用 RAG 检索文档不分版本会答出失效工艺，图从结构上杜绝这件事。
 
 ### 2.5 CQRS 读模型分离，零侵入过点主事务
 
@@ -83,7 +83,7 @@ DDD 写侧已保证版本一致（INV-09：过点记录绑 `routeVersion`）。�
 | 3 | **跨单件共性因子挖掘 / 批次异常影响面** | `BatchQualityAnomaly` →`AFFECTS`→ `WipUnit`；多不良回溯共同上游 | 数据分析师写 SQL 找共性 → 图结构天然支持"这 5 个不良的共同因子"自动比对 | `BatchQualityAnomaly` 已投影；🔴 共性挖掘用 GDS 图算法属延伸，超出当前 MVP 设计 |
 | 4 | **工艺变更影响面预判** | `RouteVersion` ←`BINDS_ROUTE`/`SNAPSHOT_OF_ROUTE`← `WorkOrder`/`WipUnit` | 变更评审靠人评估影响面 → 激活新版本前反查哪些在制单件绑了旧版本，影响面一目了然 | ✅ Method |
 | 5 | **L1 多步递进诊断 Agent** | 图作快路径给全貌，Agent 在某一维深挖追问 | 无 → 复杂跨上下文递进诊断 | 对接在实现阶段五，强依赖图先建起来 |
-| 6 | **诊断 + 处置一体化（与文档型 RAG 协同）** | `TraceAnswer.suggested_action` → 路线 B `search_docs(query, route_version_filter)` | 诊断结果与处置 SOP 分属两套系统 → 给根因假设同时给带版本过滤的处置 SOP | 设计上协同，依赖路线 B 先行验证 |
+| 6 | **诊断 + 处置一体化（与文档型 RAG 协同）** | `TraceAnswer.suggested_action` → 路线 B `search_docs(query, version_anchor)` | 诊断结果与处置 SOP 分属两套系统 → 给根因假设同时给带版本过滤的处置 SOP | 设计上协同，依赖路线 B 先行验证 |
 
 ---
 

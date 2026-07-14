@@ -10,6 +10,7 @@ from app.routes.document.domain.chunk import DocumentChunk
 from app.routes.document.infrastructure.bm25.bm25_index import Bm25Index
 from app.routes.document.infrastructure.bm25.tokenizer import Tokenizer
 from app.routes.document.infrastructure.chunk_filter import ChunkFilter
+from app.shared.events.version_contract import VersionAnchor, VersionKind
 from app.shared.tenant.context import TenantContext
 
 
@@ -18,7 +19,8 @@ def _chunk(
     chunk_id: str,
     text: str,
     state: str = "PUBLISHED",
-    route_version: str | None = None,
+    version: str = "",
+    version_kind: str = "",
     version_id: str = "v1",
     tenant_scope: str = "",
     doc_type: str = "",
@@ -30,7 +32,8 @@ def _chunk(
         chunk_seq=0,
         text=text,
         state=state,
-        route_version=route_version,
+        version_kind=version_kind,
+        version=version,
         tenant_scope=tenant_scope,
         doc_type=doc_type,
     )
@@ -124,16 +127,19 @@ async def test_remove_by_version(index: Bm25Index):
     assert all(c.chunk_id != "c1" for c, _ in results)
 
 
-async def test_predicate_filters_by_route_version(index: Bm25Index):
-    """ChunkFilter.matches 过滤：仅返回 route_version=v3 的命中（与稠密路等价）。"""
+async def test_predicate_filters_by_version(index: Bm25Index):
+    """ChunkFilter.matches 过滤：仅返回 version=v3 的命中（与稠密路等价）。"""
     await index.build_from_chunks(
         [
-            _chunk(chunk_id="c1", text="reflow oven", route_version="v3"),
-            _chunk(chunk_id="c2", text="reflow oven", route_version="v4"),
+            _chunk(chunk_id="c1", text="reflow oven", version_kind="route", version="v3"),
+            _chunk(chunk_id="c2", text="reflow oven", version_kind="route", version="v4"),
         ]
     )
     tenant = TenantContext(tenant_id="t1")
-    f = ChunkFilter(tenant=tenant, route_version="v3")
+    f = ChunkFilter(
+        tenant=tenant,
+        version_anchor=VersionAnchor(kind=VersionKind.ROUTE, ref_id="", version="v3"),
+    )
     results = await index.search("reflow", predicate=f.matches, top_k=5)
     ids = [c.chunk_id for c, _ in results]
     assert ids == ["c1"]

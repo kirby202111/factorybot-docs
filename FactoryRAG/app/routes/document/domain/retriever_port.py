@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from app.routes.document.domain.answer import ChunkHit
+from app.shared.events.version_contract import VersionAnchor
 from app.shared.tenant.context import TenantContext
 
 
@@ -20,9 +21,9 @@ class RetrieverPort(Protocol):
     稀疏=BM25 分、混合=RRF 融合分）；下游 rerank 阶段以 cross-encoder 重排，
     不依赖此处 score 的绝对量纲，仅依赖相对顺序。
 
-    过滤语义（state=PUBLISHED + route_version 等值 + tenant_scope + doc_type + asset_id）
-    由各实现自行落实：稠密走 ChromaDB ``where`` pre-filter，稀疏走内存谓词，
-    二者必须等价（见 ``infrastructure.chunk_filter``）。
+    过滤语义（state=PUBLISHED + 版本锚点等值 + tenant_scope + doc_type）由各实现自行落实：
+    稠密走 ChromaDB ``where`` pre-filter，稀疏走内存谓词，二者必须等价（见
+    ``infrastructure.chunk_filter``）。版本锚点统一为 ``VersionAnchor``（route/bom/rule/asset/standard）。
     """
 
     async def retrieve(
@@ -30,8 +31,7 @@ class RetrieverPort(Protocol):
         *,
         query: str,
         tenant: TenantContext,
-        route_version: str | None = None,
-        asset_id: str | None = None,
+        version_anchor: VersionAnchor | None = None,
         doc_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list[ChunkHit]:

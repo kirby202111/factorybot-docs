@@ -34,9 +34,11 @@ class DraftService:
         draft.requires_confirmation = True
         if draft.confidence < 0.5:
             draft.needs_review = True
-        # 版本一致性三段链第三段：透传 L1 的 route_version
-        if not draft.route_version:
-            draft.route_version = report.route_version
+        # 版本一致性三段链第三段：透传 L1 的版本锚点
+        if not draft.version:
+            draft.version = report.version
+            draft.version_kind = report.version_kind
+            draft.version_ref_id = report.version_ref_id
         await self._draft_repo.archive(draft)
         await self._trace_repo.save_ok(draft_kind.value, draft, t0)
         self._obs.session_finished("L2", "DONE")

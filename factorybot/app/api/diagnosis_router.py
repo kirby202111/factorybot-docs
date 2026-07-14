@@ -7,6 +7,7 @@ from app.api.deps import get_container_dep, tenant_from_headers
 from app.api.schemas import DiagnosisReportResponse, DiagnosisRequest
 from app.application.diagnosis_service import DiagnosisService
 from app.container import Container
+from app.domain.version import VersionAnchor
 
 router = APIRouter(tags=["L1-Diagnosis"])
 
@@ -18,9 +19,10 @@ async def diagnose(
     c: Container = Depends(get_container_dep),
 ) -> DiagnosisReportResponse:
     svc: DiagnosisService = c.diagnosis_service
+    anchor = VersionAnchor.from_flat(req.version, req.version_kind, req.version_ref_id)
     report = await svc.diagnose(
         req.question, tenant, serial_no=req.serial_no,
-        work_order_id=req.work_order_id, route_version=req.route_version,
+        work_order_id=req.work_order_id, version_anchor=anchor,
         subgraph_ref=req.subgraph_ref,
     )
     return DiagnosisReportResponse(
@@ -28,7 +30,9 @@ async def diagnose(
         confidence=report.confidence,
         hypotheses=report.hypotheses,
         subgraph_ref=report.subgraph_ref,
-        route_version=report.route_version,
+        version=report.version,
+        version_kind=report.version_kind,
+        version_ref_id=report.version_ref_id,
         evidence_refs=report.evidence_refs,
         disclaimer=report.disclaimer,
         needs_human_review=report.needs_human_review,

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from app.routes.document.domain.chunk import ChunkLocator, DocumentChunk
 from app.routes.document.domain.document import DocType
+from app.shared.events.version_contract import VersionAnchor
 
 
 @dataclass
@@ -46,15 +47,16 @@ class ChunkStrategySelector:
         doc_id: str,
         version_id: str,
         tenant_scope: str,
-        route_version: str | None,
-        route_id: str | None,
-        asset_id: str | None,
+        version_anchor: VersionAnchor | None,
         file_content_hash: str,
     ) -> list[DocumentChunk]:
         size = self.select_size(doc_type)
         overlap = self.OVERLAP.get(doc_type, 30)
         pieces = self._split_text(text, doc_type, size, overlap)
         chunks: list[DocumentChunk] = []
+        vk = version_anchor.kind.value if version_anchor else ""
+        vref = version_anchor.ref_id if version_anchor else ""
+        ver = version_anchor.version if version_anchor else ""
         for seq, (piece, heading_path, section_type) in enumerate(pieces):
             chunks.append(
                 DocumentChunk(
@@ -65,11 +67,11 @@ class ChunkStrategySelector:
                     text=piece,
                     locator=ChunkLocator(heading_path=list(heading_path), offset=seq * (size - overlap)),
                     section_type=section_type,
-                    route_version=route_version,
-                    route_id=route_id,
+                    version_kind=vk,
+                    version_ref_id=vref,
+                    version=ver,
                     tenant_scope=tenant_scope,
                     doc_type=doc_type.value,
-                    binding_asset_id=asset_id,
                     file_content_hash=file_content_hash,
                 )
             )

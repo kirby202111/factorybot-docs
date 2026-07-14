@@ -34,13 +34,16 @@
   - `RawDataTopicGate`：禁止订阅 `dc.*` 原始数据流（高频采集不全量入图）；
   - `ReadOnlyIngestionGate`：B 摄入/重索引 handler 禁止写 MES 调用；
   - `ReadOnlyToolGate`：E 工具注册表拒绝 `read_only=False` 的工具。
-- **B chunk 不可变**：写入 ChromaDB 后所有 metadata 永不修改；工艺升版 = 追加新版本 chunk
-  （带新 `route_version`），不翻转老 chunk 的 state；版本隔离靠查询
-  `where={"state":"PUBLISHED","route_version":rv}` 过滤。
-- **强制带版本红线**：B 工艺绑定型（PROCESS_BOUND）文档检索 `route_version` 必填，入口校验
-  拒绝缺失，**绝不退回"查最新 ACTIVE"**（避开在制品不切换工艺语义陷阱）。
-- **版本一致性三段链**（rag-service 负责第一段）：图 `[:SNAPSHOT_OF_ROUTE {route_version}]`
-  快照边物理锁定生产时版本 -> L1 `evidence.route_version` -> L2 `Draft.route_version` ->
+- **B chunk 不可变**：写入 ChromaDB 后所有 metadata 永不修改；版本升版 = 追加新版本 chunk
+  （带新 `version`），不翻转老 chunk 的 state；版本隔离靠查询
+  `where={"state":"PUBLISHED","version_kind":..,"version":..}` 过滤。
+- **版本锚点通用化**：`VersionAnchor(kind, ref_id, version)` 统一贯穿 B/A/共享内核，
+  覆盖 route/bom/rule/asset/standard 五类版本（工艺路线 SOP / 设备维修手册 / IPC 标准等皆可版本管理）。
+- **强制带版本红线**：B 工艺绑定型（PROCESS_BOUND）文档检索需 ROUTE 版本锚点（`version`+
+  `version_kind="route"`）必填，入口校验拒绝缺失，**绝不退回"查最新 ACTIVE"**（避开在制品不切换
+  工艺语义陷阱）；设备绑定型需 ASSET 锚点（`version_ref_id` 必填）。
+- **版本一致性三段链**（rag-service 负责第一段）：图 `[:SNAPSHOT_OF_{kind} {version}]`
+  快照边物理锁定生产时版本 -> L1 `evidence.version_anchor` -> L2 `Draft.version_anchor` ->
   MES 校验 ACTIVE。A 升版发 `rag.reindex.request` 内部事件通知 B 重索引。
 
 ---
@@ -200,10 +203,10 @@ uv run pytest tests/ -v   # 单元测试（红线不变式，不触重依赖）
 | 测试 | 锁住的不变式 |
 |------|--------------|
 | `test_gates.py` | 5 个 ReadOnly*Gate 启动断言（写动作 fail-fast） |
-| `test_chunk_immutability.py` | B chunk 不可变 + `to_metadata_dict` 字段完备 + `_build_where` 强制 state/route_version |
-| `test_version_contract.py` | VersionAnchor/ReindexRequest + `parse_anchor` 缺失版本抛错 |
+| `test_chunk_immutability.py` | B chunk 不可变 + `to_metadata_dict` 字段完备 + `_build_where` 强制 state/版本锚点 |
+| `test_version_contract.py` | VersionAnchor/ReindexRequest + `parse_anchor` 缺失版本抛错 + `to/from_metadata` |
 | `test_port_adapter.py` | InProcess Adapter 收原语 -> 构造路线 DTO -> 直调 svc（跨路线零 import） |
-| `test_retrieval_enforce_version.py` | B PROCESS_BOUND 缺 route_version / ASSET_BOUND 缺 asset_id -> ValueError |
+| `test_retrieval_enforce_version.py` | B PROCESS_BOUND 缺 ROUTE 锚点 / ASSET_BOUND 缺 ASSET 锚点 -> ValueError |
 | `test_route_graph.py` | E `_FallbackGraph` 按意图走 tool/delegate/converge（langgraph 不可用时） |
 
 ---
@@ -220,7 +223,7 @@ uv run pytest tests/ -v   # 单元测试（红线不变式，不触重依赖）
 
 | 调用方 | Port | 用途 |
 |--------|------|------|
-| A `_enrich_suggested_action` | `DocRagPort.query` | 拉 B 的 SOP 片段补充 suggested_action（带 route_version） |
+| A `_enrich_suggested_action` | `DocRagPort.query` | 拉 B 的 SOP 片段补充 suggested_action（带版本锚点 route/bom/...） |
 | E `query_traceability_graph` 工具 | `TraceRagPort.expand` | 取 A 子图（不综合） |
 | E `search_docs` 工具 | `DocRagPort.search` | 检索 B 文档片段 |
 | agent-service L1/L2（拆服务后） | `TraceRagPort.query` / `DocRagPort.query` | 经 Http Adapter |

@@ -46,9 +46,7 @@ class RagReindexRequestHandler(_RouteHandlerBase):
             doc_id=version.document_id,
             version_id=version.version_id,
             tenant_scope=tenant_scope,
-            route_version=version.get_route_version(),
-            route_id=version.get_route_id(),
-            asset_id=version.get_asset_id(),
+            version_anchor=version.get_version_anchor(),
             file_content_hash=version.file_content_hash,
         )
         embeddings = await self._embedder.embed_batch([c.text for c in chunks])

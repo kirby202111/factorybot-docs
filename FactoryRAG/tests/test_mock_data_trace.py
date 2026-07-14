@@ -51,7 +51,8 @@ async def test_trace_query_locks_snapshot_version():
         TraceQuery(question="SN-2024-001 锡桥根因", seed=Seed(kind=SeedKind.WIP_UNIT, value="SN-2024-001")),
         TENANT,
     )
-    assert answer.route_version == "v3"
+    assert answer.version == "v3"
+    assert answer.version_kind == "route"
     assert answer.subgraph_ref.startswith("WipUnit:SN-2024-001@")
     # 显式断言：锁定的 v3 来自 status=DEPRECATED 的历史快照节点（非当前 ACTIVE）
     sub = await svc.expand_subgraph(
@@ -102,16 +103,18 @@ async def test_graph_version_isolation():
     sub_v4 = await svc.expand_subgraph(
         ExpandRequest(kind=SeedKind.WIP_UNIT, value="SN-2024-009"), TENANT,
     )
-    assert sub_v3.route_version_locked() == "v3"
-    assert sub_v4.route_version_locked() == "v4"
+    assert sub_v3.version_locked().version == "v3"
+    assert sub_v4.version_locked().version == "v4"
 
 
 # ── A->B 跨路线：图锁 v3 -> B 仅召回 v3 SOP（版本一致性三段链第一段）──
 async def test_cross_route_b_filters_by_locked_version():
-    """直接打 B Port：route_version=v3 -> 引用 v3 文档（sop-smt-reflow），非 v4。"""
+    """直接打 B Port：ROUTE 锚点 v3 -> 引用 v3 文档（sop-smt-reflow），非 v4。"""
     doc_rag = await build_doc_rag_port()
     answer = await doc_rag.query(
-        "回流焊锡桥处置 SOP", TENANT, route_version="v3", doc_category="PROCESS_BOUND",
+        "回流焊锡桥处置 SOP", TENANT,
+        version="v3", version_kind="route", version_ref_id="route-smt-reflow",
+        doc_category="PROCESS_BOUND",
     )
     assert answer.citations, "B 应召回 v3 SOP"
     assert answer.citations[0].document_id == "sop-smt-reflow"
@@ -129,7 +132,7 @@ async def test_a_enriches_suggested_action_from_b():
     assert answer.hypotheses
     action = answer.hypotheses[0].suggested_action
     assert "参考 SOP" in action, "suggested_action 应被 B 的 SOP 片段富化"
-    # v3 标记出现（chunk 头含 "route v3" 或步骤含 "v3 温度"），v4 标记绝不出现（route_version=v3 过滤）
+    # v3 标记出现（chunk 头含 "route v3" 或步骤含 "v3 温度"），v4 标记绝不出现（ROUTE 锚点 v3 过滤）
     assert "v3" in action
     assert "route v4" not in action
-    assert "250" not in action  # v4 峰值温度，被 route_version=v3 过滤排除
+    assert "250" not in action  # v4 峰值温度，被 ROUTE 锚点 v3 过滤排除

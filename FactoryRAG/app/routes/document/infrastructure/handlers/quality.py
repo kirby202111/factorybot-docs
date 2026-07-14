@@ -1,7 +1,7 @@
 """质量门规则事件 handler（决策 #2 双轨，评测后切换）。
 
-MVP 阶段检验标准仍按 ``route_version`` 归属；``DocumentBinding`` 已预留
-``rule_id``+``rule_version`` 字段并订阅 ``quality.gate.lifecycle``，评测后回填切换。
+MVP 阶段检验标准仍按 ROUTE 版本锚点归属；``DocumentBinding`` 已预留
+``rule_id``+``rule_version`` 字段并订阅 ``quality.gate.lifecycle``，评测后切换为 RULE 锚点。
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class QualityGateRuleActivatedHandler(_RouteHandlerBase):
         rule_version = payload.get("rule_version")
         if not rule_id or not rule_version:
             return
-        # MVP：noop（检验标准仍按 route_version 归属）。
+        # MVP：noop（检验标准仍按 ROUTE 锚点归属）。
         # 评测后切换：按 rule_id+rule_version 找关联文档版本，联动 PUBLISHED（同决策 #3 模式）。
         logger.info(
             "QualityGateRuleActivated 预留：rule=%s@%s（决策 #2，评测后切换）",

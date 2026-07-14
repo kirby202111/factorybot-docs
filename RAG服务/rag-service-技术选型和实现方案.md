@@ -25,7 +25,7 @@
 | 3 | 多存储共存于单进程 | Neo4j/ChromaDB/MySQL/Redis/MinIO 共存，Port 隔离故障域，按路线降级 |
 | 4 | 只读红线靠启动断言兜底 | 统一 `ReadOnly*Gate` 在 lifespan 启动期扫描，发现写动作即拒绝启动 |
 | 5 | **选型收敛到一张表，解决三路线版本漂移** | 三路线文档各自钉死版本且存在不一致（LangGraph 0.1+ vs ≥0.2）；本文以共享内核为权威收敛口径，路线文档以本文为准回填 |
-| 6 | **B 向量库选 ChromaDB（而非 PGVector/专用向量库）** | 车间 ToB 文档量小 + 查询强制带 `route_version`（版本过滤退化成等值）+ 求开发简；chunk 不可变绕开多记录事务弱点，MinIO 重建兜底备份弱。详见 §1.2 |
+| 6 | **B 向量库选 ChromaDB（而非 PGVector/专用向量库）** | 车间 ToB 文档量小 + 查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值）+ 求开发简；chunk 不可变绕开多记录事务弱点，MinIO 重建兜底备份弱。详见 §1.2 |
 
 > 不选多服务的理由见整体结构设计 §0 末。选型层同样遵循"先收敛、再灰度引入（B -> A -> E）"。
 
@@ -79,11 +79,11 @@
 
 **为什么 B 选 ChromaDB（而非 PGVector / Milvus / Qdrant）？**
 
-前提三条：① 车间 ToB 项目**文档量小**（数千文档 / 数十万 chunk 以内，远未到任何向量库瓶颈）；② 工艺路线类查询**强制带 `route_version`**，版本过滤退化成单字段等值，ChromaDB 的 `where` 能做且能 pre-filter；③ **求开发简**--ChromaDB 嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 集成最成熟、少装一套 PG+pgvector+asyncpg+Alembic PG 方言。
+前提三条：① 车间 ToB 项目**文档量小**（数千文档 / 数十万 chunk 以内，远未到任何向量库瓶颈）；② 工艺路线类查询**强制带版本锚点（`version`+`version_kind`）**，版本过滤退化成单字段等值，ChromaDB 的 `where` 能做且能 pre-filter；③ **求开发简**--ChromaDB 嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 集成最成熟、少装一套 PG+pgvector+asyncpg+Alembic PG 方言。
 
 核心设计**chunk 不可变**绕开 ChromaDB 最大弱点（多记录翻转无事务）：
-- chunk 写入后不再修改，metadata 固定带 `route_version`/`state`/`tenant_scope`/`doc_id`/`doc_type`/`chunk_seq`/`locator`；
-- 工艺升版时**不翻转老 chunk 状态**，而是追加新版本 chunk；查询带 `where={"state":"PUBLISHED","route_version":rv}` 天然只召回对应版本；
+- chunk 写入后不再修改，metadata 固定带 `version_kind`/`version_ref_id`/`version`/`state`/`tenant_scope`/`doc_id`/`doc_type`/`chunk_seq`/`locator`；
+- 工艺升版时**不翻转老 chunk 状态**，而是追加新版本 chunk；查询带 `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 天然只召回对应版本；
 - ChromaDB 里根本没有"批量翻转"这个操作，多记录事务弱点直接消失；这本身也符合 B 详细设计 §4.4"版本即不可变快照、旧版不删可回溯"的语义。
 
 代价（已知接受）：
@@ -95,12 +95,12 @@
 对比 PGVector / Milvus / Qdrant：在"文档少 + 强制带版本 + 求简"前提下，ChromaDB 的简大于其弱；PGVector 的 SQL 过滤 / 同库事务优势在本场景（等值版本过滤 + chunk 不可变）不再决定性。若未来文档量 / QPS 上到专用向量库甜区，LlamaIndex `VectorStoreIndex` 抽象兜住切换成本，但版本过滤逻辑要从 ChromaDB `where` 改写为各库标量过滤 API。
 
 > **必须守的红线（用 ChromaDB 也守）**：
-> 1. **强制带版本**：`DocumentRetrievalService` 入口校验 `route_version` 必填（工艺绑定型），缺失拒绝，不退回"查最新 ACTIVE"--避开"在制品不切换工艺"语义陷阱（工单绑 v3，最新 ACTIVE 是 v4，退回查 v4 会答出不适用 SOP）。设备绑定型按 `asset_id` 过滤，通用知识型不带版本。
+> 1. **强制带版本**：`DocumentRetrievalService` 入口校验版本锚点必填（工艺绑定型需 ROUTE 锚点 `version`+`version_kind="route"`），缺失拒绝，不退回"查最新 ACTIVE"--避开"在制品不切换工艺"语义陷阱（工单绑 v3，最新 ACTIVE 是 v4，退回查 v4 会答出不适用 SOP）。设备绑定型需 ASSET 锚点（`version_ref_id` 必填，`version` 可选），通用知识型可选（标准可带 STANDARD 锚点）。版本锚点统一为 `VersionAnchor(kind, ref_id, version)`，覆盖 route/bom/rule/asset/standard。
 > 2. **chunk 不可变**：升版 = 追加新版本 chunk，不改老 chunk。
 > 3. **单条软删可接受**：文档撤回 / 废弃是单条 upsert 改 `state=DEPRECATED`（ChromaDB 单条原子），区别于"批量翻转"（不行）。
 > 4. **备份兜底**：MinIO 留原始文件，ChromaDB 可重建。
 > 5. **聚合导出 MySQL**：治理 / 审计聚合在 MySQL 做。
-> 6. **重索引幂等**：`event_id` + `(doc_id, route_version, chunk_seq)` 去重，可重跑。
+> 6. **重索引幂等**：`event_id` + `(doc_id, version_id, chunk_seq)` 去重，可重跑。
 
 **为什么 LangGraph 仅 E 用、A/B 不用？**
 A 是"事件投影建图 + Cypher 检索 + LLM 单轮综合"，无开放规划；B 是"向量检索 + rerank + LLM 单轮综合"，步骤固定。两者用 async 函数编排 + 策略模式更简洁。E 是"意图路由 + 工具选择 + 轻量多步组合"，存在开放分支，用 LangGraph `StateGraph`，`recursion_limit=6` 作硬上限靠框架兜底。与 agent-service L1/L3 同构、L2 不用 LangGraph 的取舍一致（见 [整体技术选型与模块划分](../整体技术选型与模块划分.md) §2.2）。
@@ -427,9 +427,9 @@ class Container:
 
 | 组件 | 职责 |
 |------|------|
-| `version_contract` | `route_version`/`bom_version`/`rule_version` 三类版本锚点定义；`ProcessRouteActivated` 驱动的版本失效事件 -> A 重投图 / B 重索引的统一入口 |
+| `version_contract` | `VersionAnchor(kind, ref_id, version)` 统一版本锚点（route/bom/rule/asset/standard）定义；`ProcessRouteActivated` 驱动的版本失效事件 -> A 重投图 / B 重索引的统一入口 |
 
-> 版本一致性三段传递链（核心安全契约）：图 `SNAPSHOT_OF_ROUTE{route_version}` -> L1 `evidence.route_version` -> L2 `Draft.route_version` -> MES 应用服务校验 ACTIVE。rag-service 侧负责第一段（图用快照边物理锁定版本）+ 发布 `rag.reindex.request` 内部事件通知 B（§8.1）。B 侧 chunk 不可变，版本隔离靠查询带 `route_version` 过滤。
+> 版本一致性三段传递链（核心安全契约）：图 `SNAPSHOT_OF_{kind}{version}`（MVP 锁 route）-> L1 `evidence.version_anchor` -> L2 `Draft.version_anchor` -> MES 应用服务校验 ACTIVE。rag-service 侧负责第一段（图用快照边物理锁定版本）+ 发布 `rag.reindex.request` 内部事件通知 B（§8.1）。B 侧 chunk 不可变，版本隔离靠查询带版本锚点过滤。
 
 ---
 
@@ -578,7 +578,7 @@ class ChromaCollectionInitializer:
         return client.get_or_create_collection(
             name="doc_chunks",
             metadata={"hnsw:space": "cosine"},
-            # metadata 字段：route_version/state/tenant_scope/doc_id/doc_type/chunk_seq/locator
+            # metadata 字段：version_kind/version_ref_id/version/state/tenant_scope/doc_id/doc_type/chunk_seq/locator
         )
 ```
 
@@ -639,7 +639,7 @@ class ChromaCollectionInitializer:
 | 1 | A/B/E 三份实现方案 §8（包结构） | 包结构从"独立服务根"（`rag_service/`/`rag_doc_service/`/`agent_gateway_service/`）投影到 `app/routes/<route>/`；补一句"包结构投影到 rag-service 整体结构设计 §2/§11，`llm_factory`/`embedding`/`obs`/`config`/`kafka` 基类见 §3" | 整体结构设计 §11 |
 | 2 | E 实现方案 §2.1 + E 详细设计 §2 | LangGraph 版本统一回填为 **≥0.2**（解决 0.1+ vs ≥0.2 漂移） | 本文 §1.2 |
 | 3 | **B 详细设计 §4.3 + B 实现方案 §4.3/§5.4/§9.2** | 工艺绑定型文档（SOP/检验标准）审核流从"独立人工审核（DRAFT->SUBMITTED->PUBLISHED + PENDING_REBIND）"改为"**联动 PUBLISHED**"：`ProcessRouteActivated` 直接置 PUBLISHED，去掉 SUBMITTED 人工确认中间态与 PENDING_REBIND；责任归工艺 owner | 决策 #3 |
-| 4 | B 实现方案（`DocumentBinding` schema） | 预留 `rule_id`+`rule_version` 双轨字段，订阅 `quality.gate.lifecycle`；MVP 按 `route_version`，评测后切换 | 决策 #2 |
+| 4 | B 实现方案（`DocumentBinding` schema） | `VersionAnchor` 统一覆盖 route/bom/rule/asset/standard，MVP 工艺绑定型按 ROUTE 锚点，评测后可切 RULE 锚点 | 决策 #2 |
 | 5 | E 实现方案 §4.3 / §10.2 | E 委托 L1 的 `traceparent` 透传：注明 L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求 | 决策 #1 |
 | 6 | E 实现方案 §6/§7（Port 调用） | E 调 A/B 走 InProcess Adapter（直调 application service），不走本机 REST | 决策 #4 |
 | 7 | **B 详细设计 §2.3/§4.2/§5.3/§6.2 + B 实现方案 §2.3/§2.5/§4.2/§5.3/§5.4/§6.2/§9.9** | 向量库 PGVector -> **ChromaDB**：chunk 不可变 + 强制带版本 + 删除 sync_chunk_state 批量翻转 + 检索改 ChromaDB `where` + 依赖/DDL/compose 改 ChromaDB（详见 B 文档已由专项修订完成） | 本文 §1.2 |
@@ -671,7 +671,7 @@ class ChromaCollectionInitializer:
 
 - **交付物**：`shared/`（ai/embedding/obs/config/kafka/acl/persistence/tenant/web/events）骨架 + `main.py`/lifespan/健康检查/DI 容器；B 路线投影到 `routes/document/`（含 ChromaDB 嵌入式 collection、chunk 不可变、强制带版本、决策 #3 联动 PUBLISHED、决策 #2 双轨字段）；Alembic 管 `rag_shared`/`rag_doc`（MySQL）；`/rag/docs/{query,search,ingest}` 端点；`ReadOnlyIngestionGate` + `ReadOnlyAclGate` 启动断言；MinIO 原始文件 + ChromaDB Parquet 备份。
 - **依赖**：MinIO、MySQL、Redis、Kafka、bge-inference 就绪；B 实现方案 §11 阶段一交付物。
-- **退出标准**：B 评测集（`mes_eval/infrastructure/targets/doc_rag.py`）通过；版本过滤（`route_version` 强制带）金标准用例全绿；`/ready` 报 ChromaDB/MySQL/Redis/Kafka 全通；只读断言在启动期生效；ChromaDB 从 MinIO 重建演练通过。
+- **退出标准**：B 评测集（`mes_eval/infrastructure/targets/doc_rag.py`）通过；版本锚点过滤（`version`+`version_kind` 强制带）金标准用例全绿；`/ready` 报 ChromaDB/MySQL/Redis/Kafka 全通；只读断言在启动期生效；ChromaDB 从 MinIO 重建演练通过。
 
 ### 7.3 阶段二：A 追溯型
 
@@ -698,7 +698,7 @@ class ChromaCollectionInitializer:
 
 | 调用方 -> 被调方 | Port | 单服务内路径 | 说明 |
 |-----------------|------|------------|------|
-| A -> B | `DocRagPort` | `TraceRetrievalService` -> `InProcessDocRagAdapter` -> `DocumentRetrievalService` | A 的 `suggested_action` 拉 SOP 片段，带 `route_version_filter` |
+| A -> B | `DocRagPort` | `TraceRetrievalService` -> `InProcessDocRagAdapter` -> `DocumentRetrievalService` | A 的 `suggested_action` 拉 SOP 片段，带 `version_anchor` |
 | A -> B（事件） | `rag.reindex.request` | A 发布 -> B 的 `ReindexCoordinator` 消费 | 工艺升版触发 B 重索引 |
 | E -> A/B | `TraceRagPort`/`DocRagPort` | `GatewayService` -> InProcess Adapter -> 各路线 service | E 不自己多步推理，`recursion_limit=6` |
 
@@ -710,7 +710,7 @@ class ChromaCollectionInitializer:
 |--------|------|------|
 | L1 调图 | Agent -> rag-service (A) | `query_traceability_graph` 工具封装 `POST /rag/trace/query`，注册在 L1 ToolRegistry 首位 |
 | L2 回查图 | Agent -> rag-service (A) | `fetch_subgraph_nodes(subgraph_ref)` -> `POST /rag/trace/expand` |
-| L1/L2 调文档 | Agent -> rag-service (B) | `search_docs(query, route_version_filter)` -> `POST /rag/docs/query` |
+| L1/L2 调文档 | Agent -> rag-service (B) | `search_docs(query, version_anchor)` -> `POST /rag/docs/query` |
 | E 委托 L1/L2 | rag-service (E) -> agent-service | `POST /agent/diagnose`（60s）、`POST /agent/draft`（30s），透传 `traceparent` |
 
 > **traceparent 全链路**：E 委托 L1 时手动注入 `traceparent`；L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求，接收 incoming `traceparent` 并续接 trace，出站 httpx instrumentation 自动透传到 A/B/MES。rag-service 侧 `shared/acl/base_client.py` 出站自动注入 `traceparent`。
@@ -718,19 +718,19 @@ class ChromaCollectionInitializer:
 ### 8.3 与 MES 的集成（只读）
 
 - **Kafka 只读事件**：`GraphProjector`(A) / `ReindexCoordinator`(B) 订阅各上下文 Outbox 事件，幂等消费（`event_id`）+ 位点落 MySQL。
-- **只读 REST 降级**：图投影滞后或需聚合计算时，A 经 `MesClients` 调各上下文只读 REST 补齐；B 检索时若调用方仅有 `route_id` 无 `route_version`，经 ACL 查该 route 当前 ACTIVE 版本带入（仅"查当前生效"场景，历史回溯必须带具体版本）。
+- **只读 REST 降级**：图投影滞后或需聚合计算时，A 经 `MesClients` 调各上下文只读 REST 补齐；B 检索时若调用方仅有 `route_id` 无版本号，经 ACL 查该 route 当前 ACTIVE 版本带入（仅"查当前生效"场景，历史回溯必须带具体版本锚点）。
 - **单向只读**：rag-service 从不回写 MES；图库/向量库崩返回 503 不阻塞生产。
 
 ### 8.4 subgraph_ref 与版本一致性传递链
 
 ```
-图 SNAPSHOT_OF_ROUTE{route_version}（A，物理锁定版本）
-  -> L1 evidence.route_version（透传）
-  -> L2 Draft.route_version（锁定）
+图 SNAPSHOT_OF_{kind}{version}（A，物理锁定版本；MVP 锁 route）
+  -> L1 evidence.version_anchor（透传）
+  -> L2 Draft.version_anchor（锁定）
   -> MES 应用服务校验 ACTIVE（最后一道）
 ```
 
-rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版发 `rag.reindex.request` 通知 B 重索引；B chunk 不可变，查询带 `route_version` 过滤（决策 #2，MVP 按 `route_version`，评测后切 `rule_version`）。
+rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版发 `rag.reindex.request` 通知 B 重索引；B chunk 不可变，查询带版本锚点过滤（`version_kind`+`version`[+`version_ref_id`]）。版本锚点统一为 `VersionAnchor(kind, ref_id, version)`，覆盖 route/bom/rule/asset/standard（决策 #2，MVP 工艺绑定型按 route，评测后可切 rule）。
 
 ---
 
@@ -765,7 +765,7 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 - **存储故障域隔离**：Neo4j/ChromaDB/MySQL/Redis 任一不可用，对应路线降级（返回 503），不拖垮其他路线（§3.3）。
 - **ChromaDB 重建兜底**：ChromaDB 数据丢失/损坏时，从 MinIO 原始文件 + chunk 策略 + 事件回放重建向量库（chunk 不可变使重建幂等）。
 - **低置信转人工**：与 MES 防错理念一致--宁可拦下让人判，不可错放。LLM 综合低置信度时返回"建议转人工/转规则引擎"，不硬答。
-- **版本失效保护**：检索强制带 `route_version` 过滤（入口校验），物理杜绝失效工艺泄漏（安全红线，评测 CI 硬门禁）。
+- **版本失效保护**：检索强制带版本锚点（`version`+`version_kind`） 过滤（入口校验），物理杜绝失效工艺泄漏（安全红线，评测 CI 硬门禁）。
 
 ---
 
@@ -790,17 +790,17 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 
 - **对外端点契约**：`/rag/trace/query`、`/rag/docs/query`、`/agent/chat` 的 schema 与 agent-service L1/L2 工具封装（`query_traceability_graph`/`search_docs`/`fetch_subgraph_nodes`）对齐。
 - **traceparent 契约**：E 委托 L1 的 header 注入、L1 续接 trace 的端到端断言。
-- **强制带版本契约**：B 检索入口 `route_version` 缺失时拒绝（工艺绑定型），断言不退回"查最新"。
+- **强制带版本契约**：B 检索入口版本锚点（`version`+`version_kind`）缺失时拒绝（工艺绑定型），断言不退回"查最新"。
 
 ### 10.4 评测接入（mes-eval）
 
 | 被测对象 | 适配器 | 评测入口 | 断言 |
 |---------|--------|---------|------|
 | A 追溯型 | `traceability_rag.py` | `POST /rag/trace/query` | 5M1E 召回 + 证据回溯 + 版本锚点 |
-| B 文档型 | `doc_rag.py` | `POST /rag/docs/query` | 忠实度/答案相关性 + 版本过滤（强制带 `route_version`） |
+| B 文档型 | `doc_rag.py` | `POST /rag/docs/query` | 忠实度/答案相关性 + 版本过滤（强制带版本锚点（`version`+`version_kind`）） |
 | E Agentic | `agentic_rag.py` | `POST /agent/chat` | 路由准确率 + 工具链正确性 |
 
-> 版本锚定贯穿评测全程：每条金标准用例钉死 `route_version`/`bom_version`/`rule_version`，`VersionAnchorChecker` 强制比对。安全红线（失效工艺泄漏/写越界/租户越权/PII/实体幻觉/证据空）任一非 0 阻断 CI。
+> 版本锚定贯穿评测全程：每条金标准用例钉死版本锚点（`version_kind`+`version`+`version_ref_id`），`VersionAnchorChecker` 强制比对。安全红线（失效工艺泄漏/写越界/租户越权/PII/实体幻觉/证据空）任一非 0 阻断 CI。
 
 ---
 
@@ -818,7 +818,7 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 | 8 | 决策 #3 联动 PUBLISHED 误发未审文档 | 未审 SOP 随工艺生效 | 责任归工艺 owner（工艺 owner 即文档 owner）；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED | 决策 #3 |
 | 9 | **ChromaDB 数据丢失/损坏（无 PITR）** | B 检索不可用 | MinIO 原始文件 + chunk 策略 + 事件回放重建（chunk 不可变使重建幂等）；Parquet 定期备份 | §1.2 / §9.3 |
 | 10 | **ChromaDB 单写者并发（重索引阻塞查询）** | 重索引期间 B 检索超时 | 文档量小、重索引量小可接受；重索引走异步 consumer + 查询侧超时降级 | §1.2 |
-| 11 | **强制带版本被绕过（调用方不带 route_version 退回查最新）** | 答出不适用工艺 SOP | 入口校验拒绝 + 契约测试 + 评测安全红线 | §1.2 / §10.3 |
+| 11 | **强制带版本被绕过（调用方不带版本锚点退回查最新）** | 答出不适用工艺 SOP | 入口校验拒绝 + 契约测试 + 评测安全红线 | §1.2 / §10.3 |
 
 ---
 
@@ -836,7 +836,7 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 - [ ] `TenantContext` 全服务共用，跨服务传递协议在 `shared/tenant/propagation.py` 一处定义
 - [ ] 路线级开关 `rag.<route>.enabled` 控制 router/consumer 启停，灰度顺序 B -> A -> E
 - [ ] 多 DB 故障域隔离：任一 DB 不可用只降级对应路线，不拖垮其他
-- [ ] **B 向量库 ChromaDB：chunk 不可变 + 强制带 `route_version`（入口校验）+ 检索 `where` pre-filter**
+- [ ] **B 向量库 ChromaDB：chunk 不可变 + 强制带版本锚点（`version`+`version_kind`）（入口校验）+ 检索 `where` pre-filter**
 - [ ] **B 备份兜底：MinIO 留原始文件，ChromaDB 可重建（重建演练通过）+ Parquet 定期备份**
 - [ ] traceparent 全链路：E -> L1 -> A/B/MES 同源 `trace_id` 在 Tempo 可见（决策 #1）
 - [ ] 版本一致性三段传递链：图快照边 -> L1 evidence -> L2 Draft -> MES 校验 ACTIVE
@@ -861,13 +861,13 @@ A：不靠自觉，靠启动断言兜底。统一的 `ReadOnly*Gate` 体系在 l
 A：不会。每条存储链路在 `shared/persistence/` 与各路线 `infrastructure/` 间用 Port 隔离，lifespan 启动期做就绪探测，任一不可用按路线降级--Neo4j 崩只让 A 返回 503，ChromaDB 崩只让 B 返回 503，其他路线照常。故障域不扩散是硬约束，不是运维自觉。
 
 **Q：B 文档型为什么选 ChromaDB 而不是 PGVector / Milvus？**
-A：三个前提：车间 ToB 文档量小（数千文档/数十万 chunk 以内）、工艺路线查询强制带 `route_version`（版本过滤退化成等值，ChromaDB 的 `where` 能做且 pre-filter）、求开发简（嵌入式零额外服务、LlamaIndex 集成最成熟、少装一套 PG+pgvector+asyncpg）。核心是 chunk 不可变--写入后不改，工艺升版追加新版本 chunk 而非翻转老 chunk，查询带 `route_version` 天然隔离，直接绕开 ChromaDB 多记录翻转无事务的弱点。代价是 HA/备份弱，用 MinIO 原始文件可重建兜底。PGVector 的 SQL 过滤/同库事务优势在"等值版本过滤 + chunk 不可变"场景下不再决定性，ChromaDB 的简大于其弱。
+A：三个前提：车间 ToB 文档量小（数千文档/数十万 chunk 以内）、工艺路线查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB 的 `where` 能做且 pre-filter）、求开发简（嵌入式零额外服务、LlamaIndex 集成最成熟、少装一套 PG+pgvector+asyncpg）。核心是 chunk 不可变--写入后不改，工艺升版追加新版本 chunk 而非翻转老 chunk，查询带版本锚点天然隔离，直接绕开 ChromaDB 多记录翻转无事务的弱点。代价是 HA/备份弱，用 MinIO 原始文件可重建兜底。PGVector 的 SQL 过滤/同库事务优势在"等值版本过滤 + chunk 不可变"场景下不再决定性，ChromaDB 的简大于其弱。
 
 **Q：ChromaDB 没有事务，工艺升版时老 SOP 状态翻转怎么办？**
-A：不翻转。chunk 不可变--老版本 chunk 的 `route_version` 一直是 v3，写入后不改；工艺升版到 v4 时追加 v4 的新 chunk，查询带 `route_version=v3` 天然只召回 v3、带 v4 只召回 v4。ChromaDB 里根本没有"批量翻转"这个操作，多记录事务弱点直接消失。文档撤回是单条 upsert 改 `state`（单条原子，ChromaDB 能做），区别于"批量翻转"（不做）。
+A：不翻转。chunk 不可变--老版本 chunk 的版本锚点（`version`+`version_kind`）一直是 v3/route，写入后不改；工艺升版到 v4 时追加 v4 的新 chunk，查询带 `version_kind="route"`+`version=v3` 天然只召回 v3、带 v4 只召回 v4。ChromaDB 里根本没有"批量翻转"这个操作，多记录事务弱点直接消失。文档撤回是单条 upsert 改 `state`（单条原子，ChromaDB 能做），区别于"批量翻转"（不做）。
 
 **Q：ChromaDB 数据丢了怎么办？没 PITR。**
-A：可重建兜底。原始文档文件一直在 MinIO，chunk 切分策略是确定性的，重索引事件幂等（`event_id` + `doc_id+route_version+chunk_seq` 去重）--从 MinIO 原始文件 + chunk 策略 + 事件回放就能重建整个向量库。chunk 不可变让重建幂等（不会产生重复 chunk）。再加 Parquet 定期备份。车间文档量小，重建成本可接受。
+A：可重建兜底。原始文档文件一直在 MinIO，chunk 切分策略是确定性的，重索引事件幂等（`event_id` + `doc_id+version+chunk_seq` 去重）--从 MinIO 原始文件 + chunk 策略 + 事件回放就能重建整个向量库。chunk 不可变让重建幂等（不会产生重复 chunk）。再加 Parquet 定期备份。车间文档量小，重建成本可接受。
 
 **Q：迁移期怎么不破坏既有路线文档？**
 A：三路线实现方案现在写成独立服务包结构，是"被取代的旧视角"。我按整体结构设计 §11 的迁移映射逐路线投影（B -> A -> E），每条路线投影后跑该路线评测集回归确认行为不变，并同步修订路线文档（补"投影到 §2/§11"、LangGraph 版本统一、决策 #3 联动 PUBLISHED、B 向量库 ChromaDB 改造）。决策 #3 与 ChromaDB 改造解耦--决策 #3 改 version 层状态机，ChromaDB 改存储层 chunk 不可变，两者独立可并行。
@@ -879,4 +879,4 @@ A：工艺绑定型文档（SOP/检验标准）的生效边界应与工艺路线
 
 ## 14. 一句话定位
 
-"rag-service 用单服务 + 共享内核承载 A/B/E 三路线，技术选型收敛到一张表解决三路线版本漂移；B 向量库选 ChromaDB（车间文档少 + 强制带 `route_version` + chunk 不可变绕开多记录事务弱点 + MinIO 重建兜底），落地按'共享内核先建 -> B -> A -> E 收口'灰度推进；只读红线靠 `ReadOnly*Gate` 启动断言兜底，多 DB 按 Port 隔离故障域，路线间走 Port/Adapter 保留零成本可拆性--把'现在单服务、将来可拆'从口号变成结构属性。"
+"rag-service 用单服务 + 共享内核承载 A/B/E 三路线，技术选型收敛到一张表解决三路线版本漂移；B 向量库选 ChromaDB（车间文档少 + 强制带版本锚点（`version`+`version_kind`） + chunk 不可变绕开多记录事务弱点 + MinIO 重建兜底），落地按'共享内核先建 -> B -> A -> E 收口'灰度推进；只读红线靠 `ReadOnly*Gate` 启动断言兜底，多 DB 按 Port 隔离故障域，路线间走 Port/Adapter 保留零成本可拆性--把'现在单服务、将来可拆'从口号变成结构属性。"

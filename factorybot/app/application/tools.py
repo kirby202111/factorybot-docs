@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from app.domain.tool import ToolDescriptor, ToolRegistry
+from app.domain.version import VersionAnchor
 
 
 # ===========================================================================
@@ -18,7 +19,8 @@ from app.domain.tool import ToolDescriptor, ToolRegistry
 class QueryTraceabilityGraphArgs(BaseModel):
     serial_no: str
     subgraph_ref: str | None = None
-    route_version: str | None = None
+    version: str | None = None              # 锁定具体版本做历史回溯（可选）
+    version_kind: str | None = None         # route|bom|rule
 
 class QueryPassRecordsArgs(BaseModel):
     serial_no: str
@@ -68,7 +70,9 @@ class QueryDefectRateArgs(BaseModel):
 
 class SearchDocsArgs(BaseModel):
     query: str
-    route_version_filter: str | None = None
+    version: str | None = None              # 版本过滤（SOP/工艺文档与版本一致）
+    version_kind: str | None = None         # route|bom|rule|asset|standard
+    version_ref_id: str | None = None       # route_id / asset_id / standard_id ...
 
 
 # ===========================================================================
@@ -148,8 +152,10 @@ def build_l1_tool_registry(acl) -> ToolRegistry:
     reg.register(_ro(
         "query_traceability_graph", "追溯图快路径查询（5M1E 全链路视图）",
         "RAG服务", "l1", QueryTraceabilityGraphArgs,
-        lambda serial_no, subgraph_ref=None, route_version=None, tenant=None, **_:
-            acl.rag.query_traceability_graph(serial_no, tenant, subgraph_ref, route_version),
+        lambda serial_no, subgraph_ref=None, version=None, version_kind=None, tenant=None, **_:
+            acl.rag.query_traceability_graph(
+                serial_no, tenant, subgraph_ref,
+                VersionAnchor.from_flat(version, version_kind)),
         ["rag:read"],
     ))
     reg.register(_ro("query_pass_records", "查过点记录", "过点执行上下文", "l1",
@@ -179,7 +185,12 @@ def build_l1_tool_registry(acl) -> ToolRegistry:
     reg.register(_ro("query_defect_rate", "查不良率", "质量上下文", "l1",
         QueryDefectRateArgs, lambda batch_no=None, work_order_id=None, time_range_start=None, time_range_end=None, tenant=None, **_: acl.quality.query_defect_rate(tenant, batch_no, work_order_id, time_range_start, time_range_end), ["quality:read"]))
     reg.register(_ro("search_docs", "文档型 RAG 检索（SOP/手册/8D）", "RAG服务", "l1",
-        SearchDocsArgs, lambda query, route_version_filter=None, tenant=None, **_: acl.doc_rag.search_docs(query, tenant, route_version_filter), ["doc:read"]))
+        SearchDocsArgs,
+        lambda query, version=None, version_kind=None, version_ref_id=None, tenant=None, **_:
+            acl.doc_rag.search_docs(
+                query, tenant,
+                VersionAnchor.from_flat(version, version_kind, version_ref_id)),
+        ["doc:read"]))
     return reg
 
 

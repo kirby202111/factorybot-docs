@@ -2,7 +2,7 @@
 
 零 docker / 零外部基础设施（无 Neo4j/MySQL/Redis/Kafka）：
 - 子图：FakeGraphRetriever 按 seed 返回 data/trace/scenarios.json 的 mock TraceSubgraph
-        （与领域模型同构）；route_version 从 Method 维度 RouteVersion 快照节点取（非当前 ACTIVE）。
+        （与领域模型同构）；version 从 Method 维度 RouteVersion 快照节点取（非当前 ACTIVE）。
 - LLM：真实 DeepSeek（llm_factory 走 .env 的 RAG_LLM__* 密钥），替换测试桩 StubTraceLLM。
         服务层 _synthesize 直接 json.loads(result.content)，真实 LLM 常带 ```json``` 围栏会
         撑爆解析 -> 用 JsonLlm wrapper 强化 prompt + 清洗 .content，不改动服务契约。
@@ -165,8 +165,8 @@ def _print_scenario(idx: int, scenario: dict[str, Any], answer: TraceAnswer) -> 
     print(f"\n{'=' * 72}")
     print(f"[{idx}] SN={seed_val}  缺陷={exp['defect_code']} {exp['defect_name']}")
     print(f"    seed={scenario['seed']['kind']}:{seed_val}  "
-          f"locked route_version={answer.route_version}  (期望 {exp['route_version_locked']}) "
-          f"{'✅' if answer.route_version == exp['route_version_locked'] else '❌'}")
+          f"locked version={answer.version} ({answer.version_kind})  (期望 {exp['version_locked']}) "
+          f"{'✅' if answer.version == exp['version_locked'] else '❌'}")
     print(f"    subgraph_ref={answer.subgraph_ref}")
     print(f"    summary: {answer.summary}")
     print(f"    confidence={answer.confidence}  needs_human_review={answer.needs_human_review}")

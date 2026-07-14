@@ -12,6 +12,7 @@ from typing import Any
 from app.routes.document.domain.answer import ChunkHit
 from app.routes.document.infrastructure.bm25.bm25_index import Bm25Index
 from app.routes.document.infrastructure.chunk_filter import ChunkFilter
+from app.shared.events.version_contract import VersionAnchor
 from app.shared.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
@@ -28,15 +29,13 @@ class Bm25Retriever:
         *,
         query: str,
         tenant: TenantContext,
-        route_version: str | None = None,
-        asset_id: str | None = None,
+        version_anchor: VersionAnchor | None = None,
         doc_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list[ChunkHit]:
         chunk_filter = ChunkFilter(
             tenant=tenant,
-            route_version=route_version,
-            asset_id=asset_id,
+            version_anchor=version_anchor,
             doc_types=tuple(doc_types) if doc_types else (),
         )
         started = time.perf_counter()
@@ -58,7 +57,9 @@ class Bm25Retriever:
             text=chunk.text,
             locator=chunk.locator.model_dump(mode="json"),
             section_type=chunk.section_type,
-            route_version=chunk.route_version,
+            version_kind=chunk.version_kind,
+            version_ref_id=chunk.version_ref_id,
+            version=chunk.version,
             state=chunk.state,
             score=float(score),
         )

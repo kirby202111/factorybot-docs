@@ -1,7 +1,7 @@
 """L1 诊断端到端：mock LLM 驱动 ReAct -> 5M1E 报告。
 
 期望：query_traceability_graph -> query_pass_records -> DiagnosisReport，
-subgraph_ref=SUB-A1, route_version=v4, 假设 evidence 非空。
+subgraph_ref=SUB-A1, version=v4 (route), 假设 evidence 非空。
 """
 import pytest
 
@@ -16,7 +16,9 @@ async def test_l1_diagnosis_produces_5m1e_report():
         "单件 SN-2026-001234 焊接不良根因", tenant, serial_no="SN-2026-001234",
     )
     assert report.subgraph_ref == "SUB-A1"
-    assert report.route_version == "v4"
+    assert report.version == "v4"
+    assert report.version_kind == "route"
+    assert report.version_ref_id == "RR-B"
     assert len(report.hypotheses) >= 1
     # 每条假设必须引用证据（红线：不得编造）
     assert all(h.evidence for h in report.hypotheses)

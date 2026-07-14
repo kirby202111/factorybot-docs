@@ -2,7 +2,9 @@
   "SN-2026-001234": {
     "serial_no": "SN-2026-001234",
     "subgraph_ref": "SUB-A1",
-    "route_version": "v4",
+    "version": "v4",
+    "version_kind": "route",
+    "version_ref_id": "RR-B",
     "nodes": [
       {"id": "n1", "label": "WipUnit", "properties": {"sn": "SN-2026-001234", "status": "BLOCKED"}, "source_event_id": "evt-1"},
       {"id": "n2", "label": "WorkOrder", "properties": {"work_order_id": "WO-2026-0701", "product_id": "P-100"}, "source_event_id": "evt-2"},
@@ -28,7 +30,9 @@
   "_default": {
     "serial_no": "SN-DEFAULT",
     "subgraph_ref": "SUB-DEFAULT",
-    "route_version": "v4",
+    "version": "v4",
+    "version_kind": "route",
+    "version_ref_id": "RR-B",
     "nodes": [
       {"id": "d1", "label": "WipUnit", "properties": {"sn": "SN-DEFAULT", "status": "IN_PROGRESS"}, "source_event_id": "evt-d1"},
       {"id": "d2", "label": "WorkOrder", "properties": {"work_order_id": "WO-2026-0701", "product_id": "P-100"}, "source_event_id": "evt-d2"},

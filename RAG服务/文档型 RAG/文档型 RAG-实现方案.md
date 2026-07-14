@@ -20,11 +20,11 @@
 
 | 文档类型 | 类别 | MVP 绑定 | 版本治理 |
 |---------|------|---------|---------|
-| **SOP / 作业指导书** | 工艺绑定型 | `route_id` + `route_version` | 订阅 `ProcessRouteActivated` 重索引 |
+| **SOP / 作业指导书** | 工艺绑定型 | 版本锚点（`version_kind`="route", `version_ref_id`=route_id, `version`=route_version） | 订阅 `ProcessRouteActivated` 重索引 |
 | **设备维修手册** | 设备绑定型 | `asset_id` / 设备型号 | 按文档自身版本管理 |
-| **检验标准** | 工艺绑定型 | `rule_id` + `rule_version`（MVP 先按 `route_version` 归属） | 订阅 `ProcessRouteActivated` 重索引 |
+| **检验标准** | 工艺绑定型 | 版本锚点（MVP 先按 `version_kind`="route" 归属，评测后可切 `version_kind`="rule"） | 订阅 `ProcessRouteActivated` 重索引 |
 
-> 🔴 **检验标准的绑定维度**：检验标准理论上绑定 `QualityGateRuleActivated` 的 `rule_version`，但 MVP 阶段检验标准常随工艺路线版本一起发布，先按 `route_version` 归属简化。是否需要独立 `rule_version` 绑定 + 订阅 `quality.gate.lifecycle`，待 MVP 评测后确认。
+> 🔴 **检验标准的绑定维度**：检验标准理论上绑定 `QualityGateRuleActivated` 的 `rule_version`，但 MVP 阶段检验标准常随工艺路线版本一起发布，先按 `version_kind`="route" 归属简化。是否需要独立 `version_kind`="rule" 绑定 + 订阅 `quality.gate.lifecycle`，待 MVP 评测后确认。
 
 ### 1.2 硬边界（一开口就要讲）
 
@@ -32,7 +32,7 @@
 |------|------|----------------------|
 | **只读 MES** | 文档库归 RAG 自有；对 MES 只读 | 向量 + metadata 存 ChromaDB（RAG 自有）；订阅 `process.*` 只读事件；降级查询只读 REST；`ReadOnlyIngestionGate` 启动断言禁止写 MES（§9.6） |
 | **不进过点主事务** | 摄入 / 重索引异步消费事件 | 过点 P99 ≤200ms（[领域总览.md](../../领域模型/领域总览.md) §4.1）不受影响；文档检索容忍秒级 |
-| **版本一致性** | 检索 SOP 必须带版本过滤 | 文档版本绑定 `route_version`；订阅 `ProcessRouteActivated` 触发重索引；检索 ChromaDB `where={"state":"PUBLISHED","route_version":rv}` 过滤（§6.2） |
+| **版本一致性** | 检索 SOP 必须带版本过滤 | 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）；订阅 `ProcessRouteActivated` 触发重索引；检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 过滤（§6.2） |
 | **权限隔离** | 检索前按车间 / 产线过滤 | ChromaDB metadata 带 `tenant_scope`，`where` 前置过滤 |
 | **可观测兜底** | 答案带引用 + 置信度，低置信度转人工 | `DocAnswer` 强制引用 `chunk_id` + `locator`；`confidence < 0.6` 转人工 |
 | **DEPRECATED 不泄漏** | 失效文档不得召回 | 检索 ChromaDB `where={"state":"PUBLISHED"}` 强制过滤；`rag_doc_deprecated_leak_total` 应为 0，告警兜底（§9.7） |
@@ -40,7 +40,7 @@
 ### 1.3 与详细设计、追溯型 RAG、L1 Agent 的关系
 
 - **与详细设计**：详细设计给全文档类型全景建模与版本治理设计；本文把其中三类文档的摄入管线、重索引消费者、检索 ChromaDB query、ACL 契约补全到可落地代码，并新增实现层内容（依赖、collection 初始化、Docker、测试）。两者互补--详细设计是"地图"，本文是"起步城区施工图"。
-- **与追溯型 RAG**（[追溯型 RAG-实现方案.md](../追溯型 RAG/追溯型 RAG-实现方案.md)）：共享同一套版本契约（`ProcessRouteActivated` 驱动）。追溯型把版本做成 Neo4j 图节点 + `SNAPSHOT_OF_ROUTE` 边；本文把版本做成 ChromaDB metadata 过滤维度（`route_version`）。追溯型 §5.4 发布内部 `rag.reindex.request` 事件，本文接收并处理（§5.3）。
+- **与追溯型 RAG**（[追溯型 RAG-实现方案.md](../追溯型 RAG/追溯型 RAG-实现方案.md)）：共享同一套版本契约（`ProcessRouteActivated` 驱动）。追溯型把版本做成 Neo4j 图节点 + `SNAPSHOT_OF_ROUTE` 边；本文把版本做成 ChromaDB metadata 过滤维度（`version_kind`+`version`+`version_ref_id`）。追溯型 §5.4 发布内部 `rag.reindex.request` 事件，本文接收并处理（§5.3）。
 - **与 L1 诊断型 Agent**（[L1诊断型Agent-实现方案.md](../../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)）：L1 的 `search_docs` 工具封装本文 `POST /rag/docs/query`（§9.8）。
 
 ### 1.4 与 Java 技术栈的关系
@@ -83,11 +83,11 @@
 
 ### 2.3 为什么选 ChromaDB（而非 PGVector / Milvus / Qdrant）
 
-车间 ToB 文档量小（数千文档 / 数十万 chunk）+ 查询强制带 `route_version`（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter）+ 求开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点。
+车间 ToB 文档量小（数千文档 / 数十万 chunk）+ 查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter）+ 求开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点。
 
 - **嵌入式零运维**：ChromaDB persistent client 以 Parquet 持久化，跟随 rag-service 进程，无需独立 DB service。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service。
-- **chunk 不可变**：chunk 写入 ChromaDB 后不再修改（metadata 固定带 `route_version` / `state` / `tenant_scope` / `doc_type` / `chunk_seq` / `locator`）。工艺升版时不翻转老 chunk，而是追加新版本 chunk。版本隔离靠查询过滤 `where={"state":"PUBLISHED","route_version":rv}`，老 chunk 保留 PUBLISHED+老 route_version 靠 route_version 隔离。
-- **强制带版本**：`DocumentRetrievalService.query` 入口校验 `route_version` 必填（工艺绑定型），缺失拒绝，不退回"查最新 ACTIVE"。理由：避开"在制品不切换工艺"语义陷阱。
+- **chunk 不可变**：chunk 写入 ChromaDB 后不再修改（metadata 固定带 `version_kind` / `version_ref_id` / `version` / `state` / `tenant_scope` / `doc_type` / `chunk_seq` / `locator`）。工艺升版时不翻转老 chunk，而是追加新版本 chunk。版本隔离靠查询过滤 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`，老 chunk 保留 PUBLISHED + 老版本锚点，靠 version_kind+version 隔离。
+- **强制带版本**：`DocumentRetrievalService.query` 入口校验 版本锚点必填（`version`+`version_kind`）（工艺绑定型），缺失拒绝，不退回"查最新 ACTIVE"。理由：避开"在制品不切换工艺"语义陷阱。
 - **代价可接受**：HA/备份弱（MinIO 重建兜底）、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。
 
 ### 2.4 部署形态（车间网隔离）
@@ -181,9 +181,9 @@ dependencies = [
 ### 3.1 关键设计决策
 
 - **ChromaDB 嵌入式 + MySQL 治理**：向量存 ChromaDB（嵌入式 persistent client，Parquet 持久化），幂等 / 位点 / 文档元数据存 MySQL；chunk 写入 ChromaDB 后不可变，没有"状态翻转"的一致性问题--比追溯型（Neo4j + MySQL 跨库非分布式）更简单可靠。
-- **chunk metadata 即过滤字段**：`state` / `tenant_scope` / `doc_type` / `route_version` / `asset_id` / `chunk_seq` / `locator` 写入 ChromaDB metadata，检索 `where` 直接在 collection 上 pre-filter，无需 join。chunk 不可变，metadata 写入后不再修改（§5.3 已删除）。
+- **chunk metadata 即过滤字段**：`state` / `tenant_scope` / `doc_type` / `version_kind` / `version_ref_id` / `version` / `chunk_seq` / `locator` 写入 ChromaDB metadata，检索 `where` 直接在 collection 上 pre-filter，无需 join。chunk 不可变，metadata 写入后不再修改（§5.3 已删除）。
 - **摄入与检索分离**：`DocumentIngestionService`（写）与 `VectorRetriever`（读）解耦，摄入滞后不阻塞检索--未 `PUBLISHED` 的新版本天然不召回。
-- **版本治理三道闸**：① 摄入闸（版本绑定 + 状态机）；② 重索引闸（`ProcessRouteActivated` 驱动 `document_version` 状态流转）；③ 检索闸（ChromaDB `where={"state":"PUBLISHED","route_version":rv}` pre-filter）。
+- **版本治理三道闸**：① 摄入闸（版本绑定 + 状态机）；② 重索引闸（`ProcessRouteActivated` 驱动 `document_version` 状态流转）；③ 检索闸（ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` pre-filter）。
 - **ACL 防腐层**：降级查询各上下文只读 REST（查文档绑定关系）经 ACL 适配，外部 DTO -> 内部视图，符合 CLAUDE.md ACL 约束。
 
 ---
@@ -200,10 +200,10 @@ KnowledgeDocument（聚合根）
        ├─ bindings: list[DocumentBinding]（值对象，MySQL JSON）
        └─ DocumentChunk（实体）
             ├─ chunk_id, ordinal, text, embedding, section_type, locator
-            └─ metadata: state, tenant_scope, doc_type, route_id, route_version, asset_id（写入时固定，chunk 不可变；字段名与 §4.2 ChromaDB metadata 一致）
+            └─ metadata: state, tenant_scope, doc_type, version_kind, version_ref_id, version（写入时固定，chunk 不可变；字段名与 §4.2 ChromaDB metadata 一致）
 ```
 
-- **`DocumentBinding` 值对象**：`{binding_type: ROUTE_VERSION/ASSET, target_ref, inherited}`，存 `document_version.bindings`（MySQL JSON）。工艺绑定型文档含 `ROUTE_VERSION` 绑定，设备绑定型含 `ASSET` 绑定。
+- **`DocumentBinding` 值对象**：`{binding_type: route/asset, target_ref, inherited}`，存 `document_version.bindings`（MySQL JSON）。工艺绑定型文档含 `ROUTE_VERSION` 绑定，设备绑定型含 `ASSET` 绑定。
 - **chunk metadata**：写入 ChromaDB 时从 version / document 同步到 metadata，供检索 pre-filter。chunk 不可变，写入后不再修改。
 
 ### 4.2 ChromaDB collection 初始化 + MySQL 治理表（MVP 结构）
@@ -229,8 +229,8 @@ def init_collection(persist_dir: str) -> chromadb.Collection:
     return collection
 ```
 
-- ChromaDB metadata 字段（每 chunk 写入时带）：`chunk_id` / `document_id` / `version_id` / `doc_type` / `state` / `route_version` / `tenant_scope` / `asset_id` / `chunk_seq` / `section_type` / `locator` / `text`。
-- **chunk 不可变**：写入后 metadata 不再修改。工艺升版时追加新版本 chunk（带新 `route_version`），不翻转老 chunk。版本隔离靠查询 `where={"state":"PUBLISHED","route_version":rv}`。单条软删（文档撤回）允许 upsert 改 `state=DEPRECATED`，ChromaDB 单条 upsert 可接受。
+- ChromaDB metadata 字段（每 chunk 写入时带）：`chunk_id` / `document_id` / `version_id` / `doc_type` / `state` / `version_kind` / `version_ref_id` / `version` / `tenant_scope` / `chunk_seq` / `section_type` / `locator` / `text`。
+- **chunk 不可变**：写入后 metadata 不再修改。工艺升版时追加新版本 chunk（带新版本锚点），不翻转老 chunk。版本隔离靠查询 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`。单条软删（文档撤回）允许 upsert 改 `state=DEPRECATED`，ChromaDB 单条 upsert 可接受。
 - `distance=cosine`，与 bge-m3 1024 维 embedding 一致。
 
 **MySQL 治理表**（rag_shared schema，幂等/位点/文档元数据）：
@@ -329,7 +329,7 @@ DocumentIngestionService.ingest()
 ```
 
 - **双写持久化**：文档元数据 + 版本写入 MySQL 事务；chunk + 向量批量写入 ChromaDB collection（原子批量 upsert）。chunk 写入后不可变。
-- **metadata 同步**：写入 chunk 时从 version / document 同步 `state` / `tenant_scope` / `doc_type` / `route_version` / `asset_id` 等字段到 ChromaDB metadata，写入后不再修改。
+- **metadata 同步**：写入 chunk 时从 version / document 同步 `state` / `tenant_scope` / `doc_type` / `version_kind` / `version_ref_id` / `version` 等字段到 ChromaDB metadata，写入后不再修改。
 
 ### 5.2 切分策略（按 doc_type）
 
@@ -370,7 +370,7 @@ class ChunkStrategySelector:
 |---------|------|---------|-----------|
 | `ProcessRouteActivated` | `process.route.lifecycle` | `rag-doc-process` | ① 旧 `route_version` 关联文档版本 -> `PENDING_REBIND`（仅更新 `document_version`）；② 发布 `RebindRequired` 通知文档 owner |
 | `ProcessRouteDeprecated` | `process.route.lifecycle` | `rag-doc-process` | 关联文档版本 -> `DEPRECATED`（仅更新 `document_version`），不删 |
-| `rag.reindex.request` | `rag.reindex.*` | `rag-doc-reindex` | 追溯型 RAG 发布的重索引请求，按 `route_id` + `route_version` 重索引关联文档 |
+| `rag.reindex.request` | `rag.reindex.*` | `rag-doc-reindex` | 追溯型 RAG 发布的重索引请求，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档 |
 | `DocumentVersionPublished` | `rag.doc.lifecycle` | `rag-doc-lifecycle` | 新版本 PUBLISHED 时，同类绑定旧版本 -> `DEPRECATED` |
 
 **新版本 PUBLISHED 时旧版本自动 DEPRECATED**（同类绑定唯一 PUBLISHED）：
@@ -393,10 +393,10 @@ async def publish_version(self, version_id: str) -> None:
             """), {"vid": version_id},
         )
         # chunk 不可变，不更新 ChromaDB 中的 chunk metadata。
-        # 旧 chunk 保留 state=PUBLISHED+旧 route_version，靠 route_version 过滤隔离。
+        # 旧 chunk 保留 state=PUBLISHED + 旧版本锚点，靠 version_kind+version 过滤隔离。
 ```
 
-> **版本一致性不是文档型 RAG 自己保证的，是从领域模型兜上来的**--工艺版本有生命周期、变更发 `ProcessRouteActivated`、文档绑定对齐 `route_version`。RAG 只是严格遵循这套契约（[详细设计](./文档型 RAG-详细设计.md) §2.4 / §5.4）。
+> **版本一致性不是文档型 RAG 自己保证的，是从领域模型兜上来的**--工艺版本有生命周期、变更发 `ProcessRouteActivated`、文档绑定对齐版本锚点（`version_kind`+`version`+`version_ref_id`）。RAG 只是严格遵循这套契约（[详细设计](./文档型 RAG-详细设计.md) §2.4 / §5.4）。
 
 ### 5.4 幂等与去重
 
@@ -404,7 +404,7 @@ async def publish_version(self, version_id: str) -> None:
 
 - **重索引幂等**：`event_id + consumer_group` 幂等表（§4.2），重复投递被挡住。
 - **摄入幂等**：`file_content_hash` 唯一约束--同文件重复摄入抛唯一约束冲突，跳过。
-- **chunk 幂等**：`event_id + (doc_id, route_version, chunk_seq)` 在 ChromaDB 侧去重。chunk 不可变让幂等更容易--同一 chunk 重复写入 ChromaDB 时 metadata 完全相同，upsert 自动去重。
+- **chunk 幂等**：`event_id + (doc_id, version, chunk_seq)` 在 ChromaDB 侧去重。chunk 不可变让幂等更容易--同一 chunk 重复写入 ChromaDB 时 metadata 完全相同，upsert 自动去重。
 - **位点上移**：幂等记录与位点更新同 MySQL 事务，"已处理 => 已 ack"。
 
 ---
@@ -414,7 +414,7 @@ async def publish_version(self, version_id: str) -> None:
 ### 6.1 检索入口
 
 ```text
-用户问题 + 上下文{route_version?, asset_id?, station_id?}
+用户问题 + 上下文{version?, version_kind?, version_ref_id?, station_id?}
         │
         ▼
 DocumentRetrievalService.query()
@@ -441,16 +441,18 @@ class VectorRetriever:
 
     async def retrieve(
         self, query: str, tenant: TenantContext,
-        route_version: str | None = None, asset_id: str | None = None,
+        version: str | None = None, version_kind: str | None = None, version_ref_id: str | None = None,
         top_k: int = 20,
     ) -> list[ChunkHit]:
         query_vec = await self._embedder.embed(query)
         # 构建 where 过滤条件
         where = {"state": "PUBLISHED"}          # ① 只检索已发布
-        if route_version:
-            where["route_version"] = route_version  # ② 版本精确过滤
-        if asset_id:
-            where["asset_id"] = asset_id             # ③ 设备过滤
+        if version:
+            where["version_kind"] = version_kind or "route"
+            where["version"] = version  # ② 版本精确过滤（version_kind + version）
+        if version_ref_id:
+            where["version_kind"] = "asset"
+            where["version_ref_id"] = version_ref_id  # ③ 设备过滤
         if tenant.scopes():
             where["tenant_scope"] = {"$in": tenant.scopes()}  # ④ 租户前置过滤
 
@@ -469,9 +471,9 @@ class VectorRetriever:
 ```
 
 - **`state='PUBLISHED'` 前置**：`DEPRECATED` / `PENDING_REBIND` 不进候选，从结构上杜绝失效文档（§1.2 DEPRECATED 不泄漏）。
-- **强制带版本**：`DocumentRetrievalService.query` 入口校验 `route_version` 必填（工艺绑定型），缺失拒绝，不退回"查最新 ACTIVE"（§2.3）。设备绑定型按 `asset_id`，通用知识型不带版本。
+- **强制带版本**：`DocumentRetrievalService.query` 入口校验 版本锚点必填（`version`+`version_kind`）（工艺绑定型），缺失拒绝，不退回"查最新 ACTIVE"（§2.3）。设备绑定型按 `asset_id`，通用知识型不带版本。
 - **租户前置过滤**：`tenant_scope` 用 `$in` 在向量近邻前裁剪。
-- **ChromaDB where pre-filter**：先 metadata 过滤再向量近邻，版本/权限/设备组合过滤全在向量检索前完成。chunk 不可变，查询带 `route_version` 过滤自动隔离不同版本。
+- **ChromaDB where pre-filter**：先 metadata 过滤再向量近邻，版本/权限/设备组合过滤全在向量检索前完成。chunk 不可变，查询带版本锚点过滤自动隔离不同版本。
 
 ### 6.3 Rerank
 
@@ -510,7 +512,8 @@ class DocAnswer(BaseModel):
     answer: str
     citations: list[DocCitation]     # 强制引用，无引用判失败重试
     confidence: float
-    route_version_filter: str | None
+    version: str | None
+    version_kind: str | None = "route"
     disclaimer: str = "本答案来自文档型 RAG，处置需按现行 SOP 确认"
     needs_human_review: bool = False
 ```
@@ -526,31 +529,31 @@ class DocumentRetrievalService:
         self._llm = llm; self._cache = cache
 
     async def query(self, req: DocQuery, tenant: TenantContext) -> DocAnswer:
-        # 0. 强制带版本：工艺绑定型文档 route_version 必填，缺失拒绝
-        if req.doc_category == "PROCESS_BOUND" and not req.route_version:
-            raise ValueError("工艺绑定型文档检索必须指定 route_version，禁止退回'查最新 ACTIVE'")
+        # 0. 强制带版本：工艺绑定型文档版本锚点必填，缺失拒绝
+        if req.doc_category == "PROCESS_BOUND" and not (req.version and req.version_kind):
+            raise ValueError("工艺绑定型文档检索必须指定版本锚点（version+version_kind），禁止退回'查最新 ACTIVE'")
         # 1. 缓存（query + 版本 + 租户命中即用）
-        cached = await self._cache.get(req.question, req.route_version, tenant)
+        cached = await self._cache.get(req.question, req.version, req.version_kind, tenant)
         if cached:
             return cached
         # 2. 向量检索 + 过滤 -> top_k
         chunks = await self._retriever.retrieve(
-            req.question, tenant, req.route_version, req.asset_id, top_k=20
+            req.question, tenant, req.version, req.version_kind, req.version_ref_id, top_k=20
         )
         # 3. Rerank -> top_n
         ranked = await self._reranker.rerank(req.question, chunks, top_n=5)
         # 4. LLM 综合（结构化输出，强制引用）
-        answer = await self._synthesize(req.question, ranked, req.route_version)
+        answer = await self._synthesize(req.question, ranked, req.version, req.version_kind)
         # 5. 置信度兜底
         if answer.confidence < 0.6 or not answer.citations:
             answer.needs_human_review = True
-        await self._cache.set(req.question, req.route_version, tenant, answer)
+        await self._cache.set(req.question, req.version, req.version_kind, tenant, answer)
         return answer
 
     async def _synthesize(
-        self, question: str, chunks: list[ChunkHit], route_version: str | None
+        self, question: str, chunks: list[ChunkHit], version: str | None, version_kind: str | None
     ) -> DocAnswer:
-        prompt = self._build_prompt(question, chunks, route_version)
+        prompt = self._build_prompt(question, chunks, version, version_kind)
         # with_structured_output 强制模型返回 DocAnswer schema
         return await self._llm.with_structured_output(DocAnswer).ainvoke(prompt)
 ```
@@ -779,7 +782,7 @@ class ProcessRouteActivatedHandler:
         """), {"binding": json.dumps([{"binding_type": "ROUTE_VERSION",
                                         "target_ref": {"route_id": route_id}}])})
         # chunk 不可变：不更新 ChromaDB 中的 chunk metadata。
-        # 老 chunk 保留 state=PUBLISHED+老 route_version，靠 route_version 过滤隔离。
+        # 老 chunk 保留 state=PUBLISHED+老 route_version，靠 version_kind+version 过滤隔离。
 
 
 class ProcessRouteDeprecatedHandler:
@@ -895,7 +898,7 @@ async def search(
 ) -> list[ChunkHit]:
     """只检索 chunks 不综合，供 L1 Agent / UI 直接消费引用片段。"""
     return await retriever.retrieve(
-        req.question, tenant, req.route_version, req.asset_id, top_k=req.top_k
+        req.question, tenant, req.version, req.version_kind, req.version_ref_id, top_k=req.top_k
     )
 
 @router.post("/ingest", response_model=IngestResponse)
@@ -1034,7 +1037,7 @@ volumes:
 1. 搭 `rag_doc_service` 骨架（FastAPI + uvicorn），对齐 §8 包结构。
 2. 接 ChromaDB（嵌入式 persistent client，Parquet 持久化），初始化 collection（§4.2）；建 MySQL 治理表。
 3. 实现摄入管线（unstructured 解析 + LlamaIndex 切分 + bge-m3 向量化 + ChromaDB 批量 upsert + MySQL 事务，§9.1），跑通一份 SOP 摄入。
-4. 实现向量检索 + 元数据过滤（§6.2 ChromaDB `collection.query` with `where`），带 `state` + `tenant_scope` + `route_version` 前置过滤。
+4. 实现向量检索 + 元数据过滤（§6.2 ChromaDB `collection.query` with `where`），带 `state` + `tenant_scope` + `version_kind` + `version` 前置过滤。
 5. 实现 LLM 综合（§6.4），`DocAnswer` Pydantic 强约束 + 强制引用 + 置信度阈值。
 6. FastAPI 端点 `/rag/docs/query` / `/rag/docs/search` / `/rag/docs/ingest`（§9.8）。
 
@@ -1043,7 +1046,7 @@ volumes:
 7. 实现文档版本状态机（DRAFT/PUBLISHED/PENDING_REBIND/DEPRECATED/ARCHIVED，§4.3）。
 8. 实现文档与工艺版本绑定（`DocumentBinding` 值对象，含 `inherited`）。
 9. 实现重索引消费者：订阅 `process.route.lifecycle`（`ProcessRouteActivated` / `ProcessRouteDeprecated`），触发 `PENDING_REBIND` / `DEPRECATED` 状态流转（仅更新 `document_version`，chunk 不可变，§9.2）。
-10. 接收追溯型 `rag.reindex.request` 事件，按 `route_id` + `route_version` 重索引关联文档。
+10. 接收追溯型 `rag.reindex.request` 事件，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档。
 11. 实现幂等表 + 位点表 + 手动 ack（§5.4，同 MySQL 事务）。
 12. `ReadOnlyIngestionGate` / `assert_no_raw_data_topic` 启动断言（§9.6）。
 
@@ -1056,15 +1059,15 @@ volumes:
 
 ### 阶段四：ACL 降级、评测与协同对接（1–2 周）
 
-17. 接 ACL 降级查询工艺管理只读 REST（§7），强制 `route_version` 入参。
+17. 接 ACL 降级查询工艺管理只读 REST（§7），强制版本锚点（`version`+`version_kind`）入参。
 18. 沉淀评测集（典型 SOP / 手册 / 检验标准问答 + 预期引用），回归模型 / 提示词 / 切分变更。
-19. 对接追溯型 RAG：`TraceAnswer.suggested_action` 调 `search_docs(query, route_version_filter)`。
+19. 对接追溯型 RAG：`TraceAnswer.suggested_action` 调 `search_docs(query, version_anchor)`。
 20. 对接 L1 Agent：`search_docs` 工具封装 `/rag/docs/query`。
 21. 灰度一条产线（设备维修手册 + SOP + 检验标准），收集工程师 / 操作工反馈。
 
 ### 阶段五：扩展（按需）
 
-22. 扩展 IPC 标准 / 培训资料（通用知识型，按自身版本管理，不绑 route_version）。
+22. 扩展 IPC 标准 / 培训资料（通用知识型，按自身版本管理，不绑工艺版本锚点）。
 23. 🔴 8D 报告案例型检索（若纳入，需独立切分 / 提示词策略，[详细设计](./文档型 RAG-详细设计.md) §4.1）。
 24. 🔴 检验标准独立 `rule_version` 绑定 + 订阅 `quality.gate.lifecycle`（§1.1）。
 25. 🔴 工艺升版时 SOP 内容变更自动比对（替代人工 `PENDING_REBIND` 确认）。
@@ -1075,14 +1078,14 @@ volumes:
 
 - [ ] 向量 + metadata 存 ChromaDB collection；幂等 / 位点 / 文档元数据存 MySQL；摄入写 ChromaDB 批量 upsert + MySQL 事务（§3.1）。
 - [ ] 检索 ChromaDB `where={"state":"PUBLISHED"}` 强制过滤，`DEPRECATED` / `PENDING_REBIND` 不进候选；`rag_doc_deprecated_leak_total` 应为 0（§9.7）。
-- [ ] chunk 写入 ChromaDB 时 metadata 带 `state` / `tenant_scope` / `route_version` / `asset_id` / `chunk_seq` / `locator`，写入后不再修改（chunk 不可变）。
-- [ ] 文档版本绑定 `route_version`；检索强制带版本过滤（工艺绑定型 `route_version` 必填，缺失拒绝）。
+- [ ] chunk 写入 ChromaDB 时 metadata 带 `state` / `tenant_scope` / `version_kind` / `version_ref_id` / `version` / `chunk_seq` / `locator`，写入后不再修改（chunk 不可变）。
+- [ ] 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）；检索强制带版本过滤（工艺绑定型 版本锚点必填（`version`+`version_kind`），缺失拒绝）。
 - [ ] 订阅 `ProcessRouteActivated` / `ProcessRouteDeprecated` 触发 `PENDING_REBIND` / `DEPRECATED` 状态流转（§9.2）。
 - [ ] 接收追溯型 `rag.reindex.request` 事件，与追溯型重索引对齐。
 - [ ] 新版本 PUBLISHED 时同类绑定旧版本自动 DEPRECATED，不删（§5.3）。
 - [ ] 工艺升版关联文档进入 `PENDING_REBIND` 人工确认，不自动 PUBLISHED（🔴 §4.3）。
 - [ ] 租户 `tenant_scope` 在 ChromaDB `where` 前置过滤，权限不达标看不到 chunk。
-- [ ] `event_id + consumer_group` 幂等表（MySQL），`event_id + (doc_id, route_version, chunk_seq)` 去重；重复投递 / 重复摄入不产生重复 chunk。
+- [ ] `event_id + consumer_group` 幂等表（MySQL），`event_id + (doc_id, version, chunk_seq)` 去重；重复投递 / 重复摄入不产生重复 chunk。
 - [ ] 消费者位点落 MySQL，重启从断点续跑，处理事务成功后才 ack offset。
 - [ ] RAG 服务不进过点主事务，文档摄入 / 重索引秒级最终一致，过点 P99 ≤200ms 不受影响。
 - [ ] 检索结果 `DocAnswer` 结构化，citations 强制引用 `chunk_id` + `locator`，无引用判失败重试。
@@ -1097,13 +1100,13 @@ volumes:
 ## 13. 面试防守 Q&A
 
 **Q：文档型 RAG 和通用 RAG 有什么本质区别？**
-A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的 SOP / 作业指导书绑定 `route_version`，工艺有版本生命周期（[领域总览.md](../../领域模型/领域总览.md) §5.1）。检索到已失效 SOP 会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED/PENDING_REBIND）；② 订阅 `ProcessRouteActivated` 触发重索引 / 重新绑定；③ 检索 ChromaDB `where={"state":"PUBLISHED","route_version":rv}` 强制过滤 + chunk 不可变。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](../RAG服务引入路线.md) §5 Q&A）。
+A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的 SOP / 作业指导书绑定版本锚点（`version_kind`+`version`+`version_ref_id`），工艺有版本生命周期（[领域总览.md](../../领域模型/领域总览.md) §5.1）。检索到已失效 SOP 会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED/PENDING_REBIND）；② 订阅 `ProcessRouteActivated` 触发重索引 / 重新绑定；③ 检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 强制过滤 + chunk 不可变。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](../RAG服务引入路线.md) §5 Q&A）。
 
 **Q：为什么选 ChromaDB 而不是 PGVector / Milvus / Qdrant？**
-A：车间 ToB 文档量小（数千文档 / 数十万 chunk），查询强制带 `route_version`（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter），开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点：工艺升版时不翻转老 chunk，而是追加新版本 chunk，版本隔离靠查询 `where={"state":"PUBLISHED","route_version":rv}`。代价：HA/备份弱（MinIO 重建兜底）、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service（§2.3）。
+A：车间 ToB 文档量小（数千文档 / 数十万 chunk），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter），开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点：工艺升版时不翻转老 chunk，而是追加新版本 chunk，版本隔离靠查询 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`。代价：HA/备份弱（MinIO 重建兜底）、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service（§2.3）。
 
 **Q：工艺升版了，SOP 怎么跟着变？**
-A：订阅 `ProcessRouteActivated`，关联文档进入 `PENDING_REBIND` 待确认状态（仅更新 `document_version`，chunk 不可变，检索靠 `route_version` 过滤自动隔离），由文档 owner 人工判断：内容需变则发新版本绑定新 `route_version`；内容不变则继承绑定（`inherited=true`）。**不自动 PUBLISHED**--"SOP 是否需变"不能靠机器假设，宁可让人确认。旧版本 DEPRECATED 不删，历史答案引用仍可点开（§9.2）。
+A：订阅 `ProcessRouteActivated`，关联文档进入 `PENDING_REBIND` 待确认状态（仅更新 `document_version`，chunk 不可变，检索靠 `version_kind`+`version` 过滤自动隔离），由文档 owner 人工判断：内容需变则发新版本绑定新版本锚点；内容不变则继承绑定（`inherited=true`）。**不自动 PUBLISHED**--"SOP 是否需变"不能靠机器假设，宁可让人确认。旧版本 DEPRECATED 不删，历史答案引用仍可点开（§9.2）。
 
 **Q：会不会拖慢过点？**
 A：不会进过点主事务。过点 P99 ≤200ms 是硬约束，文档摄入 / 重索引是异步消费事件，与过点判定完全解耦。文档检索容忍秒级延迟--它是事后 / 旁边问答工具，不是实时过点判定。
@@ -1115,7 +1118,7 @@ A：不重复，互补分工。追溯型是 GraphRAG + 领域事件流，答"这
 A：两道防线。一是系统提示词约束"只能基于提供的 chunks 回答，无相关文档则回答'未找到'"；二是 `DocAnswer` 强制引用 `chunk_id`，无引用的答案 Pydantic 校验失败、判失败重试。每个引用带 `locator`（页码/偏移），工程师能点开原文核对。低置信度转人工，不硬答（§6.4）。
 
 **Q：失效 SOP 会不会被检索到？**
-A：三道闸兜住。① 摄入闸：文档版本有状态机，PUBLISHED 才可检索；② 重索引闸：`ProcessRouteDeprecated` 触发 `document_version` -> DEPRECATED，chunk 不可变但靠 `route_version` 过滤隔离；③ 检索闸：ChromaDB `where={"state":"PUBLISHED"}` 强制过滤，DEPRECATED / PENDING_REBIND 不进候选。还有 `rag_doc_deprecated_leak_total` 指标应为 0，泄漏即告警，双保险（§9.7）。
+A：三道闸兜住。① 摄入闸：文档版本有状态机，PUBLISHED 才可检索；② 重索引闸：`ProcessRouteDeprecated` 触发 `document_version` -> DEPRECATED，chunk 不可变但靠 `version_kind`+`version` 过滤隔离；③ 检索闸：ChromaDB `where={"state":"PUBLISHED"}` 强制过滤，DEPRECATED / PENDING_REBIND 不进候选。还有 `rag_doc_deprecated_leak_total` 指标应为 0，泄漏即告警，双保险（§9.7）。
 
 **Q：文档库错了或漏了怎么办？**
 A：文档库归 RAG 自有，错了不影响 MES 生产--事实源是 MinIO 原始文件 + 领域版本，ChromaDB 不可用返回 503 不阻塞过点。重建靠 MinIO 原始文件 + 事件回放（ChromaDB Parquet 定期备份兜底），无需 MES 配合。所有答案带引用 + 置信度，低置信度转人工，与 MES 防错理念一致。
@@ -1127,4 +1130,4 @@ A：这是设计阶段的引入规划，不是已落地。重点是版本治理�
 
 ## 14. 一句话定位
 
-"文档型 RAG 把车间的 SOP / 手册 / 检验标准做成向量知识库--向量是主体、版本治理是灵魂：文档版本绑定 `route_version`、状态机对齐工艺生命周期、订阅 `ProcessRouteActivated` 驱动重索引、检索 ChromaDB `where={"state":"PUBLISHED","route_version":rv}` pre-filter + chunk 不可变，从结构上杜绝答出已失效 SOP 导致批量不良。选 ChromaDB 嵌入式零额外服务、chunk 不可变绕开多记录翻转无事务弱点、版本过滤退化成等值 where 能做且 pre-filter，与追溯型 RAG 共享同一套版本契约、互补分工--追溯型答'是什么、为什么'，文档型答'怎么办'，全程只读 MES、不进过点主事务，低置信度转人工，让 RAG 从旁边问答变成能进车间的处置知识副驾。"
+"文档型 RAG 把车间的 SOP / 手册 / 检验标准做成向量知识库--向量是主体、版本治理是灵魂：文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）、状态机对齐工艺生命周期、订阅 `ProcessRouteActivated` 驱动重索引、检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` pre-filter + chunk 不可变，从结构上杜绝答出已失效 SOP 导致批量不良。选 ChromaDB 嵌入式零额外服务、chunk 不可变绕开多记录翻转无事务弱点、版本过滤退化成等值 where 能做且 pre-filter，与追溯型 RAG 共享同一套版本契约、互补分工--追溯型答'是什么、为什么'，文档型答'怎么办'，全程只读 MES、不进过点主事务，低置信度转人工，让 RAG 从旁边问答变成能进车间的处置知识副驾。"

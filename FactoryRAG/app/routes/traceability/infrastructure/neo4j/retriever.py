@@ -87,10 +87,13 @@ class GraphRetriever:
         as_of: datetime,
         tenant: TenantContext,
         *,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> TraceSubgraph:
         if seed.kind == SeedKind.WIP_UNIT:
-            return await self._expand_from_wip(seed, as_of, tenant, route_version=route_version)
+            return await self._expand_from_wip(
+                seed, as_of, tenant, version=version, version_kind=version_kind
+            )
         if seed.kind == SeedKind.INVENTORY_BATCH:
             return await self._expand_from_batch(seed, as_of, tenant)
         # WorkOrder/Defect/Asset -> MVP 退化为 WipUnit 风格的空子图（phase 2 扩展）
@@ -102,7 +105,8 @@ class GraphRetriever:
         as_of: datetime,
         tenant: TenantContext,
         *,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> TraceSubgraph:
         async with self._driver.session() as session:
             result = await session.run(
@@ -114,7 +118,7 @@ class GraphRetriever:
             records = await result.data()
         if not records:
             return self._empty_subgraph(seed, as_of)
-        return self._map_wip(seed, as_of, records[0], route_version=route_version)
+        return self._map_wip(seed, as_of, records[0], version=version, version_kind=version_kind)
 
     async def _expand_from_batch(
         self, seed: Seed, as_of: datetime, tenant: TenantContext
@@ -138,7 +142,15 @@ class GraphRetriever:
         )
         return TraceSubgraph(seed=seed_node, clusters=FiveM1ECluster(), as_of=as_of)
 
-    def _map_wip(self, seed: Seed, as_of: datetime, rec: dict, *, route_version: str | None = None) -> TraceSubgraph:
+    def _map_wip(
+        self,
+        seed: Seed,
+        as_of: datetime,
+        rec: dict,
+        *,
+        version: str | None = None,
+        version_kind: str | None = None,
+    ) -> TraceSubgraph:
         w = rec.get("w", {})
         seed_node = TraceNode(
             label="WipUnit",
@@ -147,9 +159,10 @@ class GraphRetriever:
             props={**w, "seed_kind": seed.kind.value, "seed_value": seed.value},
         )
         man_all = [self._node("CheckpointRecord", "在制品执行", c) for c in rec.get("man_checkpoints", []) if c]
-        # 历史回溯锁定具体版本：仅保留 SNAPSHOT_OF_ROUTE 锁定到该 route_version 的过点节点。
-        if route_version:
-            man_all = [n for n in man_all if n.props.get("route_version") == route_version]
+        # 历史回溯锁定具体版本：MVP 图仅锁 route，故仅在 kind=route（或未指定 kind）时
+        # 按 CheckpointRecord.route_version 过滤过点节点。
+        if version and (not version_kind or version_kind == "route"):
+            man_all = [n for n in man_all if n.props.get("route_version") == version]
         measurement = (
             [self._node("TestResult", "质量", t) for t in rec.get("measurements", []) if t]
             + [self._node("QualityVerdict", "质量", q) for q in rec.get("measurement_verdicts", []) if q]

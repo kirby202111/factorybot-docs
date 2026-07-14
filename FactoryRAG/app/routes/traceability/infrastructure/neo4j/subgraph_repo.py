@@ -24,7 +24,9 @@ class SubgraphAuditModel(Base):
     subgraph_ref: Mapped[str] = mapped_column(String(255), primary_key=True)
     seed_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     seed_value: Mapped[str] = mapped_column(String(128), nullable=False)
-    route_version: Mapped[str] = mapped_column(String(32), nullable=True)
+    version_kind: Mapped[str] = mapped_column(String(32), nullable=True)
+    version_ref_id: Mapped[str] = mapped_column(String(128), nullable=True)
+    version: Mapped[str] = mapped_column(String(32), nullable=True)
     as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     trace_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
@@ -38,13 +40,16 @@ class SubgraphRepo:
         self._session_factory = session_factory
 
     async def save(self, subgraph: TraceSubgraph, trace_id: str = "") -> None:
+        anchor = subgraph.version_locked()
         async with self._session_factory() as session:
             session.add(
                 SubgraphAuditModel(
                     subgraph_ref=subgraph.subgraph_ref,
                     seed_kind=subgraph.seed.props.get("seed_kind", subgraph.seed.label),
                     seed_value=subgraph.seed.props.get("seed_value", subgraph.seed.node_id),
-                    route_version=subgraph.route_version_locked(),
+                    version_kind=anchor.kind.value if anchor else None,
+                    version_ref_id=anchor.ref_id if anchor else None,
+                    version=anchor.version if anchor else None,
                     as_of=subgraph.as_of,
                     payload=json.loads(subgraph.model_dump_json()),
                     trace_id=trace_id,

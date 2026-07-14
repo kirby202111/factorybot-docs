@@ -1,7 +1,7 @@
 """ChromaDB collection 初始化（非 Alembic，chunk 不可变无 schema 演进）。
 
 启动时幂等创建/获取 collection；metadata 字段：
-route_version/state/tenant_scope/doc_id/doc_type/chunk_seq/locator。
+version_kind/version_ref_id/version/state/tenant_scope/doc_id/doc_type/chunk_seq/locator。
 """
 from __future__ import annotations
 

@@ -86,9 +86,9 @@ class ToolExecutor:
                 seed_value=question, seed_kind="WipUnit", tenant=tenant
             )
         if intent == IntentCategory.DOC_LOOKUP:
-            # 脚手架占位：route_version 留空（B 的 search 不强制版本）；
-            # 生产应由 E 从问题/上下文解析出 route_version 再传入。
+            # 脚手架占位：版本锚点留空（B 的 search 不强制版本）；
+            # 生产应由 E 从问题/上下文解析出版本锚点再传入。
             return await descriptor.handler(
-                query=question, route_version=None, tenant=tenant
+                query=question, version=None, version_kind=None, version_ref_id=None, tenant=tenant
             )
         return None

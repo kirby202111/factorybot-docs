@@ -309,7 +309,7 @@ graph LR
 - `WorkOrder` 的 `BINDS_ROUTE` / `BINDS_BOM` 边携带 `route_version` / `bom_version` 属性，锁定的版本在工单下达时固化。
 - `QualityVerdict` 的 `UNDER_RULE` 边携带 `rule_version`，保证判定结果可回溯到当时生效的规则（INV-CX-01）。
 
-> 这是和通用 RAG 最大的区别：通用 RAG 检索文档不分版本，可能答出已失效工艺；本文的图把版本做成显式节点 + 快照边，检索时带 `route_version` 过滤（§6.2），从结构上杜绝"错给一条已失效工艺导致批量不良"。
+> 这是和通用 RAG 最大的区别：通用 RAG 检索文档不分版本，可能答出已失效工艺；本文的图把版本做成显式节点 + 快照边，检索时带版本锚点过滤（§6.2），从结构上杜绝"错给一条已失效工艺导致批量不良"。
 
 ### 4.5 索引与约束（Neo4j DDL）
 
@@ -567,7 +567,7 @@ class TraceAnswer(BaseModel):
 
 ### 6.5 与文档型 RAG、L1 Agent 的协同
 
-- **与路线 B（文档型 RAG）协同**：追溯型 RAG 给"结构化事实链"（哪批锡膏、哪台设备），文档型 RAG 给"处置知识"（SPI 报警怎么处置、IPC 标准）。`TraceAnswer` 的 `suggested_action` 可调路线 B 的 `search_docs(query, route_version_filter)` 补 SOP 片段——两者版本过滤都对齐 `ProcessRouteActivated`（§5.4）。
+- **与路线 B（文档型 RAG）协同**：追溯型 RAG 给"结构化事实链"（哪批锡膏、哪台设备），文档型 RAG 给"处置知识"（SPI 报警怎么处置、IPC 标准）。`TraceAnswer` 的 `suggested_action` 可调路线 B 的 `search_docs(query, version_anchor)` 补 SOP 片段——两者版本过滤都对齐 `ProcessRouteActivated`（§5.4）。
 - **与 L1 Agent 协同**：L1 的 `query_traceability_graph` 工具封装本文 `POST /rag/trace/query`；L1 在图检索基础上做**多步递进追问**（图给全貌，Agent 深挖某一维），本文是其快路径。
 - **不互相替代**：图检索是"一次性给齐 5M1E"，Agent 是"一步步问下去"。简单根因用图够了，复杂跨上下文递进用 Agent。
 
@@ -695,7 +695,7 @@ class MaterialAclClient:
 版本一致性靠三道闸，不靠口头约束：
 
 1. **投影闸**：`ProcessRouteActivated` / `BomActivated` / `QualityGateRuleActivated` 投影新版本 `{status=ACTIVATED}`，旧版本 `DEPRECATED` 不删（§5.4）。
-2. **检索闸**：`GraphRetriever.expand_5m1e` 查工艺时，从 `CheckpointRecord.route_version` 取版本，`SNAPSHOT_OF_ROUTE` 边定位当时版本节点——不取"当前生效版"。`ProcessManagementAclClient` 降级查询强制 `route_version` 入参。
+2. **检索闸**：`GraphRetriever.expand_5m1e` 查工艺时，从 `CheckpointRecord.route_version` 取版本，`SNAPSHOT_OF_ROUTE` 边定位当时版本节点——不取"当前生效版"。`ProcessManagementAclClient` 降级查询强制版本锚点（`version`+`version_kind`）入参。
 3. **输出闸**：`TraceAnswer` 的假设证据必须含 `route_version`，模型不得给无版本指向的工艺建议；Pydantic 校验失败重试。
 
 ---
@@ -1445,7 +1445,7 @@ MVP 4 上下文跑通后，其余 10 上下文按**相同范式**扩展，无需
 - [ ] `event_id + consumer_group` 幂等表 + Neo4j `MERGE` 双层去重，重复投递不产生重复边。
 - [ ] 消费者位点落 MySQL，重启从断点续跑，投影事务成功后才 ack offset；`enable.auto.commit=false`。
 - [ ] `CheckpointRecord` 节点带 `route_version`，`SNAPSHOT_OF_ROUTE` 边指向当时版本；工艺变更只新增版本节点、旧版本 `DEPRECATED` 不删，历史边不动（INV-CX-02）。
-- [ ] 检索 `RouteVersion` 带 `route_version` / `status=ACTIVATED` 过滤；降级查询强制 `route_version` 入参（§7.3）。
+- [ ] 检索 `RouteVersion` 带 `route_version` / `status=ACTIVATED` 过滤；降级查询强制版本锚点（`version`+`version_kind`）入参（§7.3）。
 - [ ] `BomActivated` / `QualityGateRuleActivated` 同理：新版本入图、旧版本 `DEPRECATED` 不删。
 - [ ] 租户 `tenant_scope` 在 Cypher `WHERE` 前置过滤，权限不达标看不到节点。
 - [ ] RAG 服务不进过点主事务（[领域总览.md](../../领域模型/领域总览.md) §5.3），图投影秒级最终一致，过点 ≤200ms（§4.1 设备实时数据 REST 查询）不受影响。
@@ -1479,7 +1479,7 @@ A：不会进过点主事务。过点 ≤200ms（[领域总览.md](../../领域�
 A：一是高频采集不全量入图——设备原始 `DataPacket` 不进图，MVP 消费者组不含任何 `dc.*` 主题，`assert_no_raw_data_topic` 启动断言兜底。二是历史节点不可变但可冷热分层——完工工单的子图可归档到冷存储，热图只留近期在制。三是检索是确定性的 Cypher 一跳/两跳扩展，不是全图遍历，配合 §4.5 索引与 `tenant_scope` 前置过滤，性能可控。
 
 **Q：为什么不让 LLM 直接查 MES 数据库，要费劲建图？**
-A：两个原因。一是 LLM 直接查原始表会绕过领域边界，权限和版本都兜不住——错给一条已失效工艺就批量不良。图把跨上下文引用显式建成边，版本做成节点 + 快照边，检索带 `route_version` 过滤，从结构上杜绝失效工艺。二是图是事件投影的读模型，一次 Cypher 扩展就能取齐 5M1E，比 LLM 现场跨界面串快得多、准得多。LLM 只负责综合，不负责找路径。
+A：两个原因。一是 LLM 直接查原始表会绕过领域边界，权限和版本都兜不住——错给一条已失效工艺就批量不良。图把跨上下文引用显式建成边，版本做成节点 + 快照边，检索带版本锚点过滤，从结构上杜绝失效工艺。二是图是事件投影的读模型，一次 Cypher 扩展就能取齐 5M1E，比 LLM 现场跨界面串快得多、准得多。LLM 只负责综合，不负责找路径。
 
 **Q：追溯型 RAG 和 L1 诊断型 Agent 什么关系？是不是重复了？**
 A：不重复，是分层。追溯型 RAG 是"图 + 一次检索综合"，给"这条单件 5M1E 全貌"；L1 Agent 是"多步 ReAct 工具调用"，给"根因要递进追问"的深度诊断。L1 的 `query_traceability_graph` 工具封装本文 `/rag/trace/query`，把图作为快路径，复杂场景再自己多步深挖。先有图、后有 Agent——图没建起来 L1 退化为纯工具循环，体验差。

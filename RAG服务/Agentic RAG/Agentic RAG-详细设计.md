@@ -33,7 +33,7 @@
 | **收口不造新能力** | E 只做路由 + 轻量组合 + 委托，不重建检索/推理/草稿能力 | E 无自有向量库/图谱，全部调 A/B + L1/L2/L3 |
 | **只读（继承 L1）** | E 全程只读，无写工具；写意图委托 L2 但 L2 也只草拟不落库 | `ReadOnlyToolGate` 启动断言；写工具不注册到 E 的 ToolRegistry |
 | **不进过点主事务** | E 不调过点引擎放行/拦截 API | 过点 toolset 不暴露 `pass/judge` 类工具（继承 L1 §1.2） |
-| **版本一致性** | 查工艺带 `route_version`；文档检索带版本过滤 | 工艺/文档工具强制 `route_version` 入参，ACL 层校验（继承 A/B/L1） |
+| **版本一致性** | 查工艺带版本锚点（`version`+`version_kind`）；文档检索带版本过滤 | 工艺/文档工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验（继承 A/B/L1） |
 | **权限隔离** | 工具调用前按 `tenant_scope` 过滤 | 路由 + 工具调用都带 `TenantContext`，前置过滤（继承 L1 §4.3） |
 | **可观测兜底** | 每答案带工具链 + 来源引用 + 置信度；低置信度转人工 | trace 从 E 发起串联到子 Agent/工具；置信度阈值兜底 |
 | **委托而非重复** | 深度诊断委托 L1，不自己多步推理；写意图委托 L2，不自己草拟 | E 的 `recursion_limit` 小（轻量组合），深度场景路由到 L1 子 Agent |
@@ -218,8 +218,8 @@ E 的 `ToolRegistry` 注册 A/B 的检索工具，全部只读：
 
 | 工具名 | 封装的路线 | 入参 | 版本校验 |
 |--------|-----------|------|---------|
-| `query_traceability_graph` | A 追溯型 | sn/batch_no/wo_id, as_of, route_version | 历史回放带 route_version |
-| `search_docs` | B 文档型 | query, route_version | 强制 route_version 过滤 |
+| `query_traceability_graph` | A 追溯型 | sn/batch_no/wo_id, as_of, version, version_kind | 历史回放带版本锚点 |
+| `search_docs` | B 文档型 | query, version, version_kind | 强制版本锚点过滤 |
 
 ```python
 class ToolDescriptor(BaseModel):
@@ -233,7 +233,7 @@ class ToolDescriptor(BaseModel):
 
 - `read_only=False` 的工具在 E 的 `ToolRegistry` 启动时直接拒绝注册（继承 L1 `ReadOnlyToolGate`）。
 - 工具调用前按 `TenantContext` 权限过滤（继承 L1 §4.3）。
-- 工艺/文档工具强制 `route_version` 入参，ACL 层校验（继承 A/B/L1 版本一致性）。
+- 工艺/文档工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验（继承 A/B/L1 版本一致性）。
 
 ### 5.2 子 Agent 委托（SubAgentDelegator）
 
@@ -408,7 +408,7 @@ class L1DelegationClient:
 E 继承 L1 的全部红线，不因"收口"而放松：
 
 1. **只读闸**：`ReadOnlyToolGate` 启动断言，无写工具注册。
-2. **版本闸**：工艺/文档工具强制 `route_version` 入参，ACL 层校验。
+2. **版本闸**：工艺/文档工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验。
 3. **权限闸**：工具调用前按 `TenantContext` 过滤。
 4. **不进过点主事务闸**：过点 toolset 不暴露 `pass/judge`，
 
@@ -694,7 +694,7 @@ async def explain(audit_id: str, tenant: TenantContext = Depends(tenant_from_tok
 - [ ] 所有注册工具 `read_only=True`，`ReadOnlyToolGate` 启动断言生效（继承 L1）。
 - [ ] `assert_dependencies_reachable` 启动断言：A/B + L1/L2 不可达时拒绝启动（E 收口前提）。
 - [ ] E 不调过点引擎放行/拦截 API。
-- [ ] 工艺/文档工具强制 `route_version` 入参，ACL 层校验（继承 A/B/L1 版本一致性）。
+- [ ] 工艺/文档工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验（继承 A/B/L1 版本一致性）。
 - [ ] 工具调用前按 `TenantContext` 权限过滤，拒绝记录可观测（继承 L1）。
 - [ ] 深度诊断委托 L1，E 不自己多步推理；`recursion_limit=6` 限制轻量组合步数。
 - [ ] 所有路径收敛到 `AgentAnswer` 统一格式，带 `route_taken` + `tool_chain` + `sources`。

@@ -92,7 +92,9 @@ class MockChatModel:
                 },
             ],
             "subgraph_ref": "SUB-A1",
-            "route_version": "v4",
+            "version": "v4",
+            "version_kind": "route",
+            "version_ref_id": "RR-B",
             "evidence_refs": [f"trace_id={t}" for t in tids],
             "needs_human_review": False,
         }

@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.domain.report import DiagnosisReport
 from app.domain.session import DiagnosisSession, SessionStatus
 from app.domain.tenant import TenantContext
+from app.domain.version import VersionAnchor
 from app.infrastructure.ai.graph_builder import build_diagnosis_graph
 from app.infrastructure.ai.tool_node import ToolNode
 from app.infrastructure.obs.context import ObservabilityContext
@@ -44,13 +45,17 @@ class DiagnosisService:
     async def diagnose(self, question: str, tenant: TenantContext,
                        serial_no: str | None = None,
                        work_order_id: str | None = None,
-                       route_version: str | None = None,
+                       version_anchor: VersionAnchor | None = None,
                        subgraph_ref: str | None = None) -> DiagnosisReport:
+        anchor_flat = version_anchor.to_flat() if version_anchor else {}
         session = DiagnosisSession(
             session_id=f"S-L1-{uuid.uuid4().hex[:8]}",
             tenant=tenant, question=question,
             serial_no=serial_no, work_order_id=work_order_id,
-            route_version=route_version, subgraph_ref=subgraph_ref,
+            version=anchor_flat.get("version"),
+            version_kind=anchor_flat.get("version_kind"),
+            version_ref_id=anchor_flat.get("version_ref_id"),
+            subgraph_ref=subgraph_ref,
         )
         obs_ctx = ObservabilityContext(
             session_id=session.session_id, trace_id=uuid.uuid4().hex[:32],
@@ -65,7 +70,10 @@ class DiagnosisService:
         initial = {
             "tenant": tenant, "obs_ctx": obs_ctx, "question": question,
             "serial_no": serial_no, "work_order_id": work_order_id,
-            "route_version": route_version, "subgraph_ref": subgraph_ref,
+            "version": anchor_flat.get("version"),
+            "version_kind": anchor_flat.get("version_kind"),
+            "version_ref_id": anchor_flat.get("version_ref_id"),
+            "subgraph_ref": subgraph_ref,
             "step_no": 0, "messages": [], "pending_tool_calls": [],
         }
         report: DiagnosisReport

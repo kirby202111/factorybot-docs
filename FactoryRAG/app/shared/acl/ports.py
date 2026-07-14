@@ -36,7 +36,8 @@ class TraceRagPort(Protocol):
         seed_kind: str | None = None,
         seed_value: str | None = None,
         as_of: datetime | None = None,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> "TraceAnswer":
         """子图检索 + LLM 综合，返回 TraceAnswer（含 subgraph_ref）。"""
         ...
@@ -48,7 +49,8 @@ class TraceRagPort(Protocol):
         tenant: "TenantContext",
         *,
         as_of: datetime | None = None,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
     ) -> "TraceSubgraph":
         """只取子图不综合，返回 TraceSubgraph。L2 不重查图，用此回查。"""
         ...
@@ -63,9 +65,10 @@ class DocRagPort(Protocol):
         question: str,
         tenant: "TenantContext",
         *,
-        route_version: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
+        version_ref_id: str | None = None,
         doc_category: str | None = None,
-        asset_id: str | None = None,
         doc_types: list[str] | None = None,
     ) -> "DocAnswer":
         """检索 + LLM 综合，返回 DocAnswer。"""
@@ -76,8 +79,9 @@ class DocRagPort(Protocol):
         query: str,
         tenant: "TenantContext",
         *,
-        route_version: str | None = None,
-        asset_id: str | None = None,
+        version: str | None = None,
+        version_kind: str | None = None,
+        version_ref_id: str | None = None,
         doc_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list["ChunkHit"]:

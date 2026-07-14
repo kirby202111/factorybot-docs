@@ -14,7 +14,9 @@ class DiagnosisRequest(BaseModel):
     question: str
     serial_no: str | None = None
     work_order_id: str | None = None
-    route_version: str | None = None
+    version: str | None = None
+    version_kind: str | None = None         # route|bom|rule|asset|standard
+    version_ref_id: str | None = None       # route_id / asset_id / standard_id ...
     subgraph_ref: str | None = None
 
 
@@ -24,7 +26,9 @@ class DiagnosisReportResponse(BaseModel):
     confidence: float
     hypotheses: list[Hypothesis]
     subgraph_ref: str = ""
-    route_version: str | None = None
+    version: str | None = None
+    version_kind: str | None = None
+    version_ref_id: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     disclaimer: str = ""
     needs_human_review: bool = False

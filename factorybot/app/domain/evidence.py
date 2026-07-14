@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.version import VersionAnchor
+
 
 class TraceNodeView(BaseModel):
     """追溯子图节点（L2 按 subgraph_ref 回查，不重查图）。
@@ -27,5 +29,11 @@ class DocSearchHit(BaseModel):
     doc_type: str                    # SOP | MANUAL | EIGHT_D
     title: str
     content_snippet: str = ""
-    route_version: str | None = None
+    # 版本锚点扁平三字段（与 RAG ChunkHit 对齐）+ version_anchor() 属性
+    version: str | None = None
+    version_kind: str | None = None
+    version_ref_id: str | None = None
     score: float = 0.0
+
+    def version_anchor(self) -> VersionAnchor | None:
+        return VersionAnchor.from_flat(self.version, self.version_kind, self.version_ref_id)

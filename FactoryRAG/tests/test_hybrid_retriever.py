@@ -27,7 +27,7 @@ class _FakeRetriever:
         self.last_top_k: int | None = None
 
     async def retrieve(
-        self, *, query, tenant, route_version=None, asset_id=None, doc_types=None, top_k=20,
+        self, *, query, tenant, version_anchor=None, doc_types=None, top_k=20,
     ) -> list[ChunkHit]:
         self.last_top_k = top_k
         if self._raise is not None:

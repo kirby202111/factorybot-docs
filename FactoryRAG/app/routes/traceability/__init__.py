@@ -6,9 +6,10 @@ rag/graph_index.py。
 
 存储：Neo4j（图主体 + DefectCatalog 原生向量索引 1024 维 cosine）+ MySQL（幂等/位点/审计）+
 Redis（子图缓存）。
-核心安全契约：图 ``SNAPSHOT_OF_ROUTE{route_version}`` 快照边物理锁定版本；工艺升版只追加
-新 RouteVersion 节点 + 老节点置 DEPRECATED，历史快照边永不改。A 升版发 ``rag.reindex.request``
-内部事件通知 B 重索引。
+核心安全契约：图 ``SNAPSHOT_OF_{kind}{version}`` 快照边物理锁定版本（MVP 锁 route）；
+工艺升版只追加新 RouteVersion 节点 + 老节点置 DEPRECATED，历史快照边永不改。A 升版发
+``rag.reindex.request`` 内部事件通知 B 重索引。``version_locked()`` 把快照版本读成通用
+``VersionAnchor`` 透传给三段链（L1/L2/MES）。
 GraphProjector 订阅 MVP 4 上下文事件（mes.checkpoint.lifecycle/mes.testresult.structured/
 mes.routing.progress/process.route.lifecycle/material.*/quality.*）。
 """
@@ -36,7 +37,7 @@ async def build_trace_services(container: "Container") -> Any:
     seed_resolver = SeedResolver(llm=container.llm, embedder=container.embedding, driver=driver)
     subgraph_repo = SubgraphRepo(session_factory=session_factory)
 
-    # DocRagPort：A 的 suggested_action 经它拉 B 的 SOP 片段（带 route_version_filter）。
+    # DocRagPort：A 的 suggested_action 经它拉 B 的 SOP 片段（带版本锚点）。
     doc_rag = container.doc_rag
 
     trace_svc = TraceRetrievalService(

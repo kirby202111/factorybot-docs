@@ -28,7 +28,10 @@ class AgentState(TypedDict, total=False):
     question: str
     serial_no: Optional[str]
     work_order_id: Optional[str]
-    route_version: Optional[str]
+    # 版本一致性三段链第二段：物理锁定的版本锚点（扁平三字段）
+    version: Optional[str]
+    version_kind: Optional[str]
+    version_ref_id: Optional[str]
     subgraph_ref: Optional[str]
     step_no: int
     report: Optional[dict]
@@ -47,11 +50,12 @@ L1_SYSTEM_PROMPT = (
     "   - hypotheses: 数组，每项必须含字段 category(枚举仅 Man|Machine|Material|Method|"
     "Measurement|Environment)、rank(整数,1=最可能)、statement(字符串)、evidence(字符串数组,"
     "每条引用 trace_id 如 trace_id=T-101,至少一条)、suggested_action(字符串)\n"
-    "   - subgraph_ref/route_version/evidence_refs: 从工具结果透传\n"
+    "   - subgraph_ref/version/version_kind/version_ref_id/evidence_refs: 从工具结果透传\n"
     "   - needs_human_review: 布尔\n"
     "   示例: {\"summary\":\"...\",\"confidence\":0.72,\"hypotheses\":[{\"category\":\"Material\","
     "\"rank\":1,\"statement\":\"锡膏批次异常\",\"evidence\":[\"trace_id=T-101\"],"
-    "\"suggested_action\":\"抽测锡膏粘度\"}],\"subgraph_ref\":\"SUB-A1\",\"route_version\":\"v4\","
+    "\"suggested_action\":\"抽测锡膏粘度\"}],\"subgraph_ref\":\"SUB-A1\","
+    "\"version\":\"v4\",\"version_kind\":\"route\",\"version_ref_id\":\"RR-B\","
     "\"evidence_refs\":[\"trace_id=T-101\"],\"needs_human_review\":false}\n"
     "6. 证据优先，禁止从问题文本反推不良：若工具返回的追溯图无 BLOCK/不良节点、过点记录均为 PASS、"
     "无测试 FAIL 等异常证据，则 summary 必须写\"证据不足，未发现异常\"，hypotheses 置空数组 []，"
@@ -126,8 +130,9 @@ def _build_user_prompt(state: AgentState) -> str:
         parts.append(f"单件 serial_no={state['serial_no']}")
     if state.get("work_order_id"):
         parts.append(f"工单 work_order_id={state['work_order_id']}")
-    if state.get("route_version"):
-        parts.append(f"工艺版本 route_version={state['route_version']}")
+    if state.get("version"):
+        kind = state.get("version_kind") or "route"
+        parts.append(f"版本锚点 version={state['version']} (kind={kind})")
     if state.get("subgraph_ref"):
         parts.append(f"子图引用 subgraph_ref={state['subgraph_ref']}")
     return "\n".join(parts)
@@ -141,10 +146,12 @@ def _parse_report(content: str, state: AgentState) -> DiagnosisReport:
             "llm.output.non_json", content_preview=content[:500]
         )
         return DiagnosisReport.partial("LLM 输出非合法 JSON")
-    # 兜底：缺 subgraph_ref/route_version 时从 state 透传
+    # 兜底：缺 subgraph_ref/版本锚点 时从 state 透传
     data.setdefault("subgraph_ref", state.get("subgraph_ref") or "")
-    if not data.get("route_version"):
-        data["route_version"] = state.get("route_version")
+    if not data.get("version"):
+        data["version"] = state.get("version")
+        data["version_kind"] = state.get("version_kind")
+        data["version_ref_id"] = state.get("version_ref_id")
     try:
         return DiagnosisReport.model_validate(data)
     except Exception as e:

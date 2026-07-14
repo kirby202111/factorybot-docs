@@ -4,6 +4,9 @@
 ``[:SNAPSHOT_OF_ROUTE {route_version}]`` 边物理锁定生产时版本。工艺升版只追加新
 ``RouteVersion`` 节点 + 老节点置 DEPRECATED，历史快照边永不改。
 检索必须用快照边属性上的版本，**而非**当前 ``status=ACTIVATED`` 的 RouteVersion。
+
+版本锚点通用化：``version_locked()`` 从 Method 维度 RouteVersion 快照节点构造 ``VersionAnchor``
+（MVP 图只锁 route，故返回 ROUTE 锚点）；图节点/边属性仍用 route_version 键（图 schema 不变）。
 """
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.routes.traceability.domain.seed import Seed
+from app.shared.events.version_contract import VersionAnchor, VersionKind
 
 
 class FiveM1ECategory(str, Enum):
@@ -38,12 +42,12 @@ class TraceNode(BaseModel):
 
 
 class TraceEdge(BaseModel):
-    """子图边。``version`` 锁定 route_version/bom_version/rule_version。"""
+    """子图边。``version`` 锁定快照边上的版本（route/bom/rule，rel 名隐含 kind）。"""
 
     rel: str                            # "SNAPSHOT_OF_ROUTE" / "CONSUMED_BATCH" / "FOR_UNIT" ...
     from_id: str
     to_id: str
-    version: str | None = None          # route_version/bom_version/rule_version；非版本边为 None
+    version: str | None = None          # 快照边锁定的版本号；非版本边为 None
 
 
 class FiveM1ECluster(BaseModel):
@@ -78,10 +82,18 @@ class TraceSubgraph(BaseModel):
         seed_value = self.seed.props.get("seed_value", self.seed.node_id)
         return f"{seed_kind}:{seed_value}@{self.as_of.isoformat()}"
 
-    def route_version_locked(self) -> str | None:
-        """从 Method 维度的 RouteVersion 快照节点取物理锁定的版本（而非当前 ACTIVE）。"""
+    def version_locked(self) -> VersionAnchor | None:
+        """从 Method 维度的 RouteVersion 快照节点取物理锁定的版本锚点（而非当前 ACTIVE）。
+
+        MVP 图只锁 route：读 RouteVersion 节点 ``{route_id, route_version}`` 构 ROUTE 锚点。
+        未来 BOM/RULE 快照节点同理扩展（按节点 label 选 kind）。
+        """
         for n in self.clusters.method:
             rv = n.props.get("route_version")
             if rv:
-                return str(rv)
+                return VersionAnchor(
+                    kind=VersionKind.ROUTE,
+                    ref_id=str(n.props.get("route_id", "")),
+                    version=str(rv),
+                )
         return None

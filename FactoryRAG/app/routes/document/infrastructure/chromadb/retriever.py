@@ -1,6 +1,6 @@
 """ChromaDB 向量检索器（稠密路）。
 
-构建 ``where`` pre-filter（强制带 state=PUBLISHED + route_version 等值 + tenant_scope + doc_type），
+构建 ``where`` pre-filter（强制带 state=PUBLISHED + 版本锚点等值 + tenant_scope + doc_type），
 调用 ``collection.query`` 返回 ``list[ChunkHit]``。
 
 过滤判据收敛到 ``ChunkFilter``，与 BM25 稀疏路共享同一真相源（见 ``infrastructure.chunk_filter``）。
@@ -13,6 +13,7 @@ from typing import Any
 
 from app.routes.document.domain.answer import ChunkHit
 from app.routes.document.infrastructure.chunk_filter import ChunkFilter
+from app.shared.events.version_contract import VersionAnchor
 from app.shared.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
@@ -30,16 +31,14 @@ class VectorRetriever:
         *,
         query: str,
         tenant: TenantContext,
-        route_version: str | None = None,
-        asset_id: str | None = None,
+        version_anchor: VersionAnchor | None = None,
         doc_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list[ChunkHit]:
         query_vec = await self._embedder.embed_one(query)
         where = ChunkFilter(
             tenant=tenant,
-            route_version=route_version,
-            asset_id=asset_id,
+            version_anchor=version_anchor,
             doc_types=tuple(doc_types) if doc_types else (),
         ).to_where()
 
@@ -83,7 +82,9 @@ class VectorRetriever:
                     text=doc,
                     locator=locator,
                     section_type=meta.get("section_type", "NOTE"),
-                    route_version=meta.get("route_version") or None,
+                    version_kind=meta.get("version_kind") or "",
+                    version_ref_id=meta.get("version_ref_id") or "",
+                    version=meta.get("version") or "",
                     state=meta.get("state", "PUBLISHED"),
                     score=score,
                 )

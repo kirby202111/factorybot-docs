@@ -19,7 +19,7 @@ def trace_router() -> APIRouter:
         tenant: TenantContext = Depends(get_tenant),
         svc=Depends(get_trace_svc),
     ) -> TraceAnswer:
-        """子图检索 + LLM 综合，返回 TraceAnswer（含 subgraph_ref + route_version）。"""
+        """子图检索 + LLM 综合，返回 TraceAnswer（含 subgraph_ref + 版本锚点）。"""
         return await svc.retrieve_and_synthesize(req, tenant)
 
     @router.post("/expand", response_model=TraceSubgraph)

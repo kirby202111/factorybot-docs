@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.routes.document.domain.chunk import DocumentChunk
 from app.routes.document.infrastructure.chunk_filter import ChunkFilter
+from app.shared.events.version_contract import VersionAnchor, VersionKind
 from app.shared.tenant.context import TenantContext
 
 
@@ -15,8 +16,9 @@ def _chunk(
     *,
     chunk_id: str,
     state: str = "PUBLISHED",
-    route_version: str | None = None,
-    asset_id: str | None = None,
+    version_kind: str = "",
+    version_ref_id: str = "",
+    version: str = "",
     tenant_scope: str = "",
     doc_type: str = "",
 ) -> DocumentChunk:
@@ -27,11 +29,20 @@ def _chunk(
         chunk_seq=0,
         text="x",
         state=state,
-        route_version=route_version,
-        binding_asset_id=asset_id,
+        version_kind=version_kind,
+        version_ref_id=version_ref_id,
+        version=version,
         tenant_scope=tenant_scope,
         doc_type=doc_type,
     )
+
+
+def _route_anchor(version: str, ref_id: str = "") -> VersionAnchor:
+    return VersionAnchor(kind=VersionKind.ROUTE, ref_id=ref_id, version=version)
+
+
+def _asset_anchor(ref_id: str, version: str = "") -> VersionAnchor:
+    return VersionAnchor(kind=VersionKind.ASSET, ref_id=ref_id, version=version)
 
 
 def _where_matches(where: dict, chunk: DocumentChunk) -> bool:
@@ -64,13 +75,13 @@ def test_state_filter_excludes_deprecated():
     assert f.matches(chunks[1]) is False
 
 
-def test_route_version_equality():
+def test_version_equality():
     tenant = TenantContext(tenant_id="t1")
-    f = ChunkFilter(tenant=tenant, route_version="v3")
+    f = ChunkFilter(tenant=tenant, version_anchor=_route_anchor("v3"))
     chunks = [
-        _chunk(chunk_id="a", route_version="v3"),
-        _chunk(chunk_id="b", route_version="v4"),
-        _chunk(chunk_id="c", route_version=None),  # 写入时存 ""
+        _chunk(chunk_id="a", version_kind="route", version="v3"),
+        _chunk(chunk_id="b", version_kind="route", version="v4"),
+        _chunk(chunk_id="c", version_kind="", version=""),  # 未绑定版本
     ]
     _assert_parity(chunks, f)
     assert [c.chunk_id for c in chunks if f.matches(c)] == ["a"]
@@ -100,12 +111,12 @@ def test_empty_scopes_pass_all():
 
 def test_doc_type_in_and_asset():
     tenant = TenantContext(tenant_id="t1")
-    f = ChunkFilter(tenant=tenant, asset_id="EQ-007", doc_types=("SOP", "PARAM"))
+    f = ChunkFilter(tenant=tenant, version_anchor=_asset_anchor("EQ-007"), doc_types=("SOP", "PARAM"))
     chunks = [
-        _chunk(chunk_id="a", asset_id="EQ-007", doc_type="SOP"),
-        _chunk(chunk_id="b", asset_id="EQ-007", doc_type="FAULT"),  # doc_type 不命中
-        _chunk(chunk_id="c", asset_id="EQ-008", doc_type="SOP"),    # asset 不命中
-        _chunk(chunk_id="d", asset_id=None, doc_type="SOP"),        # asset 写 ""
+        _chunk(chunk_id="a", version_kind="asset", version_ref_id="EQ-007", doc_type="SOP"),
+        _chunk(chunk_id="b", version_kind="asset", version_ref_id="EQ-007", doc_type="FAULT"),  # doc_type 不命中
+        _chunk(chunk_id="c", version_kind="asset", version_ref_id="EQ-008", doc_type="SOP"),    # ref 不命中
+        _chunk(chunk_id="d", version_kind="", version_ref_id="", doc_type="SOP"),               # 未绑定
     ]
     _assert_parity(chunks, f)
     assert [c.chunk_id for c in chunks if f.matches(c)] == ["a"]
@@ -114,13 +125,13 @@ def test_doc_type_in_and_asset():
 def test_combined_filters_parity():
     """组合所有维度，逐 chunk 比对两路语义。"""
     tenant = TenantContext(tenant_id="t1", tenant_scopes=["workshop:PCBA"])
-    f = ChunkFilter(tenant=tenant, route_version="v3", asset_id="EQ-7", doc_types=("SOP",))
+    f = ChunkFilter(tenant=tenant, version_anchor=_route_anchor("v3"), doc_types=("SOP",))
     chunks = [
-        _chunk(chunk_id="ok", route_version="v3", asset_id="EQ-7", tenant_scope="workshop:PCBA", doc_type="SOP"),
-        _chunk(chunk_id="bad_state", state="DEPRECATED", route_version="v3"),
-        _chunk(chunk_id="bad_rv", route_version="v9"),
-        _chunk(chunk_id="bad_scope", route_version="v3", tenant_scope="workshop:BOX"),
-        _chunk(chunk_id="bad_dtype", route_version="v3", tenant_scope="workshop:PCBA", doc_type="FAULT"),
+        _chunk(chunk_id="ok", version_kind="route", version="v3", tenant_scope="workshop:PCBA", doc_type="SOP"),
+        _chunk(chunk_id="bad_state", state="DEPRECATED", version_kind="route", version="v3"),
+        _chunk(chunk_id="bad_rv", version_kind="route", version="v9"),
+        _chunk(chunk_id="bad_scope", version_kind="route", version="v3", tenant_scope="workshop:BOX"),
+        _chunk(chunk_id="bad_dtype", version_kind="route", version="v3", tenant_scope="workshop:PCBA", doc_type="FAULT"),
     ]
     _assert_parity(chunks, f)
     assert [c.chunk_id for c in chunks if f.matches(c)] == ["ok"]

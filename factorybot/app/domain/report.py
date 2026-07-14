@@ -5,6 +5,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.domain.version import VersionAnchor
+
 
 class FiveM1ECategory(str, Enum):
     """5M1E 根因维度。模型只能从枚举取，不得自造类别。"""
@@ -34,16 +36,23 @@ class Hypothesis(BaseModel):
 
 
 class DiagnosisReport(BaseModel):
-    """L1 诊断产出。透传 subgraph_ref + route_version 给 L2。"""
+    """L1 诊断产出。透传 subgraph_ref + 版本锚点给 L2。"""
 
     summary: str
     confidence: float                       # 0.0 ~ 1.0
     hypotheses: list[Hypothesis] = Field(default_factory=list)
     subgraph_ref: str = ""                  # 指向 RAG 追溯子图，L2 据此回查
-    route_version: str | None = None        # 版本一致性三段链的第二段
+    # 版本一致性三段链第二段：物理锁定的版本锚点（扁平三字段 + version_anchor() 属性）
+    version: str | None = None
+    version_kind: str | None = None         # route|bom|rule|asset|standard
+    version_ref_id: str | None = None       # route_id / asset_id / standard_id ...
     evidence_refs: list[str] = Field(default_factory=list)
     disclaimer: str = "本报告为辅助诊断假设，最终处置需工程师确认"
     needs_human_review: bool = False        # confidence < 阈值 或 证据不足
+
+    def version_anchor(self) -> VersionAnchor | None:
+        """构造版本锚点；无 version_kind/version 返回 None。"""
+        return VersionAnchor.from_flat(self.version, self.version_kind, self.version_ref_id)
 
     @model_validator(mode="after")
     def _at_least_one_hypothesis_if_confident(self) -> "DiagnosisReport":

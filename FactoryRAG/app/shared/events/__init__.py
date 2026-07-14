@@ -1,4 +1,4 @@
-"""shared/events -- 版本契约（route_version/bom_version/rule_version）。"""
+"""shared/events -- 版本契约（VersionAnchor/VersionKind/ReindexRequest）。"""
 from app.shared.events.version_contract import (
     ReindexRequest,
     VersionAnchor,

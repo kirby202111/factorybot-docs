@@ -35,7 +35,7 @@
 | **收口不造新能力** | E 只做路由 + 委托，不重建检索/推理 | E 无向量库/图谱，全部调 A/B + 委托 L1 |
 | **只读（继承 L1）** | E 全程只读，无写工具 | `ReadOnlyToolGate` 启动断言；写工具不注册（§9.4） |
 | **不进过点主事务** | E 不调过点放行/拦截 API | 过点 toolset 不暴露 `pass/judge`（继承 L1 §1.2） |
-| **版本一致性** | 查工艺带 `route_version` | A/B 工具强制 `route_version` 入参，ACL 校验（继承 A/B/L1） |
+| **版本一致性** | 查工艺带版本锚点（`version`+`version_kind`） | A/B 工具强制版本锚点（`version`+`version_kind`）入参，ACL 校验（继承 A/B/L1） |
 | **权限隔离** | 工具调用前按 `tenant_scope` 过滤 | 路由 + 工具调用都带 `TenantContext`（继承 L1 §4.3） |
 | **委托而非重复** | 深度诊断委托 L1，E 不多步推理 | E `recursion_limit=6`（轻量组合），深度场景委托 L1 |
 | **可观测兜底** | 答案带工具链 + 来源 + 置信度 | `AnswerAudit` 落库 + `/explain` 回溯；低置信度转人工 |
@@ -209,8 +209,8 @@ IntentRouter.classify(question)
 
 | 工具名 | 封装的路线 | 入参 | 版本校验 |
 |--------|-----------|------|---------|
-| `query_traceability_graph` | A 追溯型 | seed, as_of, route_version | 历史回放带 route_version |
-| `search_docs` | B 文档型 | query, route_version | 强制 route_version 过滤 |
+| `query_traceability_graph` | A 追溯型 | seed, as_of, version, version_kind | 历史回放带版本锚点 |
+| `search_docs` | B 文档型 | query, version, version_kind | 强制版本锚点过滤 |
 
 ```python
 class ToolDescriptor(BaseModel):
@@ -224,7 +224,7 @@ class ToolDescriptor(BaseModel):
 
 - `read_only=False` 启动时拒绝注册（继承 L1 `ReadOnlyToolGate`）。
 - 工具调用前按 `TenantContext` 权限过滤（继承 L1 §4.3）。
-- A/B 工具强制 `route_version` 入参（继承 A/B/L1 版本一致性）。
+- A/B 工具强制版本锚点（`version`+`version_kind`）入参（继承 A/B/L1 版本一致性）。
 
 ### 5.2 统一答案（AgentAnswer）
 
@@ -254,7 +254,7 @@ class AgentAnswer(BaseModel):
 
 ### 5.3 红线继承
 
-E 继承 L1 全部红线：① 只读闸（`ReadOnlyToolGate`）；② 版本闸（A/B 工具强制 `route_version`）；③ 权限闸（`TenantContext` 前置过滤）；④ 不进过点主事务闸（过点 toolset 不暴露 `pass/judge`）。
+E 继承 L1 全部红线：① 只读闸（`ReadOnlyToolGate`）；② 版本闸（A/B 工具强制版本锚点 `version`+`version_kind`）；③ 权限闸（`TenantContext` 前置过滤）；④ 不进过点主事务闸（过点 toolset 不暴露 `pass/judge`）。
 
 ---
 
@@ -321,11 +321,11 @@ class TraceRagAclClient:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
     async def query_traceability_graph(
-        self, seed: dict, as_of: datetime, route_version: str, tenant: TenantContext
+        self, seed: dict, as_of: datetime, version: str, version_kind: str, tenant: TenantContext
     ) -> TraceSubgraphView:
         resp = await self._http.post(
             "/rag/trace/expand",
-            json={"seed": seed, "as_of": as_of.isoformat(), "route_version": route_version},
+            json={"seed": seed, "as_of": as_of.isoformat(), "version": version, "version_kind": version_kind},
             headers=tenant.headers(), timeout=5.0,
         )
         resp.raise_for_status()
@@ -367,7 +367,7 @@ class L1DelegationClient:
 
 ### 6.3 版本一致性保证
 
-继承 A/B/L1：A/B 工具强制 `route_version` 入参，ACL 层校验。E 不另搞版本管理。
+继承 A/B/L1：A/B 工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验。E 不另搞版本管理。
 
 ---
 
@@ -757,7 +757,7 @@ services:
 - [ ] 所有注册工具 `read_only=True`，`ReadOnlyToolGate` 启动断言生效（继承 L1）。
 - [ ] `assert_dependencies_reachable` 启动断言：A/B + L1 不可达时拒绝启动（E 收口前提）。
 - [ ] E 不调过点引擎放行/拦截 API，
-- [ ] A/B 工具强制 `route_version` 入参，ACL 层校验（继承 A/B/L1 版本一致性）。
+- [ ] A/B 工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验（继承 A/B/L1 版本一致性）。
 - [ ] 工具调用前按 `TenantContext` 权限过滤，拒绝记录可观测（继承 L1）。
 - [ ] 深度诊断委托 L1，E 不自己多步推理；`recursion_limit=6` 限制轻量组合步数。
 - [ ] 所有路径收敛到 `AgentAnswer` 统一格式，带 `route_taken` + `tool_chain` + `sources`。
@@ -801,7 +801,7 @@ A：这是设计阶段规划，不是已落地，且 E 是三条路线里最后�
 | 契约 | 状态 | 待办 |
 |------|------|------|
 | L1 `/agent/diagnose` 接受并透传 `traceparent` | 🔴 待对齐 | 与 L1 实现确认 trace 透传（§4.3） |
-| A `/rag/trace/expand` 契约 | 🔴 待对齐 | 与追溯型 RAG 确认 expand 端点入参（seed/as_of/route_version） |
+| A `/rag/trace/expand` 契约 | 🔴 待对齐 | 与追溯型 RAG 确认 expand 端点入参（seed/as_of/version/version_kind） |
 | B `/rag/docs/search` 契约 | 🔴 待对齐 | 与文档型 RAG 确认 search 端点入参 |
 | L2 草稿委托（`DRAFT_REQUEST`） | ⏳ §11 | L2 就绪后纳入委托 |
 | 轻量组合（多工具 ReAct） | ⏳ §11 | `recursion_limit=6` 已预留，按场景启用 |

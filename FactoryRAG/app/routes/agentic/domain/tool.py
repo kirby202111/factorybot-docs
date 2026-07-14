@@ -80,11 +80,22 @@ class ToolRegistry:
             )
 
         async def _search_docs(
-            *, query: str, route_version: str, tenant: Any, doc_types: list[str] | None = None
+            *,
+            query: str,
+            version: str | None = None,
+            version_kind: str | None = None,
+            version_ref_id: str | None = None,
+            tenant: Any,
+            doc_types: list[str] | None = None,
         ) -> Any:
             # 经 DocRagPort InProcess 调 B（决策 #4）
             return await doc_rag_port.search(
-                query, tenant, route_version=route_version or None, doc_types=doc_types
+                query,
+                tenant,
+                version=version or None,
+                version_kind=version_kind or None,
+                version_ref_id=version_ref_id or None,
+                doc_types=doc_types,
             )
 
         self.register(

@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from app.domain.version import VersionAnchor
+
 
 # ===========================================================================
 # 过点执行上下文
@@ -249,12 +251,18 @@ class DefectRateView(BaseModel):
 # RAG：追溯图 / 子图 / 文档检索
 # ===========================================================================
 class TraceGraphView(BaseModel):
-    """query_traceability_graph 返回：节点 + 边 + subgraph_ref + route_version。"""
+    """query_traceability_graph 返回：节点 + 边 + subgraph_ref + 版本锚点。"""
     serial_no: str = ""
     nodes: list[dict] = Field(default_factory=list)
     edges: list[dict] = Field(default_factory=list)
     subgraph_ref: str = ""
-    route_version: str | None = None
+    # 版本锚点扁平三字段（从 RAG TraceAnswer 透传，三段链第一段图锁定版本）
+    version: str | None = None
+    version_kind: str | None = None
+    version_ref_id: str | None = None
+
+    def version_anchor(self) -> VersionAnchor | None:
+        return VersionAnchor.from_flat(self.version, self.version_kind, self.version_ref_id)
 
 
 class SubgraphView(BaseModel):

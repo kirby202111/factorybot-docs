@@ -2,10 +2,13 @@
 
 **chunk 不可变**（核心设计，绕开 ChromaDB 多记录翻转无事务弱点）：
 - 写入 ChromaDB 后所有 metadata 字段永远不修改；
-- 工艺升版 = 追加新版本 chunk（带新 route_version），不翻转老 chunk 的 state；
-- 版本隔离靠查询 ``where={"state":"PUBLISHED","route_version":rv}`` 过滤；
+- 版本升版 = 追加新版本 chunk（带新 ``version``），不翻转老 chunk 的 state；
+- 版本隔离靠查询 ``where={"state":"PUBLISHED","version_kind":..,"version":..}`` 过滤；
 - 单条软删（文档撤回）允许 upsert 改 state=DEPRECATED（单条原子，ChromaDB 可接受），
   区别于"批量翻转"（不做）。
+
+版本锚点通用化：``version_kind``/``version_ref_id``/``version`` 三字段替代原 route-specific
+的 ``route_version``/``route_id``/``binding_asset_id``，覆盖工艺路线/设备资产/通用标准等所有版本类型。
 """
 from __future__ import annotations
 
@@ -13,6 +16,8 @@ import json
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from app.shared.events.version_contract import VersionAnchor, VersionKind
 
 
 class ChunkLocator(BaseModel):
@@ -37,9 +42,10 @@ class ChunkLocator(BaseModel):
 class DocumentChunk(BaseModel):
     """文档 chunk（实体）。
 
-    metadata 字段写入 ChromaDB 后不可变：``route_version``/``state``/``tenant_scope``/
-    ``doc_id``/``doc_type``/``chunk_seq``/``locator``/``file_content_hash``。
+    metadata 字段写入 ChromaDB 后不可变：``version_kind``/``version_ref_id``/``version``/
+    ``state``/``tenant_scope``/``doc_id``/``doc_type``/``chunk_seq``/``locator``/``file_content_hash``。
     chunk_id = ``{doc_id}:{version_id}:{chunk_seq}``（幂等键，重建安全）。
+    ``version_id`` 是文档自身版本；``version`` 是被绑定目标的版本（工艺路线/设备资产/标准）。
     """
 
     chunk_id: str
@@ -52,13 +58,23 @@ class DocumentChunk(BaseModel):
     section_type: str = "NOTE"                              # STEP | FAULT_CODE | PARAM | NOTE
 
     # 以下字段同步写入 ChromaDB metadata，写入后不可变
-    route_version: str | None = None
-    route_id: str | None = None
+    version_kind: str = ""          # route|bom|rule|asset|standard|""
+    version_ref_id: str = ""        # route_id / asset_id / standard_id / ...
+    version: str = ""               # 锁定的版本号 v3 / RevH / ""
     state: str = "PUBLISHED"                                # 写入时固定 PUBLISHED
     tenant_scope: str = ""
     doc_type: str = ""
-    binding_asset_id: str | None = None
     file_content_hash: str = ""
+
+    @property
+    def version_anchor(self) -> VersionAnchor | None:
+        """从三字段构造版本锚点；无 kind/version 返回 None。"""
+        if not self.version_kind or not self.version:
+            return None
+        try:
+            return VersionAnchor(kind=VersionKind(self.version_kind), ref_id=self.version_ref_id, version=self.version)
+        except ValueError:
+            return None
 
     def to_metadata_dict(self) -> dict[str, Any]:
         """ChromaDB metadata（不可变字段）。"""
@@ -67,10 +83,10 @@ class DocumentChunk(BaseModel):
             "version_id": self.version_id,
             "doc_type": self.doc_type,
             "state": self.state,
-            "route_version": self.route_version or "",
-            "route_id": self.route_id or "",
+            "version_kind": self.version_kind,
+            "version_ref_id": self.version_ref_id,
+            "version": self.version,
             "tenant_scope": self.tenant_scope,
-            "binding_asset_id": self.binding_asset_id or "",
             "chunk_seq": self.chunk_seq,
             "section_type": self.section_type,
             "locator": self.locator.to_json(),
@@ -91,11 +107,11 @@ class DocumentChunk(BaseModel):
             embedding=embedding,
             locator=ChunkLocator.from_json(metadata.get("locator")),
             section_type=metadata.get("section_type", "NOTE"),
-            route_version=metadata.get("route_version") or None,
-            route_id=metadata.get("route_id") or None,
+            version_kind=metadata.get("version_kind") or "",
+            version_ref_id=metadata.get("version_ref_id") or "",
+            version=metadata.get("version") or "",
             state=metadata.get("state", "PUBLISHED"),
             tenant_scope=metadata.get("tenant_scope", ""),
             doc_type=metadata.get("doc_type", ""),
-            binding_asset_id=metadata.get("binding_asset_id") or None,
             file_content_hash=metadata.get("file_content_hash", ""),
         )

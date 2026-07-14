@@ -10,7 +10,7 @@
 用法：
   uv run python scripts/run_mock_rag.py                       # 跑 data/queries.json 全量
   uv run python scripts/run_mock_rag.py "回流焊峰值温度设多少"  # 单条自定义查询
-  uv run python scripts/run_mock_rag.py "..." --category PROCESS_BOUND --route-version v3
+  uv run python scripts/run_mock_rag.py "..." --category PROCESS_BOUND --version v3 --version-kind route
 """
 from __future__ import annotations
 
@@ -84,10 +84,11 @@ async def build_svc() -> DocumentRetrievalService:
 def _print_answer(idx: int, q: dict[str, Any], answer: DocAnswer) -> None:
     print(f"\n{'=' * 72}")
     print(f"[{idx}] Q: {q['query']}")
-    print(f"    category={q.get('doc_category')} route_version={q.get('route_version')} "
-          f"asset_id={q.get('asset_id')}")
+    print(f"    category={q.get('doc_category')} version_kind={q.get('version_kind')} "
+          f"version={q.get('version')} version_ref_id={q.get('version_ref_id')}")
     print(f"    A: {answer.answer}")
-    print(f"    confidence={answer.confidence} route_version_filter={answer.route_version_filter} "
+    print(f"    confidence={answer.confidence} version_filter={answer.version_filter} "
+          f"version_kind_filter={answer.version_kind_filter} "
           f"needs_human_review={answer.needs_human_review}")
     if answer.citations:
         print("    citations:")
@@ -100,8 +101,9 @@ async def run_queries(svc: DocumentRetrievalService) -> None:
         req = DocQuery(
             question=q["query"],
             doc_category=DocumentCategory(q["doc_category"]),
-            route_version=q.get("route_version"),
-            asset_id=q.get("asset_id"),
+            version=q.get("version"),
+            version_kind=q.get("version_kind"),
+            version_ref_id=q.get("version_ref_id"),
             top_k=20,
             top_n=5,
         )
@@ -113,14 +115,16 @@ async def run_single(svc: DocumentRetrievalService, args: argparse.Namespace) ->
     req = DocQuery(
         question=args.question,
         doc_category=DocumentCategory(args.category),
-        route_version=args.route_version,
-        asset_id=args.asset_id,
+        version=args.version,
+        version_kind=args.version_kind,
+        version_ref_id=args.version_ref_id,
         top_k=20,
         top_n=5,
     )
     answer = await svc.query(req, TENANT)
     _print_answer(1, {"query": args.question, "doc_category": args.category,
-                      "route_version": args.route_version, "asset_id": args.asset_id}, answer)
+                      "version": args.version, "version_kind": args.version_kind,
+                      "version_ref_id": args.version_ref_id}, answer)
 
 
 def main() -> None:
@@ -128,9 +132,12 @@ def main() -> None:
     parser.add_argument("question", nargs="?", help="自定义查询；省略则跑 data/queries.json 全量")
     parser.add_argument("--category", default="GENERAL",
                         choices=[c.value for c in DocumentCategory],
-                        help="文档类别（PROCESS_BOUND 需 --route-version，ASSET_BOUND 需 --asset-id）")
-    parser.add_argument("--route-version", default=None, help="工艺版本（PROCESS_BOUND 必填）")
-    parser.add_argument("--asset-id", default=None, help="设备 ID（ASSET_BOUND 必填）")
+                        help="文档类别（PROCESS_BOUND 需 --version + --version-kind route，ASSET_BOUND 需 --version-kind asset + --version-ref-id）")
+    parser.add_argument("--version", default=None, help="锁定版本号（如 v3 / RevH）")
+    parser.add_argument("--version-kind", default=None,
+                        choices=["route", "bom", "rule", "asset", "standard"],
+                        help="版本类型")
+    parser.add_argument("--version-ref-id", default=None, help="被绑定目标 ID（route_id / asset_id / standard_id）")
     args = parser.parse_args()
 
     svc = asyncio.run(build_svc())

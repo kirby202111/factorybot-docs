@@ -2,7 +2,7 @@
 
 - ``ProcessRouteActivated``：直接把关联文档版本置 PUBLISHED（无 SUBMITTED），
   同 doc 同类绑定的旧 PUBLISHED -> DEPRECATED。chunk 不可变：不更新 ChromaDB chunk metadata。
-- ``ProcessRouteDeprecated``：关联文档版本 -> DEPRECATED，不删 chunk，靠 route_version 查询过滤隔离。
+- ``ProcessRouteDeprecated``：关联文档版本 -> DEPRECATED，不删 chunk，靠版本锚点查询过滤隔离。
 """
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class ProcessRouteActivatedHandler(_RouteHandlerBase):
 
 
 class ProcessRouteDeprecatedHandler(_RouteHandlerBase):
-    """工艺废弃：关联文档版本 -> DEPRECATED（chunk 不删，靠 route_version 隔离）。"""
+    """工艺废弃：关联文档版本 -> DEPRECATED（chunk 不删，靠版本锚点隔离）。"""
 
     event_type = "ProcessRouteDeprecated"
 

@@ -107,7 +107,7 @@ rag_service/
 │   │   ├── persistence/                  # 多 Engine 工厂 + DeclarativeBase + Alembic
 │   │   ├── tenant/                       # TenantContext + 依赖注入 + 跨服务传递协议
 │   │   ├── web/                          # lifespan + health + DI 容器
-│   │   └── events/                       # 版本契约（route_version/bom_version/rule_version）
+│   │   └── events/                       # 版本契约（VersionAnchor: route/bom/rule/asset/standard）
 │   │
 │   ├── config.py                         # 入口 Settings 加载
 │   └── main.py                           # FastAPI app + lifespan + register_routers
@@ -238,9 +238,9 @@ rag_service/
 
 | 组件 | 职责 |
 |------|------|
-| `version_contract` | `route_version`/`bom_version`/`rule_version` 三类版本锚点定义；`ProcessRouteActivated` 驱动的版本失效事件 -> A 重投图 / B 重索引的统一入口 |
+| `version_contract` | `VersionAnchor(kind, ref_id, version)` 统一版本锚点（route/bom/rule/asset/standard）；`ProcessRouteActivated` 驱动的版本失效事件 -> A 重投图 / B 重索引的统一入口 |
 
-> 版本一致性三段传递链（核心安全契约）：`图 SNAPSHOT_OF_ROUTE{route_version} -> L1 evidence.route_version -> L2 Draft.route_version -> MES 应用服务校验 ACTIVE`。rag-service 侧负责第一段（图用快照边物理锁定版本）+ 发布 `rag.reindex.request` 内部事件通知 B。
+> 版本一致性三段传递链（核心安全契约）：`图 SNAPSHOT_OF_{kind}{version} -> L1 evidence.version_anchor -> L2 Draft.version_anchor -> MES 应用服务校验 ACTIVE`。rag-service 侧负责第一段（图用快照边物理锁定版本）+ 发布 `rag.reindex.request` 内部事件通知 B。
 
 ---
 
@@ -272,7 +272,7 @@ rag_service/
 **存储**：ChromaDB（chunk 向量 + metadata，chunk 不可变 + 版本隔离靠查询过滤）、MinIO（原始文件）、MySQL（幂等/位点/审计）、Redis（检索缓存）。
 **重索引触发**：订阅 `process.route.lifecycle` + A 发布的 `rag.reindex.request` 内部事件。
 **审核流**：工艺绑定型文档（SOP/检验标准）随 `ProcessRouteActivated` **联动 PUBLISHED**（工艺生效即文档生效，责任归工艺 owner，决策 #3）；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED。
-**版本绑定**：检验标准文档 MVP 按 `route_version`，`DocumentBinding` 预留 `rule_id`+`rule_version` 双轨字段并订阅 `quality.gate.lifecycle`，评测后切换（决策 #2）。
+**版本绑定**：MVP 工艺绑定型按 ROUTE 锚点（`version_kind="route"`），`VersionAnchor` 统一覆盖 route/bom/rule/asset/standard，评测后可切 RULE 锚点（决策 #2）。
 
 ### 4.3 路线 E Agentic RAG（`routes/agentic/`）
 
@@ -314,7 +314,7 @@ rag_service/
 
 | 调用方 -> 被调方 | Port | 单服务内路径 | 说明 |
 |-----------------|------|------------|------|
-| A -> B | `DocRagPort` | `TraceRetrievalService` -> `InProcessDocRagAdapter` -> `DocumentRetrievalService` | A 的 `suggested_action` 拉 SOP 片段，带 `route_version_filter` |
+| A -> B | `DocRagPort` | `TraceRetrievalService` -> `InProcessDocRagAdapter` -> `DocumentRetrievalService` | A 的 `suggested_action` 拉 SOP 片段，带 `version_anchor` |
 | A -> B（事件） | `rag.reindex.request` | A 发布 -> B 的 `ReindexCoordinator` 消费 | 工艺升版触发 B 重索引 |
 | E -> A/B | `TraceRagPort`/`DocRagPort` | `GatewayService` -> InProcess Adapter -> 各路线 service | E 不自己多步推理，轻量组合 `recursion_limit=6` |
 
@@ -326,7 +326,7 @@ rag_service/
 |--------|------|------|
 | L1 调图 | Agent -> rag-service (A) | `query_traceability_graph` 工具封装 `POST /rag/trace/query`，注册在 L1 ToolRegistry 首位 |
 | L2 回查图 | Agent -> rag-service (A) | `fetch_subgraph_nodes(subgraph_ref)` -> `POST /rag/trace/expand`，L2 不重查图 |
-| L1/L2 调文档 | Agent -> rag-service (B) | `search_docs(query, route_version_filter)` -> `POST /rag/docs/query` |
+| L1/L2 调文档 | Agent -> rag-service (B) | `search_docs(query, version_anchor)` -> `POST /rag/docs/query` |
 | E 委托 L1/L2 | rag-service (E) -> agent-service | `POST /agent/diagnose`（60s）、`POST /agent/draft`（30s），透传 `traceparent` |
 
 > **traceparent 全链路**（决策 #1）：E 委托 L1 时手动注入 `traceparent`；L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求，接收 incoming `traceparent` 并续接 trace，出站 httpx instrumentation 自动透传到 A/B/MES。L1 实现方案需补 instrumentation 接入。
@@ -340,13 +340,13 @@ rag_service/
 ### 6.4 subgraph_ref 与版本一致性传递链
 
 ```
-图 SNAPSHOT_OF_ROUTE{route_version}（A，物理锁定版本）
-  -> L1 evidence.route_version（透传）
-  -> L2 Draft.route_version（锁定）
+图 SNAPSHOT_OF_{kind}{version}（A，物理锁定版本；MVP 锁 route）
+  -> L1 evidence.version_anchor（透传）
+  -> L2 Draft.version_anchor（锁定）
   -> MES 应用服务校验 ACTIVE（最后一道）
 ```
 
-rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版发 `rag.reindex.request` 通知 B 重索引。
+rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版发 `rag.reindex.request` 通知 B 重索引。版本锚点统一为 `VersionAnchor(kind, ref_id, version)`，覆盖 route/bom/rule/asset/standard。
 
 ---
 
@@ -403,7 +403,7 @@ rag-service 是 mes-eval 的被测对象，3 条路线各一个 `EvalTarget` 适
 | B 文档型 | `doc_rag.py` | 调 `POST /rag/docs/query`，断言忠实度/答案相关性 + 版本过滤 |
 | E Agentic | `agentic_rag.py` | 调 `POST /agent/chat`，断言路由准确率 + 工具链正确性 |
 
-> 版本锚定贯穿评测全程：每条金标准用例钉死 `route_version`/`bom_version`/`rule_version`，`VersionAnchorChecker` 强制比对。安全红线（失效工艺泄漏/写越界/租户越权/PII/实体幻觉/证据空）任一非 0 阻断 CI。
+> 版本锚定贯穿评测全程：每条金标准用例钉死版本锚点（`version_kind`+`version`+`version_ref_id`），`VersionAnchorChecker` 强制比对。安全红线（失效工艺泄漏/写越界/租户越权/PII/实体幻觉/证据空）任一非 0 阻断 CI。
 
 ---
 
@@ -435,7 +435,7 @@ rag-service 是 mes-eval 的被测对象，3 条路线各一个 `EvalTarget` 适
 | # | 议题 | 决策 | 落地影响 |
 |---|------|------|---------|
 | 1 | E 委托 L1 的 `traceparent` 透传 | L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求，接收 incoming `traceparent` 并续接 trace；出站 httpx instrumentation 已有 | E -> L1 -> A/B/MES 全链路串联；L1 实现方案需补 instrumentation 接入 |
-| 2 | B 检验标准文档版本绑定 | MVP 按 `route_version` 简化，`DocumentBinding` schema 预留 `rule_id`+`rule_version` 字段并订阅 `quality.gate.lifecycle`，评测后回填切换（领域上 `rule_version` 才是准确锚点） | `routes/document/domain/document.py` 双轨字段；`shared/events` 增 quality.gate 事件 |
+| 2 | B 检验标准文档版本绑定 | MVP 工艺绑定型按 ROUTE 锚点（`version_kind="route"`），`VersionAnchor` 统一覆盖 route/bom/rule/asset/standard，评测后可切 RULE 锚点 | `routes/document/domain/document.py` 双轨字段；`shared/events` 增 quality.gate 事件 |
 | 3 | B 工艺绑定型文档审核流 | **联动 PUBLISHED**：`ProcessRouteActivated` 直接把关联文档置 PUBLISHED，工艺生效即文档生效，责任归工艺 owner（**与 B 详细设计默认"独立审核"相反，需同步修订 B 详细设计 §4.3**） | `routes/document/application/reindex_coordinator.py` 改为自动 PUBLISHED；去掉 SUBMITTED 人工确认中间态 |
 | 4 | 单服务内 E 调 A/B 的方式 | 走 InProcess Adapter（直调 application service），不走本机 REST；外部契约（A/B 对 agent-service）由 L1/L2 工具封装对齐 | `shared/acl/` 注入 InProcess Adapter |
 

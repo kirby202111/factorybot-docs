@@ -2,7 +2,8 @@
 
 审核流（决策 #3）：工艺绑定型文档随 ``ProcessRouteActivated`` **联动 PUBLISHED**，
 去掉 SUBMITTED/PENDING_REBIND 中间态；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED。
-版本绑定（决策 #2）：MVP 按 route_version，``DocumentBinding`` 预留 rule_id+rule_version 双轨字段。
+版本绑定通用化：``DocumentBinding`` 经 ``get_version_anchor()`` 产出统一 ``VersionAnchor``
+（route/bom/rule/asset/standard），MVP 工艺绑定型按 route，决策 #2 预留 rule 双轨。
 """
 from __future__ import annotations
 
@@ -12,14 +13,43 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.shared.events.version_contract import VersionAnchor, VersionKind
+
 
 class BindingType(str, Enum):
-    """文档绑定类型。"""
+    """文档绑定类型。决定 ``get_version_anchor()`` 产出的 ``VersionKind``。"""
 
-    ROUTE_VERSION = "ROUTE_VERSION"     # 工艺绑定型：SOP/检验标准
-    RULE_VERSION = "RULE_VERSION"       # 质量门规则绑定（决策 #2 双轨，评测后切换）
-    ASSET = "ASSET"                     # 设备绑定型：维修手册
-    ASSET_MODEL = "ASSET_MODEL"
+    ROUTE_VERSION = "ROUTE_VERSION"     # 工艺绑定型：SOP/检验标准 -> anchor(kind=route)
+    RULE_VERSION = "RULE_VERSION"       # 质量门规则绑定（决策 #2 双轨，评测后切换）-> anchor(kind=rule)
+    ASSET = "ASSET"                     # 设备绑定型：维修手册 -> anchor(kind=asset)
+    ASSET_MODEL = "ASSET_MODEL"         # 设备型号绑定 -> anchor(kind=asset)
+    STANDARD_VERSION = "STANDARD_VERSION"  # 通用标准绑定：IPC/ESD -> anchor(kind=standard)
+
+
+# 绑定类型 -> 版本锚点 kind
+_BINDING_KIND = {
+    BindingType.ROUTE_VERSION: VersionKind.ROUTE,
+    BindingType.RULE_VERSION: VersionKind.RULE,
+    BindingType.ASSET: VersionKind.ASSET,
+    BindingType.ASSET_MODEL: VersionKind.ASSET,
+    BindingType.STANDARD_VERSION: VersionKind.STANDARD,
+}
+
+# 各绑定类型在 target_ref 中的 ref_id 键 / version 键
+_REF_KEY = {
+    BindingType.ROUTE_VERSION: "route_id",
+    BindingType.RULE_VERSION: "rule_id",
+    BindingType.ASSET: "asset_id",
+    BindingType.ASSET_MODEL: "asset_model_id",
+    BindingType.STANDARD_VERSION: "standard_id",
+}
+_VERSION_KEY = {
+    BindingType.ROUTE_VERSION: "route_version",
+    BindingType.RULE_VERSION: "rule_version",
+    BindingType.ASSET: "asset_version",
+    BindingType.ASSET_MODEL: "asset_model_version",
+    BindingType.STANDARD_VERSION: "standard_version",
+}
 
 
 class DocumentCategory(str, Enum):
@@ -60,8 +90,9 @@ class DocumentSource(BaseModel):
 class DocumentBinding(BaseModel):
     """文档绑定（值对象）。
 
-    决策 #2 双轨：``target_ref`` 含 route_id+route_version（MVP）或
-    rule_id+rule_version（评测后切换）。inherited=True 表示继承自上一版本。
+    ``target_ref`` 含被绑定目标的 ref_id + version（键随 ``binding_type`` 走，见
+    ``_REF_KEY``/``_VERSION_KEY``）。inherited=True 表示继承自上一版本。
+    ASSET/STANDARD 的 version 键可选（设备手册/标准可不带版本）。
     """
 
     binding_type: BindingType
@@ -70,28 +101,23 @@ class DocumentBinding(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target_ref(self) -> "DocumentBinding":
-        if self.binding_type == BindingType.ROUTE_VERSION:
-            if "route_id" not in self.target_ref or "route_version" not in self.target_ref:
-                raise ValueError("ROUTE_VERSION 绑定必须含 route_id + route_version")
-        elif self.binding_type == BindingType.RULE_VERSION:
-            if "rule_id" not in self.target_ref or "rule_version" not in self.target_ref:
-                raise ValueError("RULE_VERSION 绑定必须含 rule_id + rule_version（决策 #2 双轨）")
-        elif self.binding_type in (BindingType.ASSET, BindingType.ASSET_MODEL):
-            if "asset_id" not in self.target_ref:
-                raise ValueError("ASSET 绑定必须含 asset_id")
+        ref_key = _REF_KEY.get(self.binding_type)
+        if ref_key and ref_key not in self.target_ref:
+            raise ValueError(f"{self.binding_type.value} 绑定必须含 {ref_key}")
         return self
 
-    @property
-    def route_version(self) -> str | None:
-        return self.target_ref.get("route_version")
-
-    @property
-    def route_id(self) -> str | None:
-        return self.target_ref.get("route_id")
-
-    @property
-    def rule_version(self) -> str | None:
-        return self.target_ref.get("rule_version")
+    def version_anchor(self) -> VersionAnchor | None:
+        """从本绑定构造版本锚点；无 version 返回 None（如未带版本的 ASSET 绑定）。"""
+        kind = _BINDING_KIND.get(self.binding_type)
+        if kind is None:
+            return None
+        ref_key = _REF_KEY[self.binding_type]
+        ver_key = _VERSION_KEY[self.binding_type]
+        ref_id = self.target_ref.get(ref_key, "")
+        version = self.target_ref.get(ver_key, "")
+        if not version:
+            return None
+        return VersionAnchor(kind=kind, ref_id=ref_id, version=version)
 
     def binding_key(self) -> tuple[BindingType, str]:
         """同类绑定等价键（用于"同类绑定同时最多一个 PUBLISHED"不变式）。"""
@@ -136,23 +162,15 @@ class DocumentVersion(BaseModel):
     def add_binding(self, binding: DocumentBinding) -> None:
         self.bindings.append(binding)
 
-    def get_route_version(self) -> str | None:
-        """从 bindings 提取 route_version（chunk metadata 同步用）。"""
-        for b in self.bindings:
-            if b.binding_type == BindingType.ROUTE_VERSION and b.route_version:
-                return b.route_version
-        return None
+    def get_version_anchor(self) -> VersionAnchor | None:
+        """从 bindings 提取第一个有效版本锚点（chunk metadata 同步用）。
 
-    def get_route_id(self) -> str | None:
+        优先级按 bindings 顺序；工艺绑定型取 ROUTE/RULE，设备绑定型取 ASSET，通用标准取 STANDARD。
+        """
         for b in self.bindings:
-            if b.binding_type == BindingType.ROUTE_VERSION and b.route_id:
-                return b.route_id
-        return None
-
-    def get_asset_id(self) -> str | None:
-        for b in self.bindings:
-            if b.binding_type in (BindingType.ASSET, BindingType.ASSET_MODEL):
-                return b.target_ref.get("asset_id")
+            anchor = b.version_anchor()
+            if anchor is not None:
+                return anchor
         return None
 
 
@@ -176,11 +194,13 @@ class KnowledgeDocument(BaseModel):
     def get_published_version(self) -> DocumentVersion | None:
         return next((v for v in self.versions if v.state == VersionState.PUBLISHED), None)
 
-    def get_version_by_route(self, route_version: str) -> DocumentVersion | None:
-        return next(
-            (v for v in self.versions if v.get_route_version() == route_version),
-            None,
-        )
+    def get_version_by_anchor(self, anchor: VersionAnchor) -> DocumentVersion | None:
+        """按版本锚点查版本（同 kind+version）。"""
+        for v in self.versions:
+            va = v.get_version_anchor()
+            if va is not None and va.kind == anchor.kind and va.version == anchor.version:
+                return v
+        return None
 
     def publish_version(self, version: DocumentVersion) -> list[DocumentVersion]:
         """发布某版本，并把同类绑定的旧 PUBLISHED 置 DEPRECATED。

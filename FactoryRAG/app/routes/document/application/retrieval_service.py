@@ -1,9 +1,9 @@
 """B 文档检索服务。
 
-**强制带版本红线**（§1.2）：工艺绑定型（PROCESS_BOUND）``route_version`` 必填，
-入口校验拒绝缺失，**绝不退回"查最新 ACTIVE"**（避开在制品不切换工艺语义陷阱：
-工单绑 v3，最新 ACTIVE 是 v4，退回查 v4 会答出不适用 SOP）。设备绑定型按 asset_id
-过滤，通用知识型不带版本。
+**强制带版本红线**（§1.2）：工艺绑定型（PROCESS_BOUND）需 ROUTE 版本锚点（``version``+
+``version_kind="route"``）必填，入口校验拒绝缺失，**绝不退回"查最新 ACTIVE"**（避开在制品不切换
+工艺语义陷阱：工单绑 v3，最新 ACTIVE 是 v4，退回查 v4 会答出不适用 SOP）。设备绑定型需 ASSET
+锚点（``version_ref_id`` 必填，``version`` 可选），通用知识型不带版本。
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from app.routes.document.domain.answer import (
 )
 from app.routes.document.domain.document import DocumentCategory
 from app.routes.document.domain.retriever_port import RetrieverPort
+from app.shared.events.version_contract import VersionKind
 from app.shared.obs.port import ObservabilityPort
 from app.shared.tenant.context import TenantContext
 
@@ -62,8 +63,7 @@ class DocumentRetrievalService:
         hits = await self._retriever.retrieve(
             query=req.question,
             tenant=tenant,
-            route_version=req.route_version,
-            asset_id=req.asset_id,
+            version_anchor=req.version_anchor(),
             doc_types=[dt.value for dt in req.doc_types] if req.doc_types else None,
             top_k=req.top_k,
         )
@@ -72,7 +72,7 @@ class DocumentRetrievalService:
     # ── 检索 + 综合 ──
     async def query(self, req: DocQuery, tenant: TenantContext) -> DocAnswer:
         # 0. 强制版本校验（安全红线）
-        self._enforce_route_version(req)
+        self._enforce_version_anchor(req)
 
         cache_key = self._cache_key(req, tenant)
         cached = await self._cache_get(cache_key)
@@ -86,8 +86,7 @@ class DocumentRetrievalService:
         hits = await self._retriever.retrieve(
             query=req.question,
             tenant=tenant,
-            route_version=req.route_version,
-            asset_id=req.asset_id,
+            version_anchor=req.version_anchor(),
             doc_types=[dt.value for dt in req.doc_types] if req.doc_types else None,
             top_k=req.top_k,
         )
@@ -109,15 +108,19 @@ class DocumentRetrievalService:
         await self._cache_set(cache_key, answer)
         return answer
 
-    def _enforce_route_version(self, req: DocQuery) -> None:
+    def _enforce_version_anchor(self, req: DocQuery) -> None:
         """强制带版本红线（§1.2 红线 #1）。"""
-        if req.doc_category == DocumentCategory.PROCESS_BOUND and not req.route_version:
-            raise ValueError(
-                "工艺绑定型文档检索必须指定 route_version，"
-                "禁止退回'查最新 ACTIVE'（避开在制品不切换工艺语义陷阱）"
-            )
-        if req.doc_category == DocumentCategory.ASSET_BOUND and not req.asset_id:
-            raise ValueError("设备绑定型文档检索必须指定 asset_id")
+        if req.doc_category == DocumentCategory.PROCESS_BOUND:
+            if not req.version or req.version_kind != VersionKind.ROUTE.value:
+                raise ValueError(
+                    "工艺绑定型文档检索必须指定 ROUTE 版本锚点（version + version_kind='route'），"
+                    "禁止退回'查最新 ACTIVE'（避开在制品不切换工艺语义陷阱）"
+                )
+        elif req.doc_category == DocumentCategory.ASSET_BOUND:
+            if not req.version_ref_id or req.version_kind != VersionKind.ASSET.value:
+                raise ValueError(
+                    "设备绑定型文档检索必须指定 ASSET 版本锚点（version_kind='asset' + version_ref_id）"
+                )
 
     def _filter_deprecated_leak(self, hits: list[ChunkHit]) -> list[ChunkHit]:
         leaked = [h for h in hits if h.state != "PUBLISHED"]
@@ -142,7 +145,8 @@ class DocumentRetrievalService:
             return DocAnswer(
                 answer="未检索到相关文档片段，建议转人工或确认查询条件。",
                 confidence=0.0,
-                route_version_filter=req.route_version,
+                version_filter=req.version,
+                version_kind_filter=req.version_kind,
                 needs_human_review=True,
             )
         context = "\n---\n".join(
@@ -176,12 +180,13 @@ class DocumentRetrievalService:
             answer=answer_text,
             citations=citations,
             confidence=confidence,
-            route_version_filter=req.route_version,
+            version_filter=req.version,
+            version_kind_filter=req.version_kind,
         )
 
     # ── Redis 缓存 ──
     def _cache_key(self, req: DocQuery, tenant: TenantContext) -> str:
-        raw = f"{tenant.tenant_id}|{req.doc_category}|{req.route_version}|{req.asset_id}|{req.question}"
+        raw = f"{tenant.tenant_id}|{req.doc_category}|{req.version_kind}|{req.version_ref_id}|{req.version}|{req.question}"
         return f"rag:doc:cache:{hashlib.sha256(raw.encode()).hexdigest()}"
 
     async def _cache_get(self, key: str) -> DocAnswer | None:

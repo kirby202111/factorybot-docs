@@ -1,7 +1,7 @@
 """B 重索引协调器。
 
 决策 #3：工艺绑定型文档随 ``ProcessRouteActivated`` **联动 PUBLISHED**（直接置 PUBLISHED，
-不设 SUBMITTED/PENDING_REBIND），责任归工艺 owner。老 chunk 不翻转，检索靠 route_version 隔离。
+不设 SUBMITTED/PENDING_REBIND），责任归工艺 owner。老 chunk 不翻转，检索靠版本锚点隔离。
 chunk 不可变使重索引幂等（chunk_id 不变，ChromaDB upsert 无副作用）。
 """
 from __future__ import annotations

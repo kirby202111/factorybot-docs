@@ -1,35 +1,68 @@
-"""B 检索请求/应答 DTO（端点 schema + Port 契约）。"""
+"""B 检索请求/应答 DTO（端点 schema + Port 契约）。
+
+版本锚点通用化：``version``+``version_kind``+``version_ref_id`` 替代 route-specific 的
+``route_version``+``asset_id``。工艺绑定型（PROCESS_BOUND）需 ROUTE 锚点（version 必填），
+设备绑定型（ASSET_BOUND）需 ASSET 锚点（ref_id 必填，version 可选），通用知识型可选。
+"""
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
 from app.routes.document.domain.document import DocumentCategory, DocType, DocumentBinding
+from app.shared.events.version_contract import VersionAnchor, VersionKind
 
 
 class DocQuery(BaseModel):
     """``POST /rag/docs/query`` 请求（检索 + LLM 综合）。
 
-    工艺绑定型（PROCESS_BOUND）``route_version`` 必填：入口校验拒绝缺失，
-    不退回"查最新 ACTIVE"（避开在制品不切换工艺语义陷阱）。
+    工艺绑定型（PROCESS_BOUND）需 ROUTE 锚点（``version``+``version_kind="route"`` 必填）：
+    入口校验拒绝缺失，不退回"查最新 ACTIVE"（避开在制品不切换工艺语义陷阱）。
     """
 
     question: str
     doc_category: DocumentCategory = DocumentCategory.GENERAL
-    route_version: str | None = None       # PROCESS_BOUND 时必填
-    asset_id: str | None = None            # ASSET_BOUND 时必填
+    version: str | None = None              # 锁定的版本号（PROCESS_BOUND 必填）
+    version_kind: str | None = None         # route|bom|rule|asset|standard
+    version_ref_id: str | None = None       # route_id / asset_id / standard_id（ASSET_BOUND 必填）
     doc_types: list[DocType] | None = None
     top_k: int = 20
     top_n: int = 5
+
+    def version_anchor(self) -> VersionAnchor | None:
+        """构造版本锚点；无 version_kind/version 返回 None。"""
+        if not self.version_kind or not self.version:
+            return None
+        try:
+            return VersionAnchor(
+                kind=VersionKind(self.version_kind),
+                ref_id=self.version_ref_id or "",
+                version=self.version,
+            )
+        except ValueError:
+            return None
 
 
 class DocSearch(BaseModel):
     """``POST /rag/docs/search`` 请求（只检索 chunks，不综合）。"""
 
     question: str
-    route_version: str | None = None
-    asset_id: str | None = None
+    version: str | None = None
+    version_kind: str | None = None
+    version_ref_id: str | None = None
     doc_types: list[DocType] | None = None
     top_k: int = 20
+
+    def version_anchor(self) -> VersionAnchor | None:
+        if not self.version_kind or not self.version:
+            return None
+        try:
+            return VersionAnchor(
+                kind=VersionKind(self.version_kind),
+                ref_id=self.version_ref_id or "",
+                version=self.version,
+            )
+        except ValueError:
+            return None
 
 
 class ChunkHit(BaseModel):
@@ -41,7 +74,9 @@ class ChunkHit(BaseModel):
     text: str
     locator: dict
     section_type: str
-    route_version: str | None = None
+    version_kind: str = ""
+    version_ref_id: str = ""
+    version: str = ""
     state: str = "PUBLISHED"
     score: float = 0.0                     # cosine 相似度
 
@@ -63,7 +98,8 @@ class DocAnswer(BaseModel):
     answer: str
     citations: list[DocCitation] = Field(default_factory=list)
     confidence: float = 0.0
-    route_version_filter: str | None = None
+    version_filter: str | None = None         # 实际过滤的版本号
+    version_kind_filter: str | None = None    # 实际过滤的版本类型
     disclaimer: str = "本答案来自文档型 RAG，处置需按现行 SOP 确认"
     needs_human_review: bool = False
 

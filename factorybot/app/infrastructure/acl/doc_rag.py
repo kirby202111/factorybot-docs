@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from app.domain.tenant import TenantContext
+from app.domain.version import VersionAnchor
 from app.infrastructure.acl.base import BaseAclClient
 
 
@@ -12,16 +13,21 @@ class DocRagAclClient(BaseAclClient):
 
     async def search_docs(
         self, query: str, tenant: Optional[TenantContext] = None,
-        route_version_filter: Optional[str] = None,
+        version_anchor: Optional[VersionAnchor] = None,
     ) -> list[dict]:
         """GET /rag/docs/search -- 返回 DocSearchHit 形状列表。
 
-        route_version_filter 确保检索到的 SOP/工艺文档与版本一致。
+        version_anchor 确保检索到的 SOP/工艺/手册文档与版本一致（route/bom/rule/asset/standard）。
         """
+        params: dict = {"query": query}
+        if version_anchor is not None:
+            params["version"] = version_anchor.version
+            params["version_kind"] = version_anchor.kind.value
+            params["version_ref_id"] = version_anchor.ref_id
         dto = await self._get(
             "/rag/docs/search",
             tenant=tenant,
-            params={"query": query, "route_version": route_version_filter},
+            params=params,
             fixture_rel="rag/docs", fixture_key="_default",
         )
         # fixture 可能是 {documents: [...]} 或 list
@@ -29,10 +35,14 @@ class DocRagAclClient(BaseAclClient):
             docs = dto.get("documents", dto.get("results", []))
         else:
             docs = dto or []
-        # 版本过滤（mock 下也可按 route_version 过滤）
-        if route_version_filter:
+        # 版本过滤（mock 下也按锚点三字段过滤）
+        if version_anchor is not None and version_anchor.is_bound:
             docs = [
                 d for d in docs
-                if not d.get("route_version") or d.get("route_version") == route_version_filter
+                if not d.get("version") or (
+                    d.get("version") == version_anchor.version
+                    and (not d.get("version_kind")
+                         or d.get("version_kind") == version_anchor.kind.value)
+                )
             ]
         return docs

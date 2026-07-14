@@ -77,9 +77,7 @@ class DocumentIngestionService:
             doc_id=doc_id,
             version_id=version_id,
             tenant_scope=tenant.tenant_scopes[0] if tenant.tenant_scopes else cmd.tenant_scope,
-            route_version=self._first_route_version(cmd.bindings),
-            route_id=self._first_route_id(cmd.bindings),
-            asset_id=self._first_asset_id(cmd.bindings),
+            version_anchor=self._first_version_anchor(cmd.bindings),
             file_content_hash=content_hash,
         )
 
@@ -126,24 +124,12 @@ class DocumentIngestionService:
         return VersionState.DRAFT
 
     @staticmethod
-    def _first_route_version(bindings: list) -> str | None:
+    def _first_version_anchor(bindings: list) -> "VersionAnchor | None":
+        """从 bindings 取第一个有效版本锚点（chunk metadata 同步用）。"""
         for b in bindings:
-            if b.route_version:
-                return b.route_version
-        return None
-
-    @staticmethod
-    def _first_route_id(bindings: list) -> str | None:
-        for b in bindings:
-            if b.route_id:
-                return b.route_id
-        return None
-
-    @staticmethod
-    def _first_asset_id(bindings: list) -> str | None:
-        for b in bindings:
-            if b.binding_type.value in ("ASSET", "ASSET_MODEL"):
-                return b.target_ref.get("asset_id")
+            anchor = b.version_anchor()
+            if anchor is not None:
+                return anchor
         return None
 
     @staticmethod

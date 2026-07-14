@@ -27,6 +27,7 @@ from app.routes.document.infrastructure.chromadb.retriever import VectorRetrieve
 from app.routes.traceability.domain.seed import Seed
 from app.routes.traceability.domain.subgraph import TraceSubgraph
 from app.shared.embedding.port import EmbeddingPort, RerankerPort
+from app.shared.events.version_contract import VersionAnchor, VersionKind
 from app.shared.tenant.context import TenantContext
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -58,15 +59,14 @@ def load_doc_chunks() -> tuple[list[DocumentChunk], dict[str, dict[str, Any]]]:
     for entry in load_doc_manifest():
         text = (DATA_DIR / entry["file"]).read_text(encoding="utf-8")
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        anchor = _anchor_from_entry(entry)
         doc_chunks = selector.split(
             text=text,
             doc_type=DocType(entry["doc_type"]),
             doc_id=entry["doc_id"],
             version_id=entry["version_id"],
             tenant_scope=entry["tenant_scope"],
-            route_version=entry.get("route_version"),
-            route_id=entry.get("route_id"),
-            asset_id=entry.get("asset_id"),
+            version_anchor=anchor,
             file_content_hash=content_hash,
         )
         state = entry.get("state", "PUBLISHED")
@@ -75,6 +75,22 @@ def load_doc_chunks() -> tuple[list[DocumentChunk], dict[str, dict[str, Any]]]:
         chunks.extend(doc_chunks)
         entries[entry["doc_id"]] = entry
     return chunks, entries
+
+
+def _anchor_from_entry(entry: dict[str, Any]) -> VersionAnchor | None:
+    """从 manifest entry 的 version_kind/version_ref_id/version 构造版本锚点。"""
+    vk = entry.get("version_kind")
+    ver = entry.get("version")
+    if not vk or not ver:
+        return None
+    try:
+        return VersionAnchor(
+            kind=VersionKind(vk),
+            ref_id=entry.get("version_ref_id", ""),
+            version=ver,
+        )
+    except ValueError:
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -245,24 +261,25 @@ def load_trace_scenarios() -> list[dict[str, Any]]:
 class FakeGraphRetriever:
     """A 图检索器伪造件：按 seed 返回 mock ``TraceSubgraph``。
 
-    满足 ``TraceRetrievalService`` 依赖的 ``expand_5m1e`` 契约；``route_version`` 非空时
-    过滤 Method 维度快照节点（模拟按版本历史回溯）。真实 Neo4j Cypher 多跳执行不在覆盖范围。
+    满足 ``TraceRetrievalService`` 依赖的 ``expand_5m1e`` 契约；``version`` 非空且 kind=route
+    时过滤 Method 维度快照节点（模拟按版本历史回溯）。真实 Neo4j Cypher 多跳执行不在覆盖范围。
     """
 
     def __init__(self, scenarios: list[dict[str, Any]] | None = None) -> None:
         self._scenarios = {f"{s['seed']['kind']}:{s['seed']['value']}": s for s in (scenarios or load_trace_scenarios())}
 
     async def expand_5m1e(
-        self, seed: Seed, as_of: Any, tenant: TenantContext, *, route_version: str | None = None
+        self, seed: Seed, as_of: Any, tenant: TenantContext, *,
+        version: str | None = None, version_kind: str | None = None,
     ) -> TraceSubgraph:
         key = f"{seed.kind.value}:{seed.value}"
         scenario = self._scenarios.get(key)
         if scenario is None:
             raise KeyError(f"无 mock 场景: {key}")
         sub = TraceSubgraph.model_validate(scenario["subgraph"])
-        if route_version:
+        if version and (not version_kind or version_kind == "route"):
             sub.clusters.method = [
-                n for n in sub.clusters.method if n.props.get("route_version") == route_version
+                n for n in sub.clusters.method if n.props.get("route_version") == version
             ]
         return sub
 

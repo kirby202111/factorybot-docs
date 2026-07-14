@@ -13,6 +13,7 @@ from collections import defaultdict
 
 from app.routes.document.domain.answer import ChunkHit
 from app.routes.document.domain.retriever_port import RetrieverPort
+from app.shared.events.version_contract import VersionAnchor
 from app.shared.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,7 @@ class HybridRetriever:
         *,
         query: str,
         tenant: TenantContext,
-        route_version: str | None = None,
-        asset_id: str | None = None,
+        version_anchor: VersionAnchor | None = None,
         doc_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list[ChunkHit]:
@@ -52,8 +52,7 @@ class HybridRetriever:
         dense_hits, sparse_hits = await self._gather(
             query=query,
             tenant=tenant,
-            route_version=route_version,
-            asset_id=asset_id,
+            version_anchor=version_anchor,
             doc_types=doc_types,
             fetch_k=fetch_k,
         )
@@ -65,20 +64,19 @@ class HybridRetriever:
         *,
         query: str,
         tenant: TenantContext,
-        route_version: str | None,
-        asset_id: str | None,
+        version_anchor: VersionAnchor | None,
         doc_types: list[str] | None,
         fetch_k: int,
     ) -> tuple[list[ChunkHit], list[ChunkHit]]:
         """两路并发召回；任一路异常降级为空，不影响另一路。"""
         dense_hits, sparse_hits = await asyncio.gather(
             self._safe(self._dense.retrieve(
-                query=query, tenant=tenant, route_version=route_version,
-                asset_id=asset_id, doc_types=doc_types, top_k=fetch_k,
+                query=query, tenant=tenant, version_anchor=version_anchor,
+                doc_types=doc_types, top_k=fetch_k,
             )),
             self._safe(self._sparse.retrieve(
-                query=query, tenant=tenant, route_version=route_version,
-                asset_id=asset_id, doc_types=doc_types, top_k=fetch_k,
+                query=query, tenant=tenant, version_anchor=version_anchor,
+                doc_types=doc_types, top_k=fetch_k,
             )),
         )
         return dense_hits, sparse_hits

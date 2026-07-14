@@ -27,6 +27,8 @@ class TraceAnswer(BaseModel):
     confidence: float = 0.0             # 0.0 ~ 1.0
     hypotheses: list[RootCauseHypothesis] = Field(default_factory=list)
     subgraph_ref: str                   # 指向持久化的 TraceSubgraph（seed.node_id + as_of）
-    route_version: str | None = None    # 物理锁定的版本（从快照边透传，供 L1/L2/MES 三段链）
+    version: str | None = None          # 物理锁定的版本号（从快照边透传，供 L1/L2/MES 三段链）
+    version_kind: str | None = None     # 版本类型（route/bom/rule，MES 据此校验 ACTIVE）
+    version_ref_id: str | None = None   # 被锁定目标 ID（route_id 等）
     disclaimer: str = "本答案为追溯型 RAG 的辅助假设，最终处置需工程师确认"
     needs_human_review: bool = False
