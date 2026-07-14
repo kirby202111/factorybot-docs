@@ -1,6 +1,6 @@
-"""L1 诊断应用服务：构建 LangGraph 图、驱动 ReAct 循环、置信度兜底转人工。
+"""诊断应用服务：构建 LangGraph 图、驱动 ReAct 循环、置信度兜底转人工。
 
-L1 全程只读（ReadOnlyToolGate 在注册期 + 启动期已断言）。recursion_limit=20 硬上限，
+诊断 全程只读（ReadOnlyToolGate 在注册期 + 启动期已断言）。recursion_limit=20 硬上限，
 asyncio.wait_for 整体超时兜底。confidence < 阈值 -> needs_human_review。
 """
 from __future__ import annotations
@@ -38,9 +38,9 @@ class DiagnosisService:
         self._trace_repo = trace_repo
         self._obs = obs
         s = get_settings()
-        self._recursion_limit = recursion_limit or s.l1_recursion_limit
-        self._timeout = timeout or s.l1_session_timeout
-        self._conf_threshold = conf_threshold or s.l1_confidence_threshold
+        self._recursion_limit = recursion_limit or s.diagnosis_recursion_limit
+        self._timeout = timeout or s.diagnosis_session_timeout
+        self._conf_threshold = conf_threshold or s.diagnosis_confidence_threshold
 
     async def diagnose(self, question: str, tenant: TenantContext,
                        serial_no: str | None = None,
@@ -49,7 +49,7 @@ class DiagnosisService:
                        subgraph_ref: str | None = None) -> DiagnosisReport:
         anchor_flat = version_anchor.to_flat() if version_anchor else {}
         session = DiagnosisSession(
-            session_id=f"S-L1-{uuid.uuid4().hex[:8]}",
+            session_id=f"S-DIAG-{uuid.uuid4().hex[:8]}",
             tenant=tenant, question=question,
             serial_no=serial_no, work_order_id=work_order_id,
             version=anchor_flat.get("version"),
@@ -60,12 +60,12 @@ class DiagnosisService:
         obs_ctx = ObservabilityContext(
             session_id=session.session_id, trace_id=uuid.uuid4().hex[:32],
             tenant_id=tenant.tenant_id, workshop=tenant.workshop, line=tenant.line,
-            level="L1", prompt_version=session.prompt_version, step_no=0,
+            level="diagnosis", prompt_version=session.prompt_version, step_no=0,
         )
-        self._obs.session_started("L1")
+        self._obs.session_started("diagnosis")
         graph = build_diagnosis_graph(
             self._llm, self._registry, self._trace_repo, self._obs,
-            capability="l1", recursion_limit=self._recursion_limit,
+            capability="diagnosis", recursion_limit=self._recursion_limit,
         )
         initial = {
             "tenant": tenant, "obs_ctx": obs_ctx, "question": question,
@@ -87,7 +87,7 @@ class DiagnosisService:
             report = DiagnosisReport.model_validate(report_dict) if report_dict \
                 else DiagnosisReport.partial("图未产出报告", subgraph_ref or "")
         except GraphRecursionError:
-            self._obs.recursion_limit_hit("L1")
+            self._obs.recursion_limit_hit("diagnosis")
             report = DiagnosisReport.partial("步数超限 (recursion_limit)", subgraph_ref or "")
             session.status = SessionStatus.TIMEOUT
         except asyncio.TimeoutError:
@@ -100,9 +100,9 @@ class DiagnosisService:
         # 置信度兜底
         if report.confidence < self._conf_threshold:
             report.needs_human_review = True
-            self._obs.low_confidence("L1")
+            self._obs.low_confidence("diagnosis")
         if not report.needs_human_review:
             session.status = SessionStatus.DONE
-        self._obs.session_finished("L1", session.status.value)
+        self._obs.session_finished("diagnosis", session.status.value)
         session.touch()
         return report

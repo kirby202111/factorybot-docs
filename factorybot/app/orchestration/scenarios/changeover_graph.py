@@ -11,13 +11,13 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.domain.l3_state import L3State
+from app.domain.orchestration_state import OrchestrationState
 from app.orchestration.code_nodes.barrier import barrier_route
 from app.orchestration.supervisor_graph import SupervisorGraph
 
 
 def build_changeover_graph(sup: SupervisorGraph, checkpointer):
-    g = StateGraph(L3State)
+    g = StateGraph(OrchestrationState)
 
     g.add_node("plan", sup.plan)
     g.add_node("first_article", sup.qc.query_first_article)

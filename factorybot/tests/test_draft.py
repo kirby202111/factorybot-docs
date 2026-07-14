@@ -1,4 +1,4 @@
-"""L2 草稿端到端：L1 报告 -> 返工单草稿。requires_confirmation 恒 True，版本锚点透传。"""
+"""草稿端到端：诊断 报告 -> 返工单草稿。requires_confirmation 恒 True，版本锚点透传。"""
 import pytest
 
 from app.container import get_container
@@ -23,12 +23,12 @@ def _fake_report() -> DiagnosisReport:
 
 
 @pytest.mark.asyncio
-async def test_l2_rework_order_draft():
+async def test_draft_rework_order_draft():
     c = get_container()
     tenant = c.default_tenant()
     draft = await c.draft_service.draft(_fake_report(), DraftKind.REWORK_ORDER, tenant)
     assert draft.draft_kind == DraftKind.REWORK_ORDER
-    assert draft.requires_confirmation is True          # L2 不变式
+    assert draft.requires_confirmation is True          # 草稿 不变式
     assert draft.version == "v4"                        # 版本一致性三段链第三段
     assert draft.version_kind == "route"
     assert draft.version_ref_id == "RR-B"
@@ -37,17 +37,17 @@ async def test_l2_rework_order_draft():
 
 
 @pytest.mark.asyncio
-async def test_l2_no_write_client_gate():
-    """启动断言：L2 持有的 ACL client 无写动词方法。"""
+async def test_draft_no_write_client_gate():
+    """启动断言：草稿 持有的 ACL client 无写动词方法。"""
     from app.domain.gate import assert_no_write_clients
     c = get_container()
-    # L2 用到的只读 ACL client
-    l2_clients = [c.acl.rag, c.acl.doc_rag, c.acl.process]
-    assert_no_write_clients(l2_clients)  # 不抛异常即通过
+    # 草稿 用到的只读 ACL client
+    draft_clients = [c.acl.rag, c.acl.doc_rag, c.acl.process]
+    assert_no_write_clients(draft_clients)  # 不抛异常即通过
 
 
 @pytest.mark.asyncio
-async def test_l2_evidence_retrieval():
+async def test_draft_evidence_retrieval():
     c = get_container()
     tenant = c.default_tenant()
     draft = await c.draft_service.draft(_fake_report(), DraftKind.EIGHT_D, tenant)

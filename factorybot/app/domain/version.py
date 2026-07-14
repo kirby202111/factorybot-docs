@@ -1,6 +1,6 @@
 """版本锚点值对象（agent-service 自持契约副本）。
 
-通用 ``VersionAnchor(kind, ref_id, version)`` 是贯穿 L1/L2 版本一致性三段链的统一版本锚点：
+通用 ``VersionAnchor(kind, ref_id, version)`` 是贯穿 诊断/草稿 版本一致性三段链的统一版本锚点：
 物理锁定某次诊断/草拟时使用的具体版本。``route_version``/``bom_version``/``rule_version``/
 ``asset_version``/``standard_version`` 都是它的具化（``VersionKind``）。
 
@@ -11,8 +11,8 @@ TraceGraphView/DocSearchHit）持扁平 ``version``/``version_kind``/``version_r
 ``version_anchor()`` 属性构造本对象；ACL 方法收 ``VersionAnchor|None``。
 
 版本一致性三段传递链（核心安全契约）：
-图 ``SNAPSHOT_OF_{kind}{version}`` (RAG) -> L1 ``DiagnosisReport.version`` ->
-L2 ``Draft.version`` -> MES 应用服务校验 ACTIVE (``process_management.py``，route-specific)。
+图 ``SNAPSHOT_OF_{kind}{version}`` (RAG) -> 诊断 ``DiagnosisReport.version`` ->
+草稿 ``Draft.version`` -> MES 应用服务校验 ACTIVE (``process_management.py``，route-specific)。
 """
 from __future__ import annotations
 

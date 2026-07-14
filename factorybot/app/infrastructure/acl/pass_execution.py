@@ -50,5 +50,5 @@ class PassExecutionWriteAclClient(BaseAclClient):
                 "confirmed_by": confirmation.user_id,
             },
             tenant=tenant, confirmation=confirmation,
-            fixture_rel="l3/write_results", fixture_key="pass_release",
+            fixture_rel="orchestration/write_results", fixture_key="pass_release",
         )

@@ -1,6 +1,6 @@
 """ObservabilityPort：抽象接口，业务节点依赖它而非 OTel/prometheus 具体实现（DIP）。
 
-依赖倒置：L1/L2/L3 的业务代码只依赖 ObservabilityPort，不直接 import OTel 或
+依赖倒置：诊断/草稿/编排 的业务代码只依赖 ObservabilityPort，不直接 import OTel 或
 prometheus_client，便于替换实现与单测。
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
-"""L1/L3 工具注册：把 ACL client 方法包装成 ToolDescriptor 注册到 ToolRegistry。
+"""诊断/编排 工具注册：把 ACL client 方法包装成 ToolDescriptor 注册到 ToolRegistry。
 
-工具边界即限界上下文边界。L1 全部只读（ReadOnlyToolGate）；L3 含受限写工具
+工具边界即限界上下文边界。诊断 全部只读（ReadOnlyToolGate）；编排 含受限写工具
 （WriteToolGate：必须 requires_confirmation + writes_via）。
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from app.domain.version import VersionAnchor
 
 
 # ===========================================================================
-# L1 工具入参 schema
+# 诊断 工具入参 schema
 # ===========================================================================
 class QueryTraceabilityGraphArgs(BaseModel):
     serial_no: str
@@ -76,7 +76,7 @@ class SearchDocsArgs(BaseModel):
 
 
 # ===========================================================================
-# L3 只读工具入参 schema（agent A/B）
+# 编排 只读工具入参 schema（agent A/B）
 # ===========================================================================
 class QueryStencilLendingArgs(BaseModel):
     stencil_id: str
@@ -103,7 +103,7 @@ class QueryProductSensitivityArgs(BaseModel):
 
 
 # ===========================================================================
-# L3 受限写工具入参 schema
+# 编排 受限写工具入参 schema
 # ===========================================================================
 class WriteIsolationArgs(BaseModel):
     batches: list[str]
@@ -144,47 +144,47 @@ def _write(name, desc, ctx, writes_via, args_schema, handler, scopes=None) -> To
 
 
 # ===========================================================================
-# L1 工具注册表（全程只读）
+# 诊断 工具注册表（全程只读）
 # ===========================================================================
-def build_l1_tool_registry(acl) -> ToolRegistry:
-    reg = ToolRegistry(level="L1")
+def build_diagnosis_tool_registry(acl) -> ToolRegistry:
+    reg = ToolRegistry(level="diagnosis")
     # 注册首位：query_traceability_graph（system prompt 引导"先调图"）
     reg.register(_ro(
         "query_traceability_graph", "追溯图快路径查询（5M1E 全链路视图）",
-        "RAG服务", "l1", QueryTraceabilityGraphArgs,
+        "RAG服务", "diagnosis", QueryTraceabilityGraphArgs,
         lambda serial_no, subgraph_ref=None, version=None, version_kind=None, tenant=None, **_:
             acl.rag.query_traceability_graph(
                 serial_no, tenant, subgraph_ref,
                 VersionAnchor.from_flat(version, version_kind)),
         ["rag:read"],
     ))
-    reg.register(_ro("query_pass_records", "查过点记录", "过点执行上下文", "l1",
+    reg.register(_ro("query_pass_records", "查过点记录", "过点执行上下文", "diagnosis",
         QueryPassRecordsArgs, lambda serial_no, tenant=None, **_: acl.pass_execution.query_pass_records(serial_no, tenant), ["pass:read"]))
-    reg.register(_ro("query_test_results", "查测试结果", "过点执行上下文", "l1",
+    reg.register(_ro("query_test_results", "查测试结果", "过点执行上下文", "diagnosis",
         QueryTestResultsArgs, lambda serial_no, tenant=None, **_: acl.pass_execution.query_test_results(serial_no, tenant), ["pass:read"]))
-    reg.register(_ro("query_work_order", "查工单", "工单管理上下文", "l1",
+    reg.register(_ro("query_work_order", "查工单", "工单管理上下文", "diagnosis",
         QueryWorkOrderArgs, lambda work_order_id, tenant=None, **_: acl.work_order.query_work_order(work_order_id, tenant), ["workorder:read"]))
-    reg.register(_ro("query_wo_progress", "查工单进度", "工单管理上下文", "l1",
+    reg.register(_ro("query_wo_progress", "查工单进度", "工单管理上下文", "diagnosis",
         QueryWoProgressArgs, lambda work_order_id, tenant=None, **_: acl.work_order.query_wo_progress(work_order_id, tenant), ["workorder:read"]))
-    reg.register(_ro("query_process_route", "查工艺路线（必须带 route_version）", "工艺管理上下文", "l1",
+    reg.register(_ro("query_process_route", "查工艺路线（必须带 route_version）", "工艺管理上下文", "diagnosis",
         QueryProcessRouteArgs, lambda route_id, route_version, tenant=None, **_: acl.process.query_route(route_id, route_version, tenant), ["process:read"]))
-    reg.register(_ro("query_material_batch", "查物料批次", "物料上下文", "l1",
+    reg.register(_ro("query_material_batch", "查物料批次", "物料上下文", "diagnosis",
         QueryMaterialBatchArgs, lambda batch_no, tenant=None, **_: acl.material.query_material_batch(batch_no, tenant), ["material:read"]))
-    reg.register(_ro("query_bom_version", "查 BOM 版本", "物料上下文", "l1",
+    reg.register(_ro("query_bom_version", "查 BOM 版本", "物料上下文", "diagnosis",
         QueryBomVersionArgs, lambda bom_id, version, tenant=None, **_: acl.material.query_bom_version(bom_id, version, tenant), ["material:read"]))
-    reg.register(_ro("query_kit_status", "查工单齐套状态", "物料上下文", "l1",
+    reg.register(_ro("query_kit_status", "查工单齐套状态", "物料上下文", "diagnosis",
         QueryKitStatusArgs, lambda work_order_id, tenant=None, **_: acl.material.query_kit_status(work_order_id, tenant), ["material:read"]))
-    reg.register(_ro("query_device_params", "查设备参数时序", "设备数据接入上下文", "l1",
+    reg.register(_ro("query_device_params", "查设备参数时序", "设备数据接入上下文", "diagnosis",
         QueryDeviceParamsArgs, lambda asset_id, time_range_start="", time_range_end="", tenant=None, **_: acl.device_data.query_device_params(asset_id, time_range_start, time_range_end, tenant), ["device:read"]))
-    reg.register(_ro("query_asset_status", "查资产状态", "设备工装台账上下文", "l1",
+    reg.register(_ro("query_asset_status", "查资产状态", "设备工装台账上下文", "diagnosis",
         QueryAssetStatusArgs, lambda asset_id, tenant=None, **_: acl.asset_ledger.query_asset_status(asset_id, tenant), ["equipment:read"]))
-    reg.register(_ro("query_repair_history", "查维修历史", "返修上下文", "l1",
+    reg.register(_ro("query_repair_history", "查维修历史", "返修上下文", "diagnosis",
         QueryRepairHistoryArgs, lambda serial_no, tenant=None, **_: acl.rework.query_repair_history(serial_no, tenant), ["rework:read"]))
-    reg.register(_ro("query_rework_orders", "查返工单", "返工上下文", "l1",
+    reg.register(_ro("query_rework_orders", "查返工单", "返工上下文", "diagnosis",
         QueryReworkOrdersArgs, lambda work_order_id, tenant=None, **_: acl.rework.query_rework_orders(work_order_id, tenant), ["rework:read"]))
-    reg.register(_ro("query_defect_rate", "查不良率", "质量上下文", "l1",
+    reg.register(_ro("query_defect_rate", "查不良率", "质量上下文", "diagnosis",
         QueryDefectRateArgs, lambda batch_no=None, work_order_id=None, time_range_start=None, time_range_end=None, tenant=None, **_: acl.quality.query_defect_rate(tenant, batch_no, work_order_id, time_range_start, time_range_end), ["quality:read"]))
-    reg.register(_ro("search_docs", "文档型 RAG 检索（SOP/手册/8D）", "RAG服务", "l1",
+    reg.register(_ro("search_docs", "文档型 RAG 检索（SOP/手册/8D）", "RAG服务", "diagnosis",
         SearchDocsArgs,
         lambda query, version=None, version_kind=None, version_ref_id=None, tenant=None, **_:
             acl.doc_rag.search_docs(
@@ -195,10 +195,10 @@ def build_l1_tool_registry(acl) -> ToolRegistry:
 
 
 # ===========================================================================
-# L3 工具注册表（agent 只读 + 受限写）
+# 编排 工具注册表（agent 只读 + 受限写）
 # ===========================================================================
-def build_l3_tool_registry(acl) -> ToolRegistry:
-    reg = ToolRegistry(level="L3")
+def build_orchestration_tool_registry(acl) -> ToolRegistry:
+    reg = ToolRegistry(level="orchestration")
     # ---- agent A: root_cause（只读）----
     reg.register(_ro("query_stencil_lending", "查钢网借还记录", "工装上下文", "root_cause",
         QueryStencilLendingArgs, lambda stencil_id, tenant=None, **_: acl.tooling.query_stencil_lending(stencil_id, tenant), ["tooling:read"]))

@@ -1,4 +1,4 @@
-"""RAG 服务 ACL：文档型检索（SOP/手册/8D 历史）-- L2 草拟时检索历史同类。"""
+"""RAG 服务 ACL：文档型检索（SOP/手册/8D 历史）-- 草稿 草拟时检索历史同类。"""
 from __future__ import annotations
 
 from typing import Optional

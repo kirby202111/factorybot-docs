@@ -1,4 +1,4 @@
-"""L3 场景图装配：changeover / fault_response / complaint_8d / process_change。"""
+"""编排 场景图装配：changeover / fault_response / complaint_8d / process_change。"""
 from app.orchestration.scenarios.changeover_graph import build_changeover_graph
 from app.orchestration.scenarios.complaint_8d_graph import build_complaint_8d_graph
 from app.orchestration.scenarios.fault_response_graph import build_fault_response_graph

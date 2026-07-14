@@ -1,4 +1,4 @@
-"""L2 草稿路由：POST /agent/draft, GET /agent/draft/{id}/evidence。"""
+"""草稿路由：POST /agent/draft, GET /agent/draft/{id}/evidence。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -8,7 +8,7 @@ from app.api.schemas import DraftRequest, DraftResponse
 from app.application.draft_service import DraftService
 from app.container import Container
 
-router = APIRouter(tags=["L2-Draft"])
+router = APIRouter(tags=["Draft"])
 
 
 @router.post("/agent/draft", response_model=DraftResponse)

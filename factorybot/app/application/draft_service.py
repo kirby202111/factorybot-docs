@@ -1,7 +1,7 @@
-"""L2 草稿应用服务：分派 + 取证据 + 综合。不重查图（按 subgraph_ref 回查）。
+"""草稿应用服务：分派 + 取证据 + 综合。不重查图（按 subgraph_ref 回查）。
 
-L2 不用 LangGraph：步骤固定（取证据 -> 检索文档 -> 综合），用 async 函数编排 + 策略模式
-更简洁。requires_confirmation 恒 True（L2 不落库）。
+草稿 不用 LangGraph：步骤固定（取证据 -> 检索文档 -> 综合），用 async 函数编排 + 策略模式
+更简洁。requires_confirmation 恒 True（草稿 不落库）。
 """
 from __future__ import annotations
 
@@ -34,14 +34,14 @@ class DraftService:
         draft.requires_confirmation = True
         if draft.confidence < 0.5:
             draft.needs_review = True
-        # 版本一致性三段链第三段：透传 L1 的版本锚点
+        # 版本一致性三段链第三段：透传 诊断 的版本锚点
         if not draft.version:
             draft.version = report.version
             draft.version_kind = report.version_kind
             draft.version_ref_id = report.version_ref_id
         await self._draft_repo.archive(draft)
         await self._trace_repo.save_ok(draft_kind.value, draft, t0)
-        self._obs.session_finished("L2", "DONE")
+        self._obs.session_finished("draft", "DONE")
         return draft
 
     async def get_evidence(self, draft_id: str) -> list[dict]:

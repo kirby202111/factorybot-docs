@@ -1,15 +1,15 @@
 """SupervisorGraph：纯代码编排器容器，暴露节点可调用对象供场景装配。
 
 不持工具、不调 LLM（supervisor capability 下无任何工具，WriteToolGate 断言）。
-场景图（changeover/fault_response/...）各自装配 StateGraph(L3State)，复用这里的节点。
+场景图（changeover/fault_response/...）各自装配 StateGraph(OrchestrationState)，复用这里的节点。
 """
 from __future__ import annotations
 
 from typing import Any, Optional
 
 from app.application.action_card_dispatcher import ActionCardDispatcher
-from app.domain.l3_state import ActionCard
-from app.infrastructure.persistence.repos import L3Repo
+from app.domain.orchestration_state import ActionCard
+from app.infrastructure.persistence.repos import OrchestrationRepo
 from app.orchestration.action_card_builder import build_action_card
 from app.orchestration.agents import AgentRegistry
 from app.orchestration.code_nodes.barrier import FailureTracker, barrier_node
@@ -46,7 +46,7 @@ class SupervisorGraph:
         query_compare: QueryCompareNodes,
         agents: AgentRegistry,
         gates: GateManager,
-        repo: L3Repo,
+        repo: OrchestrationRepo,
         failure_tracker: FailureTracker,
         dispatcher: ActionCardDispatcher,
         write_service: WriteViaAppService,

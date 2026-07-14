@@ -1,4 +1,4 @@
-"""L3 代码节点（不调 LLM）。"""
+"""编排 代码节点（不调 LLM）。"""
 from app.orchestration.code_nodes.barrier import FailureTracker, barrier_node
 from app.orchestration.code_nodes.gate import GateManager
 from app.orchestration.code_nodes.plan import PlanNode

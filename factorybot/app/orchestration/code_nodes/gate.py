@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from langgraph.types import interrupt
 
-from app.domain.l3_state import ActionCard
-from app.infrastructure.persistence.repos import L3Repo
+from app.domain.orchestration_state import ActionCard
+from app.infrastructure.persistence.repos import OrchestrationRepo
 
 
 class GateManager:
-    def __init__(self, repo: L3Repo) -> None:
+    def __init__(self, repo: OrchestrationRepo) -> None:
         self._repo = repo
 
     async def await_confirmation(

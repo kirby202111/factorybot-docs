@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from app.domain.l3_state import ActionCard
+from app.domain.orchestration_state import ActionCard
 from app.infrastructure.kafka.producer import (
     ActionCardProducer, MockActionCardProducer, get_action_card_producer,
 )

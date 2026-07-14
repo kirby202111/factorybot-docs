@@ -46,11 +46,11 @@ class Settings(BaseSettings):
     default_line: str = "L-01"
 
     # ----- Agent 控制参数 -----
-    l1_recursion_limit: int = 20
-    l1_session_timeout: float = 60.0
-    l1_confidence_threshold: float = 0.5
-    l3_recursion_limit: int = 40
-    l3_session_timeout: float = 3600.0
+    diagnosis_recursion_limit: int = 20
+    diagnosis_session_timeout: float = 60.0
+    diagnosis_confidence_threshold: float = 0.5
+    orchestration_recursion_limit: int = 40
+    orchestration_session_timeout: float = 3600.0
     confirmation_token_ttl: int = 1800  # 30min
     failure_threshold: int = 2          # agent 连续失败 >=2 -> SUSPENDED
 

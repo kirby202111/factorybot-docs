@@ -1,26 +1,26 @@
-"""L3 编排路由：start / confirm / state。"""
+"""编排路由：start / confirm / state。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_container_dep, tenant_from_headers
 from app.api.schemas import (
-    ConfirmRequest, ConfirmResponse, L3StartRequest, L3StartResponse, L3StateResponse,
+    ConfirmRequest, ConfirmResponse, OrchestrationStartRequest, OrchestrationStartResponse, OrchestrationStateResponse,
 )
-from app.application.l3_orchestrator import L3Orchestrator
+from app.application.orchestration_service import OrchestrationService
 from app.container import Container
 
-router = APIRouter(prefix="/agent/l3", tags=["L3-Orchestration"])
+router = APIRouter(prefix="/agent/orchestration", tags=["Orchestration"])
 
 
-@router.post("/{scenario}/start", response_model=L3StartResponse)
-async def start_l3(
+@router.post("/{scenario}/start", response_model=OrchestrationStartResponse)
+async def start_orchestration(
     scenario: str,
-    req: L3StartRequest,
+    req: OrchestrationStartRequest,
     tenant=Depends(tenant_from_headers),
     c: Container = Depends(get_container_dep),
-) -> L3StartResponse:
-    orch: L3Orchestrator = c.l3_orchestrator
+) -> OrchestrationStartResponse:
+    orch: OrchestrationService = c.orchestration_service
     session = await orch.start(
         scenario, tenant,
         work_order_id=req.work_order_id, batch_id=req.batch_id,
@@ -28,7 +28,7 @@ async def start_l3(
         target_route_version=req.target_route_version, fault_time=req.fault_time,
         complaint_batch_id=req.complaint_batch_id,
     )
-    return L3StartResponse(
+    return OrchestrationStartResponse(
         session_id=session.session_id, scenario=session.scenario.value,
         status=session.status.value, created_at=session.created_at.isoformat(),
     )
@@ -40,23 +40,23 @@ async def confirm_gate(
     req: ConfirmRequest,
     c: Container = Depends(get_container_dep),
 ) -> ConfirmResponse:
-    orch: L3Orchestrator = c.l3_orchestrator
+    orch: OrchestrationService = c.orchestration_service
     decision = await orch.resume(session_id, req.step, req.approved, req.user_id)
     return ConfirmResponse(session_id=session_id, step=req.step, decision=decision)
 
 
-@router.get("/{session_id}/state", response_model=L3StateResponse)
+@router.get("/{session_id}/state", response_model=OrchestrationStateResponse)
 async def get_state(
     session_id: str,
     c: Container = Depends(get_container_dep),
-) -> L3StateResponse:
-    orch: L3Orchestrator = c.l3_orchestrator
+) -> OrchestrationStateResponse:
+    orch: OrchestrationService = c.orchestration_service
     session = await orch.get_session(session_id)
     if session is None:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="session not found")
     pending = await orch.pending_step(session_id)
-    return L3StateResponse(
+    return OrchestrationStateResponse(
         session_id=session.session_id, scenario=session.scenario.value,
         status=session.status.value, current_step=session.current_step,
         pending_step=pending, suspend_reason=session.suspend_reason,

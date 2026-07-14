@@ -1,8 +1,8 @@
-"""L2 NoWriteClientGate 启动断言：扫描 ACL client 方法名禁写动词。
+"""草稿 NoWriteClientGate 启动断言：扫描 ACL client 方法名禁写动词。
 
-L2 不持有任何写 client：启动时遍历所有 ACL client 的公开方法，
+草稿 不持有任何写 client：启动时遍历所有 ACL client 的公开方法，
 命中写动词（create/update/delete/submit/release/issue/save/activate/publish...）
-即拒绝启动。L2 的 ACL client 方法只能以只读动词开头。
+即拒绝启动。草稿 的 ACL client 方法只能以只读动词开头。
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ WRITE_VERBS: tuple[str, ...] = (
 
 
 class NoWriteClientGate(RuntimeError):
-    """L2 禁止持有写 client 方法。"""
+    """草稿 禁止持有写 client 方法。"""
 
 
 def assert_no_write_clients(acl_clients: list[Any]) -> None:
@@ -36,5 +36,5 @@ def assert_no_write_clients(acl_clients: list[Any]) -> None:
                 violations.append(f"{client.__class__.__name__}.{attr}")
     if violations:
         raise NoWriteClientGate(
-            "L2 禁止持有写 client 方法: " + ", ".join(violations)
+            "草稿 禁止持有写 client 方法: " + ", ".join(violations)
         )

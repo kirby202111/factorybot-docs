@@ -1,4 +1,4 @@
-"""能力 C：客诉根因追溯，复用 L1 诊断图（5M1E 假设排序 + 证据链）。
+"""能力 C：客诉根因追溯，复用 诊断图（5M1E 假设排序 + 证据链）。
 
 版本钉死由 ACL 代码做（route_version 强制过滤），agent 只消费钉死后的版本。
 """
@@ -11,13 +11,13 @@ from app.infrastructure.ai.graph_builder import build_diagnosis_graph
 class TraceabilityAgent:
     CAPABILITY = "traceability"
 
-    def __init__(self, llm, l1_registry, trace_repo, obs) -> None:
+    def __init__(self, llm, diagnosis_registry, trace_repo, obs) -> None:
         self._llm = llm
-        self._l1_registry = l1_registry
+        self._diagnosis_registry = diagnosis_registry
         self._trace_repo = trace_repo
         self._obs = obs
         self._graph = build_diagnosis_graph(
-            llm, l1_registry, trace_repo, obs, capability="l1",
+            llm, diagnosis_registry, trace_repo, obs, capability="diagnosis",
         )
 
     async def ainvoke(self, state: dict, config: dict | None = None) -> dict:

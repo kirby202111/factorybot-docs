@@ -1,7 +1,7 @@
 """composition root：构建全部单例服务并装配。
 
 依赖注入在此完成：ACL clients -> 工具注册表 -> LLM -> 可观测 -> 仓库 ->
-L1 服务 / L2 服务 / L3 编排。FastAPI 的 api/deps.py 从这里取单例。
+诊断 服务 / 草稿 服务 / 编排。FastAPI 的 api/deps.py 从这里取单例。
 """
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from typing import Optional
 from app.application.action_card_dispatcher import ActionCardDispatcher, WebSocketManager
 from app.application.diagnosis_service import DiagnosisService
 from app.application.draft_service import DraftService
-from app.application.l3_orchestrator import L3Orchestrator
-from app.application.tools import build_l1_tool_registry, build_l3_tool_registry
+from app.application.orchestration_service import OrchestrationService
+from app.application.tools import build_diagnosis_tool_registry, build_orchestration_tool_registry
 from app.application.builders.eight_d import EightDDraftBuilder
 from app.application.builders.rework_order import ReworkOrderDraftBuilder
 from app.application.builders.sop import SopDraftBuilder
@@ -27,8 +27,8 @@ from app.infrastructure.longtask.session_manager import SessionManager
 from app.infrastructure.obs.observability import build_observability
 from app.infrastructure.persistence.checkpointer import get_checkpointer
 from app.infrastructure.persistence.repos import (
-    DraftRepo, DraftTraceRepo, L3Repo, NodeTraceRepo, ToolCallTraceRepo,
-    get_l3_repo, get_tool_call_trace_repo,
+    DraftRepo, DraftTraceRepo, OrchestrationRepo, NodeTraceRepo, ToolCallTraceRepo,
+    get_orchestration_repo, get_tool_call_trace_repo,
 )
 from app.infrastructure.redis_.confirmation_store import ConfirmationStore
 from app.infrastructure.redis_.fake_redis import get_redis
@@ -59,7 +59,7 @@ class Container:
         self.draft_repo = DraftRepo()
         self.draft_trace_repo = DraftTraceRepo()
         self.node_trace_repo = NodeTraceRepo()
-        self.l3_repo = get_l3_repo()
+        self.orchestration_repo = get_orchestration_repo()
         # LLM
         self.llm = get_llm(self.obs)
         # ACL
@@ -68,16 +68,16 @@ class Container:
             confirmation_store=self.confirmation_store,
         )
         # 工具注册表
-        self.l1_registry = build_l1_tool_registry(self.acl)
-        self.l3_registry = build_l3_tool_registry(self.acl)
+        self.diagnosis_registry = build_diagnosis_tool_registry(self.acl)
+        self.orchestration_registry = build_orchestration_tool_registry(self.acl)
         # 成本
         self.eval_gate = EvalGate()
         self.model_router = ModelRouter(self.eval_gate, allow_mock=self.settings.is_mock)
-        # L1 服务
+        # 诊断 服务
         self.diagnosis_service = DiagnosisService(
-            self.l1_registry, self.llm, self.tool_trace_repo, self.obs,
+            self.diagnosis_registry, self.llm, self.tool_trace_repo, self.obs,
         )
-        # L2 服务
+        # 草稿 服务
         self.builders = {
             DraftKind.REWORK_ORDER: ReworkOrderDraftBuilder(self.acl.rag, self.acl.process, self.llm),
             DraftKind.EIGHT_D: EightDDraftBuilder(self.acl.rag, self.acl.doc_rag, self.llm),
@@ -86,19 +86,19 @@ class Container:
         self.draft_service = DraftService(
             self.builders, self.draft_repo, self.draft_trace_repo, self.obs,
         )
-        # L3 编排
+        # 编排
         self.dispatcher = ActionCardDispatcher(WebSocketManager())
-        self.failure_tracker = FailureTracker(self.l3_repo, self.settings.failure_threshold)
-        self.gate_manager = GateManager(self.l3_repo)
+        self.failure_tracker = FailureTracker(self.orchestration_repo, self.settings.failure_threshold)
+        self.gate_manager = GateManager(self.orchestration_repo)
         self.query_compare = QueryCompareNodes(
-            self.acl.tooling, self.acl.process, self.acl.material, self.l3_repo,
+            self.acl.tooling, self.acl.process, self.acl.material, self.orchestration_repo,
         )
-        self.write_service = WriteViaAppService(self.l3_registry)
+        self.write_service = WriteViaAppService(self.orchestration_registry)
         self.agents = build_agent_registry(
-            self.llm, self.l3_registry, self.l1_registry, self.tool_trace_repo, self.obs,
+            self.llm, self.orchestration_registry, self.diagnosis_registry, self.tool_trace_repo, self.obs,
         )
         self.supervisor = SupervisorGraph(
-            self.query_compare, self.agents, self.gate_manager, self.l3_repo,
+            self.query_compare, self.agents, self.gate_manager, self.orchestration_repo,
             self.failure_tracker, self.dispatcher, self.write_service,
         )
         self.graphs = {
@@ -107,17 +107,17 @@ class Container:
             "COMPLAINT_8D": build_complaint_8d_graph(self.supervisor, self.checkpointer),
             "PROCESS_CHANGE": build_process_change_graph(self.supervisor, self.checkpointer),
         }
-        self.session_manager = SessionManager(self.l3_repo)
-        self.l3_orchestrator = L3Orchestrator(
-            self.graphs, self.session_manager, self.l3_repo,
+        self.session_manager = SessionManager(self.orchestration_repo)
+        self.orchestration_service = OrchestrationService(
+            self.graphs, self.session_manager, self.orchestration_repo,
             self.confirmation_store, self.dispatcher,
         )
 
     # ---- 启动断言 ----
     def validate_on_startup(self) -> None:
         """三层写防线启动断言。"""
-        self.l1_registry.validate_on_startup()
-        self.l3_registry.validate_on_startup()
+        self.diagnosis_registry.validate_on_startup()
+        self.orchestration_registry.validate_on_startup()
         self.model_router.validate_on_startup()
 
     def default_tenant(self) -> TenantContext:

@@ -1,4 +1,4 @@
-"""L2 证据视图：RAG 子图节点的防腐层视图。"""
+"""草稿 证据视图：RAG 子图节点的防腐层视图。"""
 from __future__ import annotations
 
 from typing import Any
@@ -9,7 +9,7 @@ from app.domain.version import VersionAnchor
 
 
 class TraceNodeView(BaseModel):
-    """追溯子图节点（L2 按 subgraph_ref 回查，不重查图）。
+    """追溯子图节点（草稿 按 subgraph_ref 回查，不重查图）。
 
     对应 Neo4j 节点：CheckpointRecord / WorkOrder / WipUnit / InventoryBatch /
     Asset / RouteVersion / TestResult / QualityVerdict ...

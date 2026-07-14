@@ -64,7 +64,7 @@ class ToolCallTraceRepo:
 
 
 class DraftRepo:
-    """草稿归档（draft_trace），L2 只落草稿不落库。"""
+    """草稿归档（draft_trace），草稿 只落草稿不落库。"""
     def __init__(self) -> None:
         self._drafts: dict[str, Any] = {}
 
@@ -95,7 +95,7 @@ class DraftTraceRepo:
 
 
 class NodeTraceRepo:
-    """L3 node_trace：CODE/AGENT 节点执行记录。"""
+    """编排 node_trace：CODE/AGENT 节点执行记录。"""
     def __init__(self) -> None:
         self._rows: list[dict] = []
 
@@ -117,8 +117,8 @@ class NodeTraceRepo:
         return [r for r in self._rows if r["session_id"] == session_id]
 
 
-class L3Repo:
-    """L3 会话/步骤/gate/失败计数 仓储。"""
+class OrchestrationRepo:
+    """编排 会话/步骤/gate/失败计数 仓储。"""
 
     def __init__(self) -> None:
         self._sessions: dict[str, Any] = {}
@@ -136,7 +136,7 @@ class L3Repo:
     async def update_status(self, session_id: str, status: str,
                             current_step: str | None = None,
                             suspend_reason: str = "") -> None:
-        from app.domain.l3_state import SessionStatus
+        from app.domain.orchestration_state import SessionStatus
         s = self._sessions.get(session_id)
         if s:
             try:
@@ -196,15 +196,15 @@ class L3Repo:
 
 
 # ---- 单例 ----
-_l3_repo: L3Repo | None = None
+_orchestration_repo: OrchestrationRepo | None = None
 _trace_repo: ToolCallTraceRepo | None = None
 
 
-def get_l3_repo() -> L3Repo:
-    global _l3_repo
-    if _l3_repo is None:
-        _l3_repo = L3Repo()
-    return _l3_repo
+def get_orchestration_repo() -> OrchestrationRepo:
+    global _orchestration_repo
+    if _orchestration_repo is None:
+        _orchestration_repo = OrchestrationRepo()
+    return _orchestration_repo
 
 
 def get_tool_call_trace_repo() -> ToolCallTraceRepo:

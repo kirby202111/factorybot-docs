@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.domain.l3_state import L3State
+from app.domain.orchestration_state import OrchestrationState
 from app.orchestration.supervisor_graph import SupervisorGraph, _token_from_dict
 
 
@@ -20,7 +20,7 @@ def _fault_barrier(state: dict) -> str:
 
 
 def build_fault_response_graph(sup: SupervisorGraph, checkpointer):
-    g = StateGraph(L3State)
+    g = StateGraph(OrchestrationState)
     g.add_node("plan", sup.plan)
     g.add_node("draft_repair_order", sup.qc.draft_repair_order)
     g.add_node("fault_impact", sup.run_agent("fault_impact"))

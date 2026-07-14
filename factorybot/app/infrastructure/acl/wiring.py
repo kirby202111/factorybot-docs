@@ -53,7 +53,7 @@ def build_acl_clients(
         quality=QualityAclClient(http, "/api", fixtures, mock),
         rag=RagAclClient(http, "", fixtures, mock),
         doc_rag=DocRagAclClient(http, "", fixtures, mock),
-        # 受限写（L3，带 confirmation_store）
+        # 受限写（编排，带 confirmation_store）
         pass_write=PassExecutionWriteAclClient(http, "/api", fixtures, mock),
         process_write=ProcessWriteAclClient(http, "/api", fixtures, mock),
         rework_write=ReworkWriteAclClient(http, "/api", fixtures, mock, confirmation_store=confirmation_store),

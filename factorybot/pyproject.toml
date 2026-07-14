@@ -1,7 +1,7 @@
 [project]
 name = "factorybot"
 version = "0.1.0"
-description = "MES Agent 服务 (L1 诊断 / L2 草稿 / L3 编排) — LangGraph + FastAPI"
+description = "MES Agent 服务 (诊断 / 草稿 / 编排) — LangGraph + FastAPI"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

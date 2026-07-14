@@ -11,7 +11,7 @@ Pod 被 OOM Kill / 滚动更新后，新 Pod 同一 thread_id 调 ainvoke(Comman
 - FailureTracker：app/orchestration/code_nodes/barrier.py
 - ConfirmationStore：app/infrastructure/redis_/confirmation_store.py
 - ActionCardDispatcher：app/application/action_card_dispatcher.py
-- L3Orchestrator：app/application/l3_orchestrator.py
+- OrchestrationService：app/application/orchestration_service.py
 - SqlSaver/MemorySaver：app/infrastructure/persistence/checkpointer.py
 """
 from app.infrastructure.longtask.session_manager import SessionManager

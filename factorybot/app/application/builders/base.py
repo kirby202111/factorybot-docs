@@ -34,7 +34,7 @@ def extract_sn_list(nodes: list[dict]) -> list[str]:
 
 
 def extract_version_anchor(report: DiagnosisReport) -> VersionAnchor | None:
-    """从 L1 报告提取版本锚点（三段链第三段透传源）。"""
+    """从 诊断 报告提取版本锚点（三段链第三段透传源）。"""
     return report.version_anchor()
 
 

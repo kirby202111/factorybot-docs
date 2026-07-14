@@ -1,12 +1,12 @@
 """ReAct 图基座：通用 model -> tools -> model 子图，行为由钩子注入。
 
-L1 诊断图与 L3 agent 子图（A/B/D）共用此基座，仅 prompt / 收尾不同：
+诊断图与 编排 agent 子图（A/B/D）共用此基座，仅 prompt / 收尾不同：
 - prompt_fn(state): 系统提示（每步重建）
 - user_prompt_fn(state): 首轮 user 消息（默认 inputs_to_text）
 - finalize_fn(content, state): 终止步收尾，返回 state 增量（默认 json.loads -> {"result":...}）
 
-L1 的 _guard_no_evidence 护栏作为 L1 专属 finalize_fn 注入，不下沉基座
-（draft 类开放生成 agent 不应被误伤）。详见 graph_builder.l1_finalize。
+诊断 的 _guard_no_evidence 护栏作为 诊断 专属 finalize_fn 注入，不下沉基座
+（draft 类开放生成 agent 不应被误伤）。详见 graph_builder.diagnosis_finalize。
 """
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def build_react_graph(
     - prompt_fn(state)->str：系统提示。
     - user_prompt_fn(state)->str：首轮 user 消息；默认 inputs_to_text(inputs)。
     - finalize_fn(content, state)->dict：终止步返回的 state 增量；默认 _default_finalize。
-    - state_schema：LangGraph state TypedDict，默认 ReactState；L1 传 AgentState 以声明 report 通道。
+    - state_schema：LangGraph state TypedDict，默认 ReactState；诊断 传 AgentState 以声明 report 通道。
     """
     tool_node = ToolNode(registry, trace_repo, obs, capability)
     _user_prompt_fn = user_prompt_fn or (lambda state: inputs_to_text(state.get("inputs", {})))
@@ -106,7 +106,7 @@ def build_react_graph(
                 "messages": new_msgs,
                 "step_no": step_no,
             }
-        # 终止：按 finalize_fn 收尾（L1 解析报告 + 护栏；其余默认 json.loads）
+        # 终止：按 finalize_fn 收尾（诊断 解析报告 + 护栏；其余默认 json.loads）
         new_msgs.append(assistant_msg(resp.content))
         updates = finalize_fn(resp.content, state) if finalize_fn else _default_finalize(resp.content)
         return {"pending_tool_calls": [], "messages": new_msgs,

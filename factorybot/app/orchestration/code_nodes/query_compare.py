@@ -8,7 +8,7 @@ from app.domain.tenant import TenantContext
 from app.infrastructure.acl.material import MaterialAclClient
 from app.infrastructure.acl.process_management import ProcessManagementAclClient
 from app.infrastructure.acl.tooling import ToolingAclClient
-from app.infrastructure.persistence.repos import L3Repo
+from app.infrastructure.persistence.repos import OrchestrationRepo
 
 
 class QueryCompareNodes:
@@ -17,7 +17,7 @@ class QueryCompareNodes:
         tooling_acl: ToolingAclClient,
         route_acl: ProcessManagementAclClient,
         material_acl: MaterialAclClient,
-        repo: L3Repo,
+        repo: OrchestrationRepo,
     ) -> None:
         self._tooling_acl = tooling_acl
         self._route_acl = route_acl

@@ -1,7 +1,7 @@
 """租户上下文：随会话流动，工具调用前按 scope 过滤。
 
 对齐 14 个限界上下文暴露的 toolset 边界--Agent 能调的工具 = 上下文暴露的 toolset，
-权限在调用前按 TenantContext 过滤（引入路线 §4 / L1 §4）。
+权限在调用前按 TenantContext 过滤（引入路线 §4 / 诊断 §4）。
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
-"""L3 编排领域模型：L3Session / L3Step / ActionCard / GateDecision / L3State。
+"""编排领域模型：OrchestrationSession / OrchestrationStep / ActionCard / GateDecision / OrchestrationState。
 
-L3State 是 supervisor StateGraph 的 channel schema；每个字段是一个 channel。
+OrchestrationState 是 supervisor StateGraph 的 channel schema；每个字段是一个 channel。
 纯代码编排器（supervisor）不持工具、不调 LLM，只做 plan/dispatch/barrier/gate。
 """
 from __future__ import annotations
@@ -85,7 +85,7 @@ class GateDecision(BaseModel):
     token_id: str = ""
 
 
-class L3Session(BaseModel):
+class OrchestrationSession(BaseModel):
     session_id: str
     scenario: ScenarioType
     work_order_id: Optional[str] = None
@@ -102,7 +102,7 @@ class L3Session(BaseModel):
     suspend_reason: str = ""
 
 
-class L3Step(BaseModel):
+class OrchestrationStep(BaseModel):
     record_id: str
     session_id: str
     step: str
@@ -118,14 +118,14 @@ class L3Step(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# L3State：supervisor StateGraph 的 channel schema
+# OrchestrationState：supervisor StateGraph 的 channel schema
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# L3State：supervisor StateGraph 的 channel schema（TypedDict，节点收 dict）
+# OrchestrationState：supervisor StateGraph 的 channel schema（TypedDict，节点收 dict）
 # ---------------------------------------------------------------------------
 
-class L3State(TypedDict, total=False):
+class OrchestrationState(TypedDict, total=False):
     """每个字段是一个 LangGraph channel。换线/故障/客诉/工艺变更共用一套 schema，
     各场景只装配自己用到的子集。total=False：所有字段可选，节点用 state.get() 取。"""
 

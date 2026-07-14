@@ -61,7 +61,7 @@ class MetricsCollector:
     def llm_called(self, model: str, prompt_version: str, prompt_tokens: int,
                    completion_tokens: int, latency_ms: int, finish_reason: str,
                    obs_ctx=None) -> None:
-        level = obs_ctx.level if obs_ctx else "L1"
+        level = obs_ctx.level if obs_ctx else "diagnosis"
         LLM_INVOCATION_TOTAL.labels(model=model, level=level).inc()
         LLM_LATENCY.labels(model=model).observe(latency_ms / 1000.0)
         TOKEN_TOTAL.labels(model=model, direction="prompt", level=level).inc(prompt_tokens)

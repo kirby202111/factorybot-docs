@@ -9,7 +9,7 @@ from app.domain.draft import Draft, DraftKind
 from app.domain.report import DiagnosisReport, Hypothesis
 
 
-# ---- L1 ----
+# ---- 诊断 ----
 class DiagnosisRequest(BaseModel):
     question: str
     serial_no: str | None = None
@@ -34,7 +34,7 @@ class DiagnosisReportResponse(BaseModel):
     needs_human_review: bool = False
 
 
-# ---- L2 ----
+# ---- 草稿 ----
 class DraftRequest(BaseModel):
     diagnosis_report: DiagnosisReport
     draft_kind: DraftKind
@@ -44,8 +44,8 @@ class DraftResponse(Draft):
     pass
 
 
-# ---- L3 ----
-class L3StartRequest(BaseModel):
+# ---- 编排 ----
+class OrchestrationStartRequest(BaseModel):
     work_order_id: str | None = None
     batch_id: str | None = None
     asset_id: str | None = None
@@ -55,7 +55,7 @@ class L3StartRequest(BaseModel):
     complaint_batch_id: str | None = None
 
 
-class L3StartResponse(BaseModel):
+class OrchestrationStartResponse(BaseModel):
     session_id: str
     scenario: str
     status: str
@@ -74,7 +74,7 @@ class ConfirmResponse(BaseModel):
     decision: str
 
 
-class L3StateResponse(BaseModel):
+class OrchestrationStateResponse(BaseModel):
     session_id: str
     scenario: str
     status: str

@@ -8,7 +8,7 @@ from app.domain.tool import ToolRegistry
 
 
 class WriteViaAppService:
-    """通过 L3 工具注册表的写工具（capability=write）调应用服务。"""
+    """通过 编排 工具注册表的写工具（capability=write）调应用服务。"""
 
     def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry

@@ -5,13 +5,13 @@ FailureTracker：按 session+capability 计 agent 连续失败，>=2 -> SUSPENDE
 """
 from __future__ import annotations
 
-from app.infrastructure.persistence.repos import L3Repo
+from app.infrastructure.persistence.repos import OrchestrationRepo
 
 
 class FailureTracker:
     """agent 连续失败计数。>=2 次 -> SUSPENDED。成功则重置。"""
 
-    def __init__(self, repo: L3Repo, threshold: int = 2) -> None:
+    def __init__(self, repo: OrchestrationRepo, threshold: int = 2) -> None:
         self._repo = repo
         self._threshold = threshold
 
@@ -30,7 +30,7 @@ class FailureTracker:
         return True
 
 
-async def barrier_node(state: dict, repo: L3Repo, dispatcher=None) -> dict:
+async def barrier_node(state: dict, repo: OrchestrationRepo, dispatcher=None) -> dict:
     """并行分支汇合：按 tooling/kitting 结构化结果确定性分流。"""
     t = state.get("tooling_result") or {}
     k = state.get("kitting_result") or {}

@@ -1,4 +1,4 @@
-"""L3 换线端到端：start -> 多次 confirm -> DONE。
+"""编排 换线端到端：start -> 多次 confirm -> DONE。
 
 默认 fixtures 为 tooling FAIL 路径（ASSET-01 钢网 ST-A != RR-B 期望 ST-B），
 故走 root_cause(A) -> gate_disposition 分支。需确认 3 个 gate：
@@ -9,7 +9,7 @@ import asyncio
 import pytest
 
 from app.container import get_container
-from app.domain.l3_state import SessionStatus
+from app.domain.orchestration_state import SessionStatus
 
 
 async def _wait_pending(orch, session_id, timeout=5.0):
@@ -29,9 +29,9 @@ async def _wait_pending(orch, session_id, timeout=5.0):
 
 
 @pytest.mark.asyncio
-async def test_l3_changeover_full_flow():
+async def test_orchestration_changeover_full_flow():
     c = get_container()
-    orch = c.l3_orchestrator
+    orch = c.orchestration_service
     tenant = c.default_tenant()
     session = await orch.start(
         "changeover", tenant,
@@ -60,10 +60,10 @@ async def test_l3_changeover_full_flow():
 
 
 @pytest.mark.asyncio
-async def test_l3_write_tool_gate_assertion():
-    """启动断言：L3 写工具都声明 requires_confirmation + writes_via。"""
+async def test_orchestration_write_tool_gate_assertion():
+    """启动断言：编排 写工具都声明 requires_confirmation + writes_via。"""
     c = get_container()
-    c.l3_registry.validate_on_startup()  # 不抛异常即通过
-    write_tools = [t for t in c.l3_registry.all() if not t.read_only]
+    c.orchestration_registry.validate_on_startup()  # 不抛异常即通过
+    write_tools = [t for t in c.orchestration_registry.all() if not t.read_only]
     assert write_tools, "应有受限写工具"
     assert all(t.requires_confirmation and t.writes_via for t in write_tools)

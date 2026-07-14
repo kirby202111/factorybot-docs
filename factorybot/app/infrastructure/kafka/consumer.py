@@ -1,4 +1,4 @@
-"""领域事件订阅：主动触发 L2 SOP 草拟 / L3 故障复产 / L1 主动诊断。
+"""领域事件订阅：主动触发 草稿 SOP 草拟 / 编排 故障复产 / 诊断 主动诊断。
 
 mock 模式：从 data/kafka/*.json 加载事件，手动 dispatch（无真实 Kafka 消费循环）。
 real 模式：aiokafka 消费 process.route.lifecycle / eam.asset.availability / mes.defect-rate-spike。

@@ -25,7 +25,7 @@ class SopDraftBuilder:
         )
         ver = anchor.version if anchor else None
         kind = anchor.kind.value if anchor else None
-        user = f"L1 诊断: {report.summary}\n参考SOP: {[d.get('title') for d in existing[:3]]}\nversion={ver} (kind={kind})"
+        user = f"诊断: {report.summary}\n参考SOP: {[d.get('title') for d in existing[:3]]}\nversion={ver} (kind={kind})"
         draft = await self._llm.ainvoke_structured(
             [{"role": "system", "content": prompt}, {"role": "user", "content": user}],
             Draft,

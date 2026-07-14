@@ -1,4 +1,4 @@
-"""L3Orchestrator：会话生命周期 + interrupt/resume 驱动。
+"""OrchestrationService：会话生命周期 + interrupt/resume 驱动。
 
 start() 创建 session + asyncio.create_task(_drive) 点火；HTTP 立即返回 session_id。
 _drive() ainvoke 到首个 gate interrupt 返回；_after_invoke() 检测 interrupt -> 推动作卡。
@@ -17,10 +17,10 @@ from langgraph.types import Command
 
 from app.application.action_card_dispatcher import ActionCardDispatcher
 from app.config import get_settings
-from app.domain.l3_state import ActionCard, L3Session, ScenarioType, SessionStatus
+from app.domain.orchestration_state import ActionCard, OrchestrationSession, ScenarioType, SessionStatus
 from app.domain.tenant import TenantContext
 from app.infrastructure.longtask.session_manager import SessionManager
-from app.infrastructure.persistence.repos import L3Repo
+from app.infrastructure.persistence.repos import OrchestrationRepo
 from app.infrastructure.redis_.confirmation_store import ConfirmationStore
 
 SCENARIO_MAP: dict[str, ScenarioType] = {
@@ -71,12 +71,12 @@ def _extract_pending_interrupts(state) -> list:
     return result
 
 
-class L3Orchestrator:
+class OrchestrationService:
     def __init__(
         self,
         graphs: dict[str, object],
         session_manager: SessionManager,
-        repo: L3Repo,
+        repo: OrchestrationRepo,
         confirmation_store: ConfirmationStore,
         dispatcher: ActionCardDispatcher,
     ) -> None:
@@ -86,8 +86,8 @@ class L3Orchestrator:
         self._store = confirmation_store
         self._dispatcher = dispatcher
         s = get_settings()
-        self._recursion_limit = s.l3_recursion_limit
-        self._timeout = s.l3_session_timeout
+        self._recursion_limit = s.orchestration_recursion_limit
+        self._timeout = s.orchestration_session_timeout
         self._active_tasks: dict[str, asyncio.Task] = {}
 
     # ---- 启动 ----
@@ -97,19 +97,19 @@ class L3Orchestrator:
         asset_id: str | None = None, target_route_id: str | None = None,
         target_route_version: str | None = None, fault_time: str | None = None,
         complaint_batch_id: str | None = None,
-    ) -> L3Session:
+    ) -> OrchestrationSession:
         sc = SCENARIO_MAP.get(scenario)
         if sc is None:
             raise ValueError(f"未知场景: {scenario}")
-        session = L3Session(
-            session_id=f"S-L3-{uuid.uuid4().hex[:8]}",
+        session = OrchestrationSession(
+            session_id=f"S-ORCH-{uuid.uuid4().hex[:8]}",
             scenario=sc, work_order_id=work_order_id, batch_id=batch_id,
             asset_id=asset_id, target_route_id=target_route_id,
             target_route_version=target_route_version,
             tenant_context=tenant.model_dump(),
             status=SessionStatus.PLANNING,
         )
-        # 故障/客诉场景的额外字段存入 tenant_context 旁路（L3State 在 _drive 注入）
+        # 故障/客诉场景的额外字段存入 tenant_context 旁路（OrchestrationState 在 _drive 注入）
         if fault_time:
             session.tenant_context["fault_time"] = fault_time
         if complaint_batch_id:
@@ -121,7 +121,7 @@ class L3Orchestrator:
         task.add_done_callback(lambda t: self._active_tasks.pop(session.session_id, None))
         return session
 
-    async def _drive(self, session: L3Session, tenant: TenantContext) -> None:
+    async def _drive(self, session: OrchestrationSession, tenant: TenantContext) -> None:
         graph = self._graphs[session.scenario.value]
         config = {"configurable": {"thread_id": session.session_id},
                   "recursion_limit": self._recursion_limit}
@@ -208,7 +208,7 @@ class L3Orchestrator:
         return None
 
     # ---- 查询 ----
-    async def get_session(self, session_id: str) -> Optional[L3Session]:
+    async def get_session(self, session_id: str) -> Optional[OrchestrationSession]:
         return await self._repo.get_session(session_id)
 
     async def pending_step(self, session_id: str) -> Optional[str]:

@@ -1,7 +1,7 @@
-"""L1 诊断图配置：系统提示 / 首轮 user / 终止收尾（parse + 幻觉护栏）。
+"""诊断图配置：系统提示 / 首轮 user / 终止收尾（parse + 幻觉护栏）。
 
-图骨架委托 app.infrastructure.ai.react_graph.build_react_graph；本模块只持有 L1 专属的
-提示词与收尾逻辑。_guard_no_evidence 作为 l1_finalize 的一部分，是 L1/C 专属护栏，
+图骨架委托 app.infrastructure.ai.react_graph.build_react_graph；本模块只持有 诊断 专属的
+提示词与收尾逻辑。_guard_no_evidence 作为 diagnosis_finalize 的一部分，是 诊断/C 专属护栏，
 不下沉通用基座（draft 类开放生成 agent 不应被误伤）。
 
 recursion_limit=20 硬上限靠框架兜底；DiagnosisService 外层再加 asyncio.wait_for 整体超时。
@@ -37,7 +37,7 @@ class AgentState(TypedDict, total=False):
     report: Optional[dict]
 
 
-L1_SYSTEM_PROMPT = (
+DIAGNOSIS_SYSTEM_PROMPT = (
     "你是 MES 车间根因诊断助手。基于只读工具按 5M1E 给出根因假设排序。\n"
     "约束：\n"
     "1. 只能调用提供的工具，不得编造数据。\n"
@@ -66,42 +66,42 @@ L1_SYSTEM_PROMPT = (
 
 def build_diagnosis_graph(
     llm, registry: ToolRegistry, trace_repo: ToolCallTraceRepo, obs=None,
-    capability: str = "l1", recursion_limit: int = 20,
+    capability: str = "diagnosis", recursion_limit: int = 20,
 ):
-    """构建 L1 诊断图：build_react_graph + L1 专属钩子（prompt/user/finalize）。
+    """构建 诊断图：build_react_graph + 诊断 专属钩子（prompt/user/finalize）。
 
-    L1（DiagnosisService）与 C（TraceabilityAgent）共用此入口，共享 l1_finalize
+    诊断（DiagnosisService）与 C（TraceabilityAgent）共用此入口，共享 diagnosis_finalize
     （含 _guard_no_evidence 护栏）。无 checkpointer，同步跑完。
     """
     return build_react_graph(
         llm, registry, trace_repo, obs,
         capability=capability,
-        prompt_fn=l1_prompt,
-        user_prompt_fn=l1_user_prompt,
-        finalize_fn=l1_finalize,
+        prompt_fn=diagnosis_prompt,
+        user_prompt_fn=diagnosis_user_prompt,
+        finalize_fn=diagnosis_finalize,
         state_schema=AgentState,
         recursion_limit=recursion_limit,
     )
 
 
-# ---- L1 钩子（注入 build_react_graph）----
+# ---- 诊断 钩子（注入 build_react_graph）----
 
-def l1_prompt(state) -> str:
-    return L1_SYSTEM_PROMPT
+def diagnosis_prompt(state) -> str:
+    return DIAGNOSIS_SYSTEM_PROMPT
 
 
-def l1_user_prompt(state) -> str:
+def diagnosis_user_prompt(state) -> str:
     return _build_user_prompt(state)
 
 
-def l1_finalize(content: str, state) -> dict:
+def diagnosis_finalize(content: str, state) -> dict:
     """终止步：解析 DiagnosisReport + 幻觉护栏，返回 {"report": ...}。"""
     report = _parse_report(content, state)
     report = _guard_no_evidence(report, state)
     return {"report": report.model_dump()}
 
 
-# ---- L1 专属实现：提示构造 / 报告解析 / 护栏 ----
+# ---- 诊断 专属实现：提示构造 / 报告解析 / 护栏 ----
 
 def _build_user_prompt(state: AgentState) -> str:
     q = state.get("question", "")

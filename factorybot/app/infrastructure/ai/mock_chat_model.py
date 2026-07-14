@@ -1,7 +1,7 @@
 """MockChatModel：确定性 LLM 替身，离线驱动 ReAct + 结构化输出。
 
 无 API Key 时由 llm_factory 选用。按 system prompt 识别"能力"，按对话步数推进：
-- L1 诊断：query_traceability_graph -> query_pass_records -> 输出 DiagnosisReport
+- 诊断：query_traceability_graph -> query_pass_records -> 输出 DiagnosisReport
 - root_cause (A)：query_stencil_lending -> 输出根因 + 处置卡
 - fault_impact (B)：输出隔离范围
 - draft (D)：输出草稿/动作卡
@@ -36,22 +36,22 @@ class MockChatModel:
         if "草拟" in sys_text or "draft" in sys_text.lower():
             return self._draft(sys_text, user_text, step)
         if "5M1E" in sys_text or "根因诊断助手" in sys_text:
-            return self._l1_diagnosis(user_text, tool_results, step)
+            return self._diagnosis(user_text, tool_results, step)
         # 兜底
         return ModelResponse(content=json.dumps({"status": "ok"}, ensure_ascii=False))
 
     async def ainvoke_structured(self, messages: list[dict], schema: type) -> Any:
         sys_text = _find(messages, "system") or ""
         user_text = _find(messages, "user") or ""
-        # L2 Draft 草稿
+        # 草稿 Draft 草稿
         from app.domain.draft import Draft, DraftKind
         if schema is Draft or getattr(schema, "__name__", "") == "Draft":
             return self._build_draft(sys_text, user_text)
         # 兜底：尽力构造 schema
         return self._construct_default(schema)
 
-    # ---- L1 诊断 ----
-    def _l1_diagnosis(self, user_text: str, tool_results: list[dict], step: int) -> ModelResponse:
+    # ---- 诊断 ----
+    def _diagnosis(self, user_text: str, tool_results: list[dict], step: int) -> ModelResponse:
         sn = _extract(r"SN-[A-Za-z0-9-]+", user_text) or "SN-2026-001234"
         if step == 0:
             return ModelResponse(
@@ -155,7 +155,7 @@ class MockChatModel:
         }
         return ModelResponse(content=json.dumps(result, ensure_ascii=False))
 
-    # ---- D 草拟（L3 agent 路径，返回动作卡 JSON）----
+    # ---- D 草拟（编排 agent 路径，返回动作卡 JSON）----
     def _draft(self, sys_text: str, user_text: str, step: int) -> ModelResponse:
         if "8D" in sys_text or "8d" in sys_text:
             payload = {
@@ -186,7 +186,7 @@ class MockChatModel:
             }
         return ModelResponse(content=json.dumps(payload, ensure_ascii=False))
 
-    # ---- L2 Draft 结构化输出 ----
+    # ---- 草稿 Draft 结构化输出 ----
     def _build_draft(self, sys_text: str, user_text: str):
         from app.domain.draft import Draft, DraftKind
         wo = _extract_kv(user_text, "source_work_order_id") or "WO-2026-0701"

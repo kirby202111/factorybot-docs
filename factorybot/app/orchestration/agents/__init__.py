@@ -25,7 +25,7 @@ class AgentRegistry:
 
 
 def build_agent_registry(
-    llm, l3_registry, l1_registry, trace_repo, obs,
+    llm, orchestration_registry, diagnosis_registry, trace_repo, obs,
 ) -> AgentRegistry:
     """构建 A/B/C/D agent 注册表。"""
     from app.orchestration.agents.draft_agents import DraftAgent
@@ -34,10 +34,10 @@ def build_agent_registry(
     from app.orchestration.agents.traceability_agent import TraceabilityAgent
 
     reg = AgentRegistry()
-    reg.register(RootCauseAgent(llm, l3_registry, trace_repo, obs))         # A
-    reg.register(FaultImpactAgent(llm, l3_registry, trace_repo, obs))       # B
-    reg.register(TraceabilityAgent(llm, l1_registry, trace_repo, obs))      # C
-    reg.register(DraftAgent("draft_sop", llm, l3_registry, trace_repo, obs))
-    reg.register(DraftAgent("draft_8d", llm, l3_registry, trace_repo, obs))
-    reg.register(DraftAgent("draft_rework_craft", llm, l3_registry, trace_repo, obs))
+    reg.register(RootCauseAgent(llm, orchestration_registry, trace_repo, obs))         # A
+    reg.register(FaultImpactAgent(llm, orchestration_registry, trace_repo, obs))       # B
+    reg.register(TraceabilityAgent(llm, diagnosis_registry, trace_repo, obs))      # C
+    reg.register(DraftAgent("draft_sop", llm, orchestration_registry, trace_repo, obs))
+    reg.register(DraftAgent("draft_8d", llm, orchestration_registry, trace_repo, obs))
+    reg.register(DraftAgent("draft_rework_craft", llm, orchestration_registry, trace_repo, obs))
     return reg

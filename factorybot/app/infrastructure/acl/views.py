@@ -170,7 +170,7 @@ class AssetStatusView(BaseModel):
 
 
 # ===========================================================================
-# 工装 / 设备遥测 / FMEA / 产品敏感度（L3 比对 + agent A/B 工具）
+# 工装 / 设备遥测 / FMEA / 产品敏感度（编排 比对 + agent A/B 工具）
 # ===========================================================================
 class CurrentStencilView(BaseModel):
     asset_id: str
@@ -266,7 +266,7 @@ class TraceGraphView(BaseModel):
 
 
 class SubgraphView(BaseModel):
-    """fetch_subgraph_nodes 返回：节点列表（L2 按 subgraph_ref 回查，不重查图）。"""
+    """fetch_subgraph_nodes 返回：节点列表（草稿 按 subgraph_ref 回查，不重查图）。"""
     subgraph_ref: str = ""
     nodes: list[dict] = Field(default_factory=list)
 

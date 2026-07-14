@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.domain.l3_state import L3State
+from app.domain.orchestration_state import OrchestrationState
 from app.orchestration.supervisor_graph import SupervisorGraph
 
 
 def build_process_change_graph(sup: SupervisorGraph, checkpointer):
-    g = StateGraph(L3State)
+    g = StateGraph(OrchestrationState)
     g.add_node("plan", sup.plan)
     g.add_node("draft_sop", sup.run_agent("draft_sop"))
     g.add_node("qualification_check", sup.qc.check_operator_qualification)

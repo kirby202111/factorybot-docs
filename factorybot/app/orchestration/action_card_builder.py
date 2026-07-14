@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from app.domain.l3_state import ActionCard
+from app.domain.orchestration_state import ActionCard
 
 # 各 gate 步骤对应的写动作（writes_via）。none.* 表示纯审批无写。
 STEP_WRITES_VIA: dict[str, str] = {

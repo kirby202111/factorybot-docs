@@ -1,4 +1,4 @@
-"""L1 诊断会话。"""
+"""诊断会话。"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -18,7 +18,7 @@ class SessionStatus(str, Enum):
 
 
 class DiagnosisSession(BaseModel):
-    """一次 L1 诊断会话。"""
+    """一次 诊断会话。"""
 
     session_id: str
     user_id: str = "system"

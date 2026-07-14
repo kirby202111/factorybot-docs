@@ -43,7 +43,7 @@ class ToolNode:
         registry: ToolRegistry,
         trace_repo: ToolCallTraceRepo,
         obs=None,
-        capability: str = "l1",
+        capability: str = "diagnosis",
     ) -> None:
         self._registry = registry
         self._trace_repo = trace_repo

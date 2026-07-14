@@ -12,7 +12,7 @@ class ObservabilityContext:
     tenant_id: str
     workshop: str = ""
     line: str = ""
-    level: str = "L1"            # L1 | L2 | L3
+    level: str = "diagnosis"            # 诊断 | 草稿 | 编排
     prompt_version: str = "p_v1"
     step_no: int = 0
     capability: Optional[str] = None

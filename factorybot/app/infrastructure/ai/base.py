@@ -1,6 +1,6 @@
 """LLM 抽象层：ChatModel Protocol + 消息/响应模型。
 
-设计意图（对齐 L1/L2 实现方案 §2.1）：模型可插拔，ObservableChatModel 包装任意模型
+设计意图（对齐 诊断/草稿 实现方案 §2.1）：模型可插拔，ObservableChatModel 包装任意模型
 统一埋观测（token/延迟/模型/prompt_version），provider 无关。结构化输出经 ainvoke_structured。
 
 mock 模式用 MockChatModel（确定性，离线可跑）；real 模式经 llm_factory 切真实 provider。

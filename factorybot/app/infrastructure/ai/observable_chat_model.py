@@ -69,5 +69,5 @@ def _est_tokens_text(text: str) -> int:
 
 def _dummy_ctx() -> ObservabilityContext:
     return ObservabilityContext(
-        session_id="-", trace_id="-", tenant_id="-", level="L1",
+        session_id="-", trace_id="-", tenant_id="-", level="diagnosis",
     )

@@ -1,8 +1,8 @@
-"""业务可观测表 + L3 表的 SQLAlchemy 模型（real 模式落 MySQL 用）。
+"""业务可观测表 + 编排 表的 SQLAlchemy 模型（real 模式落 MySQL 用）。
 
 mock 模式下不导入此模块（用进程内仓库）。表结构对齐可观测文档 §7.1 / 长程任务 §2.2：
 tool_call_trace / llm_call_log / diagnosis_session / diagnosis_report / draft_trace /
-node_trace / l3_session / gate_decision / model_pricing ...
+node_trace / orchestration_session / gate_decision / model_pricing ...
 """
 from __future__ import annotations
 
@@ -42,8 +42,8 @@ try:
         finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
         occurred_at = mapped_column(DateTime)
 
-    class L3SessionRow(Base):
-        __tablename__ = "l3_session"
+    class OrchestrationSessionRow(Base):
+        __tablename__ = "orchestration_session"
         session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
         scenario: Mapped[str] = mapped_column(String(32))
         status: Mapped[str] = mapped_column(String(16))

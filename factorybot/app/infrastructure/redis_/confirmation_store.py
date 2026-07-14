@@ -2,7 +2,7 @@
 
 token = secrets.token_hex(16)（32 字符随机 hex），TTL 30min。
 校验：存在性 + action 匹配（防篡改）。防重复确认：session+step -> token_id。
-承载 L3 写动作的"人确认"闸门。
+承载 编排 写动作的"人确认"闸门。
 """
 from __future__ import annotations
 

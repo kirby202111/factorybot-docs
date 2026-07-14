@@ -15,13 +15,13 @@ class ModelRouter:
 
     # 默认路由：主力推理用强模型，分类/降级用便宜模型
     DEFAULT_ROUTES: dict[str, str] = {
-        "l1_diagnosis": "claude-sonnet-5",      # 主力推理
-        "l2_draft": "claude-sonnet-5",
-        "root_cause": "claude-sonnet-5",         # L3 能力 A
-        "fault_impact": "claude-sonnet-5",       # L3 能力 B
-        "traceability": "claude-sonnet-5",       # L3 能力 C
-        "draft_sop": "claude-sonnet-5",          # L3 能力 D
-        "l0_router": "haiku",                    # L0 入口路由分流（便宜分类器）
+        "diagnosis": "claude-sonnet-5",         # 主力推理
+        "draft": "claude-sonnet-5",
+        "root_cause": "claude-sonnet-5",         # 编排 能力 A
+        "fault_impact": "claude-sonnet-5",       # 编排 能力 B
+        "traceability": "claude-sonnet-5",       # 编排 能力 C
+        "draft_sop": "claude-sonnet-5",          # 编排 能力 D
+        "entry_router": "haiku",                 # 入口路由分流（便宜分类器）
         "fallback": "deepseek",                  # cascading 降级
     }
 

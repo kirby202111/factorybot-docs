@@ -1,9 +1,9 @@
-"""RAG 服务 ACL：追溯图查询（L1 快路径）+ 子图回查（L2，不重查图）。
+"""RAG 服务 ACL：追溯图查询（诊断 快路径）+ 子图回查（草稿，不重查图）。
 
-- query_traceability_graph：L1 ToolRegistry 注册首位，system prompt 引导"先调图"。
+- query_traceability_graph：诊断 ToolRegistry 注册首位，system prompt 引导"先调图"。
   图用 ``SNAPSHOT_OF_{kind}{version}`` 快照边把版本一致性变成结构属性（边属性名随 kind 走，
   ``SNAPSHOT_OF_ROUTE`` 仍带 ``{route_version}``，图 schema 不变）。
-- fetch_subgraph_nodes：L2 按 L1 透传的 subgraph_ref 回查图节点，不重查图。
+- fetch_subgraph_nodes：草稿 按 诊断 透传的 subgraph_ref 回查图节点，不重查图。
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class RagAclClient(BaseAclClient):
     async def fetch_subgraph_nodes(
         self, subgraph_ref: str, tenant: TenantContext,
     ) -> list[dict]:
-        """GET /rag/trace/subgraph/{ref} -- L2 按 subgraph_ref 回查，不重查图。
+        """GET /rag/trace/subgraph/{ref} -- 草稿 按 subgraph_ref 回查，不重查图。
 
         返回 TraceNodeView 形状的节点列表（label/bounded_context/node_id/props/source_event_id）。
         """

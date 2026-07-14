@@ -1,4 +1,4 @@
-"""L1 诊断报告：5M1E 根因假设排序 + 证据链 + 置信度兜底。"""
+"""诊断报告：5M1E 根因假设排序 + 证据链 + 置信度兜底。"""
 from __future__ import annotations
 
 from enum import Enum
@@ -36,12 +36,12 @@ class Hypothesis(BaseModel):
 
 
 class DiagnosisReport(BaseModel):
-    """L1 诊断产出。透传 subgraph_ref + 版本锚点给 L2。"""
+    """诊断产出。透传 subgraph_ref + 版本锚点给 草稿。"""
 
     summary: str
     confidence: float                       # 0.0 ~ 1.0
     hypotheses: list[Hypothesis] = Field(default_factory=list)
-    subgraph_ref: str = ""                  # 指向 RAG 追溯子图，L2 据此回查
+    subgraph_ref: str = ""                  # 指向 RAG 追溯子图，草稿 据此回查
     # 版本一致性三段链第二段：物理锁定的版本锚点（扁平三字段 + version_anchor() 属性）
     version: str | None = None
     version_kind: str | None = None         # route|bom|rule|asset|standard

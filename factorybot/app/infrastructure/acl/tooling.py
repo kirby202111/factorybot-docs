@@ -1,4 +1,4 @@
-"""工装上下文 ACL：只读（钢网/程序/借还/收线记录）-- L3 换线比对 + agent A 取证。"""
+"""工装上下文 ACL：只读（钢网/程序/借还/收线记录）-- 编排 换线比对 + agent A 取证。"""
 from __future__ import annotations
 
 from app.domain.tenant import TenantContext

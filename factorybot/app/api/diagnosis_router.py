@@ -1,4 +1,4 @@
-"""L1 诊断路由：POST /agent/diagnose。"""
+"""诊断路由：POST /agent/diagnose。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -9,7 +9,7 @@ from app.application.diagnosis_service import DiagnosisService
 from app.container import Container
 from app.domain.version import VersionAnchor
 
-router = APIRouter(tags=["L1-Diagnosis"])
+router = APIRouter(tags=["Diagnosis"])
 
 
 @router.post("/agent/diagnose", response_model=DiagnosisReportResponse)

@@ -1,4 +1,4 @@
-"""设备遥测 / FMEA / 产品敏感度 ACL：只读 -- L3 agent B 故障隔离范围判定取证。"""
+"""设备遥测 / FMEA / 产品敏感度 ACL：只读 -- 编排 agent B 故障隔离范围判定取证。"""
 from __future__ import annotations
 
 from app.domain.tenant import TenantContext

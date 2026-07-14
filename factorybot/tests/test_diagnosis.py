@@ -1,4 +1,4 @@
-"""L1 诊断端到端：mock LLM 驱动 ReAct -> 5M1E 报告。
+"""诊断端到端：mock LLM 驱动 ReAct -> 5M1E 报告。
 
 期望：query_traceability_graph -> query_pass_records -> DiagnosisReport，
 subgraph_ref=SUB-A1, version=v4 (route), 假设 evidence 非空。
@@ -9,7 +9,7 @@ from app.container import get_container
 
 
 @pytest.mark.asyncio
-async def test_l1_diagnosis_produces_5m1e_report():
+async def test_diagnosis_produces_5m1e_report():
     c = get_container()
     tenant = c.default_tenant()
     report = await c.diagnosis_service.diagnose(
@@ -29,7 +29,7 @@ async def test_l1_diagnosis_produces_5m1e_report():
 
 
 @pytest.mark.asyncio
-async def test_l1_tool_call_trace_recorded():
+async def test_diagnosis_tool_call_trace_recorded():
     c = get_container()
     tenant = c.default_tenant()
     report = await c.diagnosis_service.diagnose(
@@ -43,10 +43,10 @@ async def test_l1_tool_call_trace_recorded():
 
 
 @pytest.mark.asyncio
-async def test_l1_unknown_serial_returns_empty_not_default_impersonation():
+async def test_diagnosis_unknown_serial_returns_empty_not_default_impersonation():
     """未知 serial_no 不应回退到 _default 冒充 SN-DEFAULT，应返回空结果（数据诚实）。
 
-    这是 L1 幻觉根因的回归保护：mock 读在 key 未命中时返回空，而非另一实体的占位数据，
+    这是 诊断 幻觉根因的回归保护：mock 读在 key 未命中时返回空，而非另一实体的占位数据，
     让 LLM 看到"证据为空"而非"良性数据"，配合 prompt 规则 6 拒答而非编造。
     """
     c = get_container()

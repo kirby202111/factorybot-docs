@@ -65,7 +65,7 @@ class ReworkWriteAclClient(BaseAclClient):
                 "confirmed_by": confirmation.user_id,
             },
             tenant=tenant, confirmation=confirmation,
-            fixture_rel="l3/write_results", fixture_key="isolation",
+            fixture_rel="orchestration/write_results", fixture_key="isolation",
         )
         return to_view(IsolationResult, dto)
 
@@ -90,5 +90,5 @@ class ReworkWriteAclClient(BaseAclClient):
                 "confirmed_by": confirmation.user_id,
             },
             tenant=tenant, confirmation=confirmation,
-            fixture_rel="l3/write_results", fixture_key="repair_order",
+            fixture_rel="orchestration/write_results", fixture_key="repair_order",
         )

@@ -1,6 +1,6 @@
 """Fixture 加载器：从 data/ 读 JSON，供 ACL 客户端在 mock 模式下查询。
 
-fixture 文件按类别放在 data/ 子目录下（rest/rag/kafka/l3），每个文件是一个
+fixture 文件按类别放在 data/ 子目录下（rest/rag/kafka/orchestration），每个文件是一个
 dict（按自然 id 索引）或 list。ACL 客户端用 lookup(rel, key) 取单条，raw(rel) 取整文件。
 
 示例：

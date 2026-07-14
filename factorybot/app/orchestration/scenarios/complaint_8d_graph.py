@@ -1,4 +1,4 @@
-"""客诉 8D 场景：嵌入 TraceabilityAgent (C, 复用 L1) + DraftAgents.draft_8d (D)。（骨架）
+"""客诉 8D 场景：嵌入 TraceabilityAgent (C, 复用 诊断) + DraftAgents.draft_8d (D)。（骨架）
 
   plan -> traceability(C) -> [supplier_trace ‖ isolation_scope] -> gate_isolation_8d
         -> draft_8d(D) -> gate_8d_publish -> done
@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.domain.l3_state import L3State
+from app.domain.orchestration_state import OrchestrationState
 from app.orchestration.supervisor_graph import SupervisorGraph
 
 
 def build_complaint_8d_graph(sup: SupervisorGraph, checkpointer):
-    g = StateGraph(L3State)
+    g = StateGraph(OrchestrationState)
     g.add_node("plan", sup.plan)
     g.add_node("traceability", sup.run_agent("traceability"))
     g.add_node("supplier_trace", sup.qc.query_supplier_batch_trace)

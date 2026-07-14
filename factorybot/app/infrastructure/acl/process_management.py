@@ -1,7 +1,7 @@
 """工艺管理上下文 ACL：只读（工艺路线，route_version 强制 + ACTIVE 校验）+ 受限写。
 
 route_version 强制是版本一致性三段链的关键：
-  图 SNAPSHOT_OF_ROUTE{route_version} -> L1 evidence.route_version -> L2 Draft.route_version
+  图 SNAPSHOT_OF_ROUTE{route_version} -> 诊断 evidence.route_version -> 草稿 Draft.route_version
   -> MES 应用服务校验 ACTIVE
 ACL 层在查工艺时强制 route_version 非空且 dto.status == ACTIVE，物理杜绝失效工艺。
 """
@@ -79,7 +79,7 @@ class ProcessWriteAclClient(BaseAclClient):
                 "confirmed_by": confirmation.user_id,
             },
             tenant=tenant, confirmation=confirmation,
-            fixture_rel="l3/write_results", fixture_key="route_activate",
+            fixture_rel="orchestration/write_results", fixture_key="route_activate",
         )
 
     async def publish_sop(
@@ -98,5 +98,5 @@ class ProcessWriteAclClient(BaseAclClient):
                 "confirmed_by": confirmation.user_id,
             },
             tenant=tenant, confirmation=confirmation,
-            fixture_rel="l3/write_results", fixture_key="sop_publish",
+            fixture_rel="orchestration/write_results", fixture_key="sop_publish",
         )
