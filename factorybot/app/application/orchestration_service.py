@@ -93,6 +93,8 @@ class OrchestrationService:
         self._recursion_limit = s.orchestration_recursion_limit
         self._timeout = s.orchestration_session_timeout
         self._active_tasks: dict[str, asyncio.Task] = {}
+        # 崩溃兜底调度的 mark_failed 任务引用集合（防止被 GC 提前回收）
+        self._finalize_tasks: set[asyncio.Task] = set()
 
     # ---- 启动 ----
     async def start(
@@ -122,7 +124,7 @@ class OrchestrationService:
         await self._repo.update_status(session.session_id, "RUNNING", "PLAN")
         task = asyncio.create_task(self._drive(session, tenant))
         self._active_tasks[session.session_id] = task
-        task.add_done_callback(lambda t: self._active_tasks.pop(session.session_id, None))
+        task.add_done_callback(self._on_drive_done(session.session_id))
         return session
 
     async def _drive(self, session: OrchestrationSession, tenant: TenantContext) -> None:
@@ -151,6 +153,46 @@ class OrchestrationService:
             await self._repo.mark_failed(session.session_id, f"驱动异常: {e}")
             return
         await self._after_invoke(session.session_id, session.scenario.value)
+
+    def _on_drive_done(self, session_id: str):
+        """驱动任务结束兜底：清理 _active_tasks；未捕获异常记 CRITICAL 并尽力把会话转
+        FAILED，避免崩溃后卡 RUNNING 成为孤儿。
+
+        _drive 自身 try/except 覆盖 graph.ainvoke，但 graph 未注册(KeyError，在 try 之前)、
+        mark_failed 自身失败、_after_invoke 推卡/落库失败等仍会逃逸到 task -> 此处兜底。
+        本回调由 asyncio 同步调用，不可 await；mark_failed 经 create_task 调度，
+        其内部异常由 _finalize_crashed_session 自身兜底（再失败仅记日志，不再传播）。
+        """
+        def _cb(task: asyncio.Task) -> None:
+            self._active_tasks.pop(session_id, None)
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is None:
+                return
+            _log.critical(
+                "orchestration.drive_task_crashed",
+                session_id=session_id,
+                error=repr(exc),
+                error_type=type(exc).__name__,
+            )
+            fin = asyncio.create_task(self._finalize_crashed_session(session_id, exc))
+            self._finalize_tasks.add(fin)
+            fin.add_done_callback(self._finalize_tasks.discard)
+
+        return _cb
+
+    async def _finalize_crashed_session(self, session_id: str, exc: BaseException) -> None:
+        """崩溃兜底：尽力 mark_failed；自身失败仅记日志，不再传播（避免再次静默丢失）。"""
+        try:
+            await self._repo.mark_failed(session_id, f"驱动任务崩溃: {exc}")
+        except Exception as finalize_exc:
+            _log.error(
+                "orchestration.finalize_crashed_session_failed",
+                session_id=session_id,
+                error=repr(finalize_exc),
+                error_type=type(finalize_exc).__name__,
+            )
 
     # ---- 确认续跑 ----
     async def resume(self, session_id: str, step: str, approved: bool,

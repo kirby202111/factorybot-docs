@@ -32,11 +32,13 @@ class DiagnosisService:
         recursion_limit: int | None = None,
         timeout: float | None = None,
         conf_threshold: float | None = None,
+        result_compactor=None,
     ) -> None:
         self._registry = registry
         self._llm = llm
         self._trace_repo = trace_repo
         self._obs = obs
+        self._result_compactor = result_compactor
         s = get_settings()
         self._recursion_limit = recursion_limit or s.diagnosis_recursion_limit
         self._timeout = timeout or s.diagnosis_session_timeout
@@ -66,6 +68,7 @@ class DiagnosisService:
         graph = build_diagnosis_graph(
             self._llm, self._registry, self._trace_repo, self._obs,
             capability="diagnosis", recursion_limit=self._recursion_limit,
+            result_compactor=self._result_compactor,
         )
         initial = {
             "tenant": tenant, "obs_ctx": obs_ctx, "question": question,

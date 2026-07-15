@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.infrastructure.obs.logging import get_logger
+
 # 每类工具结果的保留字段白名单（其余裁剪）
 FIELD_WHITELIST: dict[str, list[str]] = {
     "query_pass_records": ["sn", "work_order_id", "station_id", "equipment_id", "route_version", "decision", "blocking_reason"],
@@ -34,6 +36,12 @@ class ResultCompactor:
                     out[k] = view[k]
             omitted = len(view) - len(out)
         else:
+            # #15: 无白名单工具告警（让缺口可见），维持透传不裁剪。
+            # 逐工具白名单补全是领域决策（影响模型证据量 vs 省 token），留后续阶段。
+            get_logger("result_compactor").warning(
+                "cost.result_compactor.no_whitelist", tool_name=tool_name,
+                hint=f"工具 {tool_name} 未配 FIELD_WHITELIST，结果整包透传给 LLM（可能烧 token）",
+            )
             out = dict(view)
         # 列表截断
         for k, v in list(out.items()):

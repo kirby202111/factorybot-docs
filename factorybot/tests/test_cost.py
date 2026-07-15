@@ -75,6 +75,18 @@ class TestResultCompactor:
         assert out["_items_truncated"] is True
         assert out["_omitted_count"] == 2
 
+    def test_no_whitelist_warns_and_passes_through(self, monkeypatch):
+        """#15: 无白名单工具发 warning（缺口可见），但维持透传不裁剪。"""
+        from unittest.mock import MagicMock
+        import app.infrastructure.cost.result_compactor as rc
+        logger = MagicMock()
+        monkeypatch.setattr(rc, "get_logger", lambda name: logger)
+        out = rc.ResultCompactor().compact("unknown_tool", {"a": 1, "b": 2})
+        assert out == {"a": 1, "b": 2}  # 透传不变
+        logger.warning.assert_called_once()
+        assert logger.warning.call_args.args[0] == "cost.result_compactor.no_whitelist"
+        assert logger.warning.call_args.kwargs["tool_name"] == "unknown_tool"
+
 
 # ---- CacheControl ----
 class TestCacheControl:

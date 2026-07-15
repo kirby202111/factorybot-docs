@@ -100,3 +100,48 @@ async def test_orchestration_tenant_isolation():
             session.session_id, "FIRST_ARTICLE", approved=True, tenant=other)
     # 归属租户仍可读
     assert await c.orchestration_service.get_session(session.session_id, owner) is not None
+
+
+@pytest.mark.asyncio
+async def test_orchestration_drive_crash_logs_critical_and_marks_failed(monkeypatch):
+    """_drive 未捕获崩溃（graph 未注册 KeyError，发生在 try 之前）-> done-callback 记
+    CRITICAL 并尽力 mark_failed，会话转 FAILED，不卡 RUNNING 成为孤儿。
+
+    覆盖 P0 #2：后台任务异常不再静默丢失。
+    """
+    from app.application import orchestration_service as orch_mod
+
+    class _FakeLog:
+        def __init__(self): self.calls = []
+        def warning(self, e, **k): self.calls.append(("warning", e, k))
+        def error(self, e, **k): self.calls.append(("error", e, k))
+        def critical(self, e, **k): self.calls.append(("critical", e, k))
+
+    fake = _FakeLog()
+    monkeypatch.setattr(orch_mod, "_log", fake)
+
+    c = get_container()
+    orch = c.orchestration_service
+    orch._graphs = {}  # 触发 _drive 在 try 之前 KeyError -> 未捕获逃逸到 task
+    tenant = c.default_tenant()
+    session = await orch.start(
+        "changeover", tenant,
+        work_order_id="WO-CRASH", asset_id="ASSET-01",
+        target_route_id="RR-B", target_route_version="v4",
+    )
+    sid = session.session_id
+
+    # 轮询直到 done-callback + finalize 把会话转 FAILED
+    final = None
+    for _ in range(50):
+        final = await c.orchestration_repo.get_session(sid)
+        if final is not None and final.status == SessionStatus.FAILED:
+            break
+        await asyncio.sleep(0.02)
+
+    assert final is not None and final.status == SessionStatus.FAILED, \
+        f"崩溃后会话应转 FAILED，实际: {final.status if final else None}"
+    assert "驱动任务崩溃" in (final.suspend_reason or "")
+    assert any(lvl == "critical" and evt == "orchestration.drive_task_crashed"
+               for lvl, evt, _ in fake.calls), "应记 CRITICAL 崩溃日志"
+

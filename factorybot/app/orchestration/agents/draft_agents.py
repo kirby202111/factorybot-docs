@@ -7,12 +7,13 @@ from app.infrastructure.ai.react_graph import build_react_graph, to_tenant
 class DraftAgent:
     """单个 draft 子能力 agent。capability ∈ draft_sop | draft_8d | draft_rework_craft。"""
 
-    def __init__(self, capability: str, llm, registry, trace_repo, obs) -> None:
+    def __init__(self, capability: str, llm, registry, trace_repo, obs, result_compactor=None) -> None:
         self.CAPABILITY = capability
         self._kind = capability
         self._graph = build_react_graph(
             llm, registry, trace_repo, obs,
             capability=capability, prompt_fn=self._prompt,
+            result_compactor=result_compactor,
         )
 
     async def ainvoke(self, state: dict, config: dict | None = None) -> dict:

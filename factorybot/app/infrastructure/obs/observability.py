@@ -1,13 +1,17 @@
 """可观测组件装配：实现 ObservabilityPort，组合 Tracing + Metrics + LlmCallLogger。"""
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
 from app.infrastructure.obs.context import ObservabilityContext
 from app.infrastructure.obs.llm_call_logger import LlmCallLogger, LlmCallRecord
+from app.infrastructure.obs.logging import get_logger
 from app.infrastructure.obs.metrics import MetricsCollector
 from app.infrastructure.obs.tracing import Tracing
+
+_log = get_logger("obs")
 
 
 class Observability:
@@ -88,15 +92,32 @@ class Observability:
             pass
 
     def _safe_async(self, fn, *args, **kwargs) -> None:
-        import asyncio
+        """观测旁路异步调用：不反噬业务，但任务异常必须可见（记 ERROR 日志）。
+
+        不再用 get_event_loop()（3.12 已弃用）及其 run_until_complete 兜底
+        （唯一调用方 llm_called 只在 async 上下文内被调，该分支为死代码）。
+        """
+        fn_name = getattr(fn, "__name__", repr(fn))
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(fn(*args, **kwargs))
-            else:
-                loop.run_until_complete(fn(*args, **kwargs))
-        except Exception:
-            pass
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 无运行中的事件循环（当前无 sync 调用方，防御性兜底）：记 warning 后跳过
+            _log.warning("obs.safe_async.no_running_loop", fn=fn_name)
+            return
+        task = loop.create_task(fn(*args, **kwargs))
+
+        def _on_done(t: asyncio.Task) -> None:
+            # done-callback 取 task 异常记日志，避免"Task exception was never retrieved"静默丢失
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                _log.error(
+                    "obs.background_task_failed", fn=fn_name,
+                    error=repr(exc), error_type=type(exc).__name__,
+                )
+
+        task.add_done_callback(_on_done)
 
 
 def build_observability() -> "Observability":

@@ -11,10 +11,11 @@ from app.infrastructure.ai.react_graph import build_react_graph, to_tenant
 class RootCauseAgent:
     CAPABILITY = "root_cause"
 
-    def __init__(self, llm, registry, trace_repo, obs) -> None:
+    def __init__(self, llm, registry, trace_repo, obs, result_compactor=None) -> None:
         self._graph = build_react_graph(
             llm, registry, trace_repo, obs,
             capability=self.CAPABILITY, prompt_fn=self._prompt,
+            result_compactor=result_compactor,
         )
 
     async def ainvoke(self, state: dict, config: dict | None = None) -> dict:

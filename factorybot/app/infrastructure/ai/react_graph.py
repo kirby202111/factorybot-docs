@@ -62,6 +62,32 @@ def _default_finalize(content: str) -> dict:
         return {"result": {"error": "non-json output", "content": content[:500]}}
 
 
+def _compact_tool_history(history: list[dict], compactor) -> list[dict]:
+    """喂 LLM 前：压缩 tool 消息的 data（trace_id 顶层保留），其余消息原样。
+
+    state.messages 始终存全文（ToolNode 不改），护栏 _guard_no_evidence 与 trace 读全文
+    不受影响；仅构造喂给 LLM 的副本时压缩，降 token 不牺牲证据链完整性。
+    compactor 为 None 时原样返回（向后兼容）。
+    """
+    if compactor is None:
+        return history
+    out: list[dict] = []
+    for m in history:
+        if m.get("role") != "tool":
+            out.append(m)
+            continue
+        try:
+            payload = json.loads(m.get("content", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            out.append(m)
+            continue
+        data = payload.get("data")
+        if data is not None:
+            payload["data"] = compactor.compact(m.get("name", ""), data)
+        out.append({**m, "content": json.dumps(payload, ensure_ascii=False, default=str)})
+    return out
+
+
 def build_react_graph(
     llm,
     registry: ToolRegistry,
@@ -74,6 +100,7 @@ def build_react_graph(
     finalize_fn=None,
     state_schema=ReactState,
     recursion_limit: int = 10,
+    result_compactor=None,
 ):
     """构建通用 ReAct 子图。model 节点按 prompt_fn 生成系统提示，终止步按 finalize_fn 收尾。
 
@@ -81,6 +108,8 @@ def build_react_graph(
     - user_prompt_fn(state)->str：首轮 user 消息；默认 inputs_to_text(inputs)。
     - finalize_fn(content, state)->dict：终止步返回的 state 增量；默认 _default_finalize。
     - state_schema：LangGraph state TypedDict，默认 ReactState；诊断 传 AgentState 以声明 report 通道。
+    - result_compactor：ResultCompactor 实例，喂 LLM 前压缩 history 中 tool 消息的 data；
+      None 时不压缩（向后兼容）。state.messages 仍存全文，护栏/trace 不受影响。
     """
     tool_node = ToolNode(registry, trace_repo, obs, capability)
     _user_prompt_fn = user_prompt_fn or (lambda state: inputs_to_text(state.get("inputs", {})))
@@ -92,7 +121,7 @@ def build_react_graph(
         messages = [sys_msg(prompt_fn(state))]
         new_msgs: list[dict] = []
         if history:
-            messages.extend(history)
+            messages.extend(_compact_tool_history(history, result_compactor))
         else:
             um = user_msg(_user_prompt_fn(state))
             messages.append(um)

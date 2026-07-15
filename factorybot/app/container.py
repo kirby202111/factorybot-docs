@@ -25,6 +25,7 @@ from app.infrastructure.acl.wiring import build_acl_clients
 from app.infrastructure.ai.llm_factory import get_llm
 from app.infrastructure.cost.eval_gate import EvalGate
 from app.infrastructure.cost.model_router import ModelRouter
+from app.infrastructure.cost.result_compactor import ResultCompactor
 from app.infrastructure.longtask.session_manager import SessionManager
 from app.infrastructure.obs.observability import build_observability
 from app.infrastructure.persistence.checkpointer import get_checkpointer
@@ -76,9 +77,11 @@ class Container:
             self.eval_gate, allow_mock=self.settings.is_mock,
             active_model=self.settings.llm_model,
         )
+        self.result_compactor = ResultCompactor()
         # 诊断 服务
         self.diagnosis_service = DiagnosisService(
             self.diagnosis_registry, self.llm, self.tool_trace_repo, self.obs,
+            result_compactor=self.result_compactor,
         )
         # 草稿 服务
         self.builders = {
@@ -99,6 +102,7 @@ class Container:
         self.write_service = WriteViaAppService(self.orchestration_registry)
         self.agents = build_agent_registry(
             self.llm, self.orchestration_registry, self.diagnosis_registry, self.tool_trace_repo, self.obs,
+            self.result_compactor,
         )
         self.supervisor = SupervisorGraph(
             self.query_compare, self.agents, self.gate_manager, self.orchestration_repo,

@@ -11,13 +11,14 @@ from app.infrastructure.ai.graph_builder import build_diagnosis_graph
 class TraceabilityAgent:
     CAPABILITY = "traceability"
 
-    def __init__(self, llm, diagnosis_registry, trace_repo, obs) -> None:
+    def __init__(self, llm, diagnosis_registry, trace_repo, obs, result_compactor=None) -> None:
         self._llm = llm
         self._diagnosis_registry = diagnosis_registry
         self._trace_repo = trace_repo
         self._obs = obs
         self._graph = build_diagnosis_graph(
             llm, diagnosis_registry, trace_repo, obs, capability="diagnosis",
+            result_compactor=result_compactor,
         )
 
     async def ainvoke(self, state: dict, config: dict | None = None) -> dict:

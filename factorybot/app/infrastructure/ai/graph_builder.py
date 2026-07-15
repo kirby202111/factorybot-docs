@@ -67,6 +67,7 @@ DIAGNOSIS_SYSTEM_PROMPT = (
 def build_diagnosis_graph(
     llm, registry: ToolRegistry, trace_repo: ToolCallTraceRepo, obs=None,
     capability: str = "diagnosis", recursion_limit: int = 20,
+    result_compactor=None,
 ):
     """构建 诊断图：build_react_graph + 诊断 专属钩子（prompt/user/finalize）。
 
@@ -81,6 +82,7 @@ def build_diagnosis_graph(
         finalize_fn=diagnosis_finalize,
         state_schema=AgentState,
         recursion_limit=recursion_limit,
+        result_compactor=result_compactor,
     )
 
 
