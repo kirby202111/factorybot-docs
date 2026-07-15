@@ -251,9 +251,9 @@ A：当前调用方就 `_wire_agentic` 一处，但 `build_gateway_service` 是�
 |------|------|------|
 | dispose 生命周期行为测试 | 未补（构造 Container 重） | 属待办 #5 agentic 集成测试 |
 | 启动失败路径资源回收 | lifespan yield 前抛错不调 dispose（预存） | 独立加固 try/finally 包 yield |
-| 4 个预存测试失败 | B/A 检索质量 | 独立待办线 |
+| ~~4 个预存测试失败~~ | ✅ 已修(2026-07-15)：1 真 prod bug(SN 正则截断) + 1 测试基建 flaky(FakeEmbedder hash()) + 2 测试调整 | 见 [4预存测试失败修复篇](FactoryRAG-4预存测试失败修复-面试闪光点与话术.md) |
 | MES base_url 硬编码（#2） | 相邻未改 | 独立 #2 |
-| agentic 集成测试（#5） | 零集成测试 | 独立 #5 |
+| ~~agentic 集成测试（#5）~~ | ✅ 已修(2026-07-15)：14 例端到端 + 修 AgentState audit_id 证据链断链 + 2 个 _build_answer 行为 bug | 见 [agentic集成测试补全篇](FactoryRAG-agentic集成测试补全-面试闪光点与话术.md) |
 
 被问"还有什么没做"时，老实列出遗留 + 倾向，体现**知道自己不知道什么**，比假装完成得分高。
 

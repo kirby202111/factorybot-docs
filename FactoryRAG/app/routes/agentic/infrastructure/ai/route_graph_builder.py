@@ -10,13 +10,21 @@ logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict, total=False):
-    """路由图状态。"""
+    """路由图状态。
+
+    必须声明所有需在节点间透传的键：LangGraph ``StateGraph`` 按本 TypedDict 过滤状态，
+    未声明的键会被丢弃。``audit_id``/``trace_id`` 若漏声明，``ToolExecutor``/``Delegator``
+    读到的 ``audit_id`` 为空，``route_trace`` 行挂不上 ``answer_audit``，``/agent/explain/{audit_id}``
+    证据链断裂（与 ``traceparent``/``session_id`` 同理须在此声明）。
+    """
 
     question: str
     intent: IntentCategory
     tenant: Any
     session_id: str
+    trace_id: str
     traceparent: str
+    audit_id: str
     tool_result: Any
     tool_chain: list[str]
     answer: str

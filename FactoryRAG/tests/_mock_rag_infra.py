@@ -117,7 +117,7 @@ class FakeEmbedder:
     def _embed_one_sync(self, text: str) -> list[float]:
         vec = [0.0] * self.DIM
         for tok in self._tok.tokenize(text):
-            dim = hash(tok) % self.DIM
+            dim = int.from_bytes(hashlib.sha256(tok.encode("utf-8")).digest()[:4], "big") % self.DIM  # hashlib 而非 hash()：str hash 按进程随机(PYTHONHASHSEED)致稠密召回 flaky
             vec[dim] += 1.0
         return vec
 

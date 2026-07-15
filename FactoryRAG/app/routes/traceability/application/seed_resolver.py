@@ -14,9 +14,9 @@ from app.shared.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
 
-SN_PATTERN = re.compile(r"\bSN[-_]?[A-Z0-9]+", re.IGNORECASE)
-WO_PATTERN = re.compile(r"\bWO[-_]?[A-Z0-9]+", re.IGNORECASE)
-BATCH_PATTERN = re.compile(r"\b[Bb][-_]?[0-9A-Z]{4,}")
+SN_PATTERN = re.compile(r"\bSN[-_]?[A-Z0-9]+(?:[-_][A-Z0-9]+)*", re.IGNORECASE)
+WO_PATTERN = re.compile(r"\bWO[-_]?[A-Z0-9]+(?:[-_][A-Z0-9]+)*", re.IGNORECASE)
+BATCH_PATTERN = re.compile(r"\b[Bb][-_]?[0-9A-Z]{4,}(?:[-_][0-9A-Z]+)*")
 
 
 class SeedResolver:

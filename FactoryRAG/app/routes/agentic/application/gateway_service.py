@@ -107,7 +107,23 @@ class GatewayService:
     ) -> AgentAnswer:
         tool_chain = state.get("tool_chain") or []
         tool_result = state.get("tool_result")
-        route_taken = self._route_taken(intent, tool_chain)
+        route_taken = self._route_taken(intent, tool_result)
+        # 失败/无结果（tool_result is None）：用节点写入的 state["answer"] 作 summary + reason，
+        # route_taken 统一 HUMAN（与 _human_fallback 图级失败一致）。所尝试的工具/委托记在 tool_chain。
+        if tool_result is None:
+            reason = state.get("answer") or "未能获取结果，建议转人工。"
+            return AgentAnswer(
+                question=request.question,
+                intent=intent.value,
+                route_taken=route_taken,
+                summary=reason,
+                detail={"reason": reason},
+                sources=[],
+                confidence=0.0,
+                tool_chain=tool_chain,
+                trace_id=trace_id,
+                needs_human_review=True,
+            )
         summary, sources, confidence = self._materialize(tool_result, intent)
         return AgentAnswer(
             question=request.question,
@@ -123,8 +139,16 @@ class GatewayService:
         )
 
     @staticmethod
-    def _route_taken(intent: IntentCategory, tool_chain: list[str]) -> str:
+    def _route_taken(intent: IntentCategory, tool_result: any) -> str:
+        """实际生效的路线。
+
+        ``tool_result is None`` 表示节点内失败/无结果（权限不足/工具异常/委托超时）-> 统一 ``HUMAN``，
+        与 ``_human_fallback`` 图级失败的 ``route_taken="HUMAN"`` 一致；所尝试的工具/委托记在
+        ``tool_chain``，不靠 ``route_taken`` 表达。
+        """
         if intent == IntentCategory.UNKNOWN:
+            return "HUMAN"
+        if tool_result is None:
             return "HUMAN"
         if intent.is_delegation():
             return "L1" if intent == IntentCategory.ROOT_CAUSE else "L2"
@@ -135,10 +159,12 @@ class GatewayService:
         return "HUMAN"
 
     def _materialize(self, tool_result: any, intent: IntentCategory) -> tuple[str, list[AnswerSource], float]:
-        """把 tool_result 物化为 (summary, sources, confidence)。"""
-        if tool_result is None:
-            return "未能获取结果，建议转人工。", [], 0.0
-        # tool_result 可能是 TraceSubgraph / list[ChunkHit] / L1/L2 视图（dict）
+        """把**非空** ``tool_result`` 物化为 (summary, sources, confidence)。
+
+        ``tool_result is None`` 的失败/无结果分支由 ``_build_answer`` 直接处理（保留节点写入的
+        失败原因），本方法假定 ``tool_result`` 非空。tool_result 可能是
+        TraceSubgraph / list[ChunkHit] / L1/L2 视图（dict）。
+        """
         summary = getattr(tool_result, "summary", None) or str(tool_result)[:200]
         confidence = 0.75
         sources: list[AnswerSource] = []

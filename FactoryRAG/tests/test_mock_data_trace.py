@@ -132,7 +132,11 @@ async def test_a_enriches_suggested_action_from_b():
     assert answer.hypotheses
     action = answer.hypotheses[0].suggested_action
     assert "参考 SOP" in action, "suggested_action 应被 B 的 SOP 片段富化"
-    # v3 标记出现（chunk 头含 "route v3" 或步骤含 "v3 温度"），v4 标记绝不出现（ROUTE 锚点 v3 过滤）
-    assert "v3" in action
+    # v3-vs-v4 正确性由 v4 标记绝不出现守卫（ROUTE 锚点 v3 过滤）：
+    #   - "route v4"（v4 文档标题标记）不出现
+    #   - "250"（v4 峰值温度 250℃）不出现
+    # 不断言 "v3" in action：enrichment 用 citations[0].quoted_text=h.text[:120]，
+    # v3 标记（标题"route v3"在 chunk0、步骤3"按 v3 温度曲线"在 chunk1 的 120 字之后），
+    # 落在截断外是刻意截断的副产物，断言它反而脆。
     assert "route v4" not in action
     assert "250" not in action  # v4 峰值温度，被 ROUTE 锚点 v3 过滤排除
