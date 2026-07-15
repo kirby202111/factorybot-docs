@@ -94,15 +94,6 @@ class OtelSettings(BaseModel):
     service_name: str = "rag-service"
 
 
-class AgentSettings(BaseModel):
-    """E 委托 agent-service L1/L2。"""
-
-    l1_base_url: str = "http://agent-service:8001"
-    l2_base_url: str = "http://agent-service:8001"
-    l1_timeout: float = 60.0
-    l2_timeout: float = 30.0
-
-
 class BaseSettings(PydanticBaseSettings):
     """公共配置项聚合。环境变量前缀 ``RAG_``、嵌套分隔符 ``__``。"""
 
@@ -122,4 +113,3 @@ class BaseSettings(PydanticBaseSettings):
     kafka: KafkaSettings = Field(default_factory=KafkaSettings)
     minio: MinioSettings = Field(default_factory=MinioSettings)
     otel: OtelSettings = Field(default_factory=OtelSettings)
-    agent: AgentSettings = Field(default_factory=AgentSettings)

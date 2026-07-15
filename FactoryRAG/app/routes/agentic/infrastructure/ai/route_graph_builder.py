@@ -84,6 +84,16 @@ class _FallbackGraph:
         self._intent = intent
 
     async def ainvoke(self, state: dict, config: dict | None = None) -> dict:
+        """顺序执行降级：router 决策 -> 单一 tool/delegate -> converge。
+
+        ``config`` 仅为与 LangGraph 编译图的 ``ainvoke(state, config)`` 签名对齐而保留，
+        使调用方（``GatewayService``）无需区分真实图 / 降级图即可统一传参。
+
+        降级路径为单趟定长执行（router -> 单分支 -> converge），无递归 / 循环，
+        故 ``config["recursion_limit"]`` 在此不生效（定长即天然有界）；
+        ``configurable``（如 ``thread_id`` 记忆检查点）亦忽略——降级仅保证"可跑"，
+        真正的执行时限由调用方外层 ``asyncio.wait_for(timeout=70)`` 兜底。
+        """
         decision = RouteGraphBuilder._route_decision(self._intent)
         if decision == "tool":
             state = await self._builder._tool_executor(state)

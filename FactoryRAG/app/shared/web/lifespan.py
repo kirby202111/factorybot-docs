@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, settings: RagSettings, container: Container) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """启动编排。
+
+    ``settings`` / ``container`` 由 ``create_app`` 装配时挂到 ``app.state``，
+    此处内部取值，保持标准 ``lifespan(app)`` 单参签名（无需 main.py 闭包适配）。
 
     顺序：
     1. 启动断言（只读红线，§3）-- 任一失败即拒绝启动（fail-fast）；
@@ -32,6 +35,8 @@ async def lifespan(app: FastAPI, settings: RagSettings, container: Container) ->
     yield；
     6. 关闭 consumer / 引擎。
     """
+    settings: RagSettings = app.state.settings
+    container: Container = app.state.container
     # 1. 启动断言（只读红线）-- 预装配阶段
     await run_assertions(container.collect_pre_wiring_gates(), "pre-wiring")
 

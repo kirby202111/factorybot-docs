@@ -69,6 +69,10 @@ class DocumentIngestionService:
         version_id = self._new_id()
         file_ref = await self._store.put(doc_id, version_id, cmd.filename, content)
 
+        # 摄入 scope 授权告警：chunk 的 tenant_scope 以 cmd.tenant_scope 为准（与文档记录一致），
+        # 不再静默取 tenant.tenant_scopes[0]；若声明 scope 不在租户授权 scopes 内，记 warning 供审计。
+        self._warn_scope_mismatch(tenant, cmd)
+
         # 3. 解析 + 切分
         text = await self._parser.parse(content, cmd.doc_type)
         chunks = self._chunk_selector.split(
@@ -76,7 +80,7 @@ class DocumentIngestionService:
             doc_type=cmd.doc_type,
             doc_id=doc_id,
             version_id=version_id,
-            tenant_scope=tenant.tenant_scopes[0] if tenant.tenant_scopes else cmd.tenant_scope,
+            tenant_scope=cmd.tenant_scope,
             version_anchor=self._first_version_anchor(cmd.bindings),
             file_content_hash=content_hash,
         )
@@ -131,6 +135,23 @@ class DocumentIngestionService:
             if anchor is not None:
                 return anchor
         return None
+
+    @staticmethod
+    def _warn_scope_mismatch(tenant: TenantContext, cmd: IngestCommand) -> None:
+        """摄入 scope 与租户授权 scopes 不一致时告警（不阻断、不静默改写）。
+
+        chunk 的 ``tenant_scope`` 以 ``cmd.tenant_scope`` 为准，与文档聚合根记录一致
+        （此前取 ``tenant.tenant_scopes[0]`` 会与文档记录分裂，且多 scope 静默丢弃其余）。
+        若租户带授权 scopes 而声明 scope 不在其中，记 warning 供审计 -- 授权拦截由上层
+        （中间件 / Port）负责，此处仅暴露异常，保持摄入流水线单一职责。
+        """
+        if tenant.tenant_scopes and cmd.tenant_scope not in tenant.tenant_scopes:
+            logger.warning(
+                "摄入 tenant_scope=%s 不在租户授权 scopes=%s（tenant_id=%s）",
+                cmd.tenant_scope,
+                tenant.tenant_scopes,
+                tenant.tenant_id,
+            )
 
     @staticmethod
     def _new_id() -> str:

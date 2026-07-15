@@ -54,6 +54,9 @@ class Container:
         self._doc_retrieval_svc: Any = None
         self._reindex_coordinator: Any = None
         self._gateway_svc: Any = None
+        # E 委托 L1/L2 的 httpx 客户端（_wire_agentic 构造，dispose 关闭）
+        self._l1_http: httpx.AsyncClient | None = None
+        self._l2_http: httpx.AsyncClient | None = None
 
         # Port -> Adapter 绑定（拆服务时换 Http Adapter）
         self.trace_rag: TraceRagPort | None = None
@@ -101,7 +104,12 @@ class Container:
     async def _wire_agentic(self) -> None:
         from app.routes.agentic import build_gateway_service
 
-        self._gateway_svc = await build_gateway_service(self)
+        agentic = self.settings.agentic
+        self._l1_http = httpx.AsyncClient(base_url=agentic.l1_base_url, timeout=agentic.l1_timeout)
+        self._l2_http = httpx.AsyncClient(base_url=agentic.l2_base_url, timeout=agentic.l2_timeout)
+        self._gateway_svc = await build_gateway_service(
+            self, l1_http=self._l1_http, l2_http=self._l2_http
+        )
         logger.info("路线 E（agentic）已装配")
 
     # ── consumer 启停 ──
@@ -156,5 +164,9 @@ class Container:
     async def dispose(self) -> None:
         await self.engines.dispose()
         await self._http.aclose()
+        # E 委托 L1/L2 客户端（仅 agentic 启用时构造）
+        for client in (self._l1_http, self._l2_http):
+            if client is not None:
+                await client.aclose()
         await self.embedding.close()
         await self.reranker.close()

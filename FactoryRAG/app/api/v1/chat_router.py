@@ -1,7 +1,7 @@
 """E: ``POST /agent/chat`` / ``GET /agent/explain/{audit_id}``。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import get_gateway_svc, get_tenant
 from app.routes.agentic.domain.answer import AgentAnswer, AnswerAuditView, ChatRequest
@@ -29,8 +29,6 @@ def chat_router() -> APIRouter:
         """回溯路由决策与工具链（工程师 UI 证据链）。"""
         view = await svc._audit_repo.find_by_id(audit_id)
         if view is None:
-            from fastapi import HTTPException
-
             raise HTTPException(status_code=404, detail="audit_id 不存在")
         return AnswerAuditView(**view)
 

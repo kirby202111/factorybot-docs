@@ -33,10 +33,16 @@ class DocSettings(BaseModel):
 
 
 class AgenticSettings(BaseModel):
-    """E Agentic 子配置。"""
+    """E Agentic 子配置（路线开关 + 委托 agent-service L1/L2）。"""
 
     enabled: bool = False
     cache_ttl_seconds: int = 300
+
+    # ── 委托 agent-service L1/L2（原顶层 AgentSettings，并入 agentic 命名空间）──
+    l1_base_url: str = "http://agent-service:8001"
+    l2_base_url: str = "http://agent-service:8001"
+    l1_timeout: float = 60.0
+    l2_timeout: float = 30.0
 
 
 class RagSettings(BaseSettings):

@@ -17,8 +17,17 @@ if TYPE_CHECKING:
     from app.shared.web.container import Container
 
 
-async def build_gateway_service(container: "Container") -> Any:
-    """组合根入口：构造 E 的 GatewayService。"""
+async def build_gateway_service(
+    container: "Container",
+    *,
+    l1_http: Any,
+    l2_http: Any,
+) -> Any:
+    """组合根入口：构造 E 的 GatewayService。
+
+    ``l1_http``/``l2_http`` 由 Container 构造并管理生命周期（``dispose`` 关闭），
+    本函数仅负责将其包装为 L1/L2 委托客户端并完成领域装配。
+    """
     from app.routes.agentic.application.gateway_service import GatewayService
     from app.routes.agentic.application.intent_router import IntentRouter
     from app.routes.agentic.infrastructure.ai.delegator import SubAgentDelegator
@@ -32,8 +41,6 @@ async def build_gateway_service(container: "Container") -> Any:
     )
     from app.routes.agentic.infrastructure.redis_.query_cache import QueryCache
     from app.routes.agentic.domain.tool import ToolRegistry
-
-    import httpx
 
     settings = container.settings
     session_factory = await container.engines.mysql_session_factory()
@@ -50,10 +57,8 @@ async def build_gateway_service(container: "Container") -> Any:
     audit_repo = AnswerAuditRepo(session_factory=session_factory)
     route_trace_repo = RouteTraceRepo(session_factory=session_factory)
 
-    l1_http = httpx.AsyncClient(base_url=settings.agent.l1_base_url, timeout=settings.agent.l1_timeout)
-    l2_http = httpx.AsyncClient(base_url=settings.agent.l2_base_url, timeout=settings.agent.l2_timeout)
-    l1_client = L1DelegationClient(http=l1_http, timeout=settings.agent.l1_timeout)
-    l2_client = L2DelegationClient(http=l2_http, timeout=settings.agent.l2_timeout)
+    l1_client = L1DelegationClient(http=l1_http, timeout=settings.agentic.l1_timeout)
+    l2_client = L2DelegationClient(http=l2_http, timeout=settings.agentic.l2_timeout)
 
     tool_executor = ToolExecutor(
         registry=registry, trace_repo=route_trace_repo, obs=container.obs
