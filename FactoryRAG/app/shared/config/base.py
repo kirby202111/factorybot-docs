@@ -87,6 +87,12 @@ class MinioSettings(BaseModel):
     secure: bool = False
 
 
+class MesSettings(BaseModel):
+    """MES 只读 REST 网关（A/B 共享 ACL 出站，工艺/过点查询）。"""
+
+    base_url: str = "http://mes:8080"
+
+
 class OtelSettings(BaseModel):
     """可观测导出。"""
 
@@ -112,4 +118,5 @@ class BaseSettings(PydanticBaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     kafka: KafkaSettings = Field(default_factory=KafkaSettings)
     minio: MinioSettings = Field(default_factory=MinioSettings)
+    mes: MesSettings = Field(default_factory=MesSettings)
     otel: OtelSettings = Field(default_factory=OtelSettings)

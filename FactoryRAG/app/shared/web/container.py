@@ -44,7 +44,7 @@ class Container:
         self._http = httpx.AsyncClient(timeout=30.0)
         self.mes_clients = MesClients(
             http=self._http,
-            mes_base_url="http://mes:8080",  # MES 只读 REST 网关
+            mes_base_url=settings.mes.base_url,  # MES 只读 REST 网关
             tenant_propagator=self.tenant_propagator,
         )
 
