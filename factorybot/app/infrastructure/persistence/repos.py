@@ -64,18 +64,27 @@ class ToolCallTraceRepo:
 
 
 class DraftRepo:
-    """草稿归档（draft_trace），草稿 只落草稿不落库。"""
+    """草稿归档（draft_trace），草稿 只落草稿不落库。
+
+    归档时记录草稿归属租户（draft_id -> tenant_id），供 get_evidence 做多租户归属校验。
+    """
     def __init__(self) -> None:
         self._drafts: dict[str, Any] = {}
+        self._tenant_owners: dict[str, str] = {}   # draft_id -> tenant_id
 
-    async def archive(self, draft) -> str:
+    async def archive(self, draft, tenant_id: str) -> str:
         if not draft.draft_id:
             draft.draft_id = f"D-{uuid.uuid4().hex[:8]}"
         self._drafts[draft.draft_id] = draft
+        self._tenant_owners[draft.draft_id] = tenant_id
         return draft.draft_id
 
     async def get(self, draft_id: str):
         return self._drafts.get(draft_id)
+
+    async def owner_tenant_id(self, draft_id: str) -> str | None:
+        """草稿归属租户；不存在返回 None（供 service 区分不存在 vs 跨租户）。"""
+        return self._tenant_owners.get(draft_id)
 
     async def get_evidence(self, draft_id: str) -> list[dict]:
         d = self._drafts.get(draft_id)

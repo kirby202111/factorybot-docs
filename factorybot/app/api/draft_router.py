@@ -25,7 +25,8 @@ async def draft(
 @router.get("/agent/draft/{draft_id}/evidence")
 async def draft_evidence(
     draft_id: str,
+    tenant=Depends(tenant_from_headers),
     c: Container = Depends(get_container_dep),
 ) -> list[dict]:
     svc: DraftService = c.draft_service
-    return await svc.get_evidence(draft_id)
+    return await svc.get_evidence(draft_id, tenant)

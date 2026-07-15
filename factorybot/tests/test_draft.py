@@ -3,7 +3,9 @@ import pytest
 
 from app.container import get_container
 from app.domain.draft import DraftKind
+from app.domain.errors import ResourceAccessError
 from app.domain.report import DiagnosisReport, FiveM1ECategory, Hypothesis
+from app.domain.tenant import TenantContext
 
 
 def _fake_report() -> DiagnosisReport:
@@ -51,5 +53,24 @@ async def test_draft_evidence_retrieval():
     c = get_container()
     tenant = c.default_tenant()
     draft = await c.draft_service.draft(_fake_report(), DraftKind.EIGHT_D, tenant)
-    evidence = await c.draft_service.get_evidence(draft.draft_id)
+    evidence = await c.draft_service.get_evidence(draft.draft_id, tenant)
     assert any("subgraph_ref=SUB-A1" in e for e in evidence)
+
+
+@pytest.mark.asyncio
+async def test_draft_tenant_isolation():
+    """跨租户读草稿证据被拒：get_evidence 抛 ResourceAccessError（路由层 -> 404）。"""
+    c = get_container()
+    owner = c.default_tenant()
+    other = TenantContext(
+        tenant_id="WS-B", workshop="SMT-2", line="L-02",
+        role="ENGINEER", user_id="u_li", scopes=owner.scopes,
+    )
+    draft = await c.draft_service.draft(_fake_report(), DraftKind.REWORK_ORDER, owner)
+
+    # 跨租户读草稿证据 -> 拒（隐藏存在性，统一 ResourceAccessError）
+    with pytest.raises(ResourceAccessError):
+        await c.draft_service.get_evidence(draft.draft_id, other)
+    # 归属租户仍可读
+    ev = await c.draft_service.get_evidence(draft.draft_id, owner)
+    assert isinstance(ev, list)

@@ -17,11 +17,15 @@ from langgraph.types import Command
 
 from app.application.action_card_dispatcher import ActionCardDispatcher
 from app.config import get_settings
+from app.domain.errors import ResourceAccessError
 from app.domain.orchestration_state import ActionCard, OrchestrationSession, ScenarioType, SessionStatus
 from app.domain.tenant import TenantContext
 from app.infrastructure.longtask.session_manager import SessionManager
+from app.infrastructure.obs.logging import get_logger
 from app.infrastructure.persistence.repos import OrchestrationRepo
 from app.infrastructure.redis_.confirmation_store import ConfirmationStore
+
+_log = get_logger("orchestration")
 
 SCENARIO_MAP: dict[str, ScenarioType] = {
     "changeover": ScenarioType.CHANGEOVER,
@@ -150,10 +154,11 @@ class OrchestrationService:
 
     # ---- 确认续跑 ----
     async def resume(self, session_id: str, step: str, approved: bool,
-                     user_id: str) -> str:
-        session = await self._repo.get_session(session_id)
+                     tenant: TenantContext) -> str:
+        session = await self.get_session(session_id, tenant)
         if session is None:
-            raise ValueError(f"会话不存在: {session_id}")
+            raise ResourceAccessError(f"会话不存在: {session_id}")
+        user_id = tenant.user_id
         scenario = session.scenario.value
         graph = self._graphs[scenario]
         config = {"configurable": {"thread_id": session_id},
@@ -208,8 +213,21 @@ class OrchestrationService:
         return None
 
     # ---- 查询 ----
-    async def get_session(self, session_id: str) -> Optional[OrchestrationSession]:
-        return await self._repo.get_session(session_id)
+    async def get_session(self, session_id: str,
+                          tenant: TenantContext) -> Optional[OrchestrationSession]:
+        session = await self._repo.get_session(session_id)
+        if session is None:
+            return None
+        if session.tenant_context.get("tenant_id") != tenant.tenant_id:
+            # 跨租户访问企图：记 warning 供安全审计（对外仍统一 404 隐藏存在性）
+            _log.warning(
+                "orchestration.tenant_access_denied",
+                session_id=session_id,
+                owner_tenant=session.tenant_context.get("tenant_id"),
+                caller_tenant=tenant.tenant_id,
+            )
+            raise ResourceAccessError(f"会话不属于当前租户: {session_id}")
+        return session
 
     async def pending_step(self, session_id: str) -> Optional[str]:
         session = await self._repo.get_session(session_id)

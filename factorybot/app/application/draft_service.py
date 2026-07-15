@@ -9,9 +9,13 @@ import time
 import uuid
 
 from app.domain.draft import Draft, DraftKind
+from app.domain.errors import ResourceAccessError
 from app.domain.report import DiagnosisReport
 from app.domain.tenant import TenantContext
+from app.infrastructure.obs.logging import get_logger
 from app.infrastructure.obs.observability import Observability
+
+_log = get_logger("draft")
 
 
 class DraftService:
@@ -39,10 +43,21 @@ class DraftService:
             draft.version = report.version
             draft.version_kind = report.version_kind
             draft.version_ref_id = report.version_ref_id
-        await self._draft_repo.archive(draft)
+        await self._draft_repo.archive(draft, tenant.tenant_id)
         await self._trace_repo.save_ok(draft_kind.value, draft, t0)
         self._obs.session_finished("draft", "DONE")
         return draft
 
-    async def get_evidence(self, draft_id: str) -> list[dict]:
+    async def get_evidence(self, draft_id: str, tenant: TenantContext) -> list[dict]:
+        owner = await self._draft_repo.owner_tenant_id(draft_id)
+        if owner is None:
+            # 草稿不存在：benign 404，不记安全日志
+            raise ResourceAccessError(f"草稿不存在或不属于当前租户: {draft_id}")
+        if owner != tenant.tenant_id:
+            # 跨租户访问企图：记 warning 供安全审计（对外仍统一 404 隐藏存在性）
+            _log.warning(
+                "draft.tenant_access_denied",
+                draft_id=draft_id, owner_tenant=owner, caller_tenant=tenant.tenant_id,
+            )
+            raise ResourceAccessError(f"草稿不存在或不属于当前租户: {draft_id}")
         return await self._draft_repo.get_evidence(draft_id)

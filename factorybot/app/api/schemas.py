@@ -65,7 +65,6 @@ class OrchestrationStartResponse(BaseModel):
 class ConfirmRequest(BaseModel):
     step: str
     approved: bool
-    user_id: str = "u_zhang"
 
 
 class ConfirmResponse(BaseModel):

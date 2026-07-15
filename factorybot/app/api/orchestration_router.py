@@ -38,20 +38,22 @@ async def start_orchestration(
 async def confirm_gate(
     session_id: str,
     req: ConfirmRequest,
+    tenant=Depends(tenant_from_headers),
     c: Container = Depends(get_container_dep),
 ) -> ConfirmResponse:
     orch: OrchestrationService = c.orchestration_service
-    decision = await orch.resume(session_id, req.step, req.approved, req.user_id)
+    decision = await orch.resume(session_id, req.step, req.approved, tenant)
     return ConfirmResponse(session_id=session_id, step=req.step, decision=decision)
 
 
 @router.get("/{session_id}/state", response_model=OrchestrationStateResponse)
 async def get_state(
     session_id: str,
+    tenant=Depends(tenant_from_headers),
     c: Container = Depends(get_container_dep),
 ) -> OrchestrationStateResponse:
     orch: OrchestrationService = c.orchestration_service
-    session = await orch.get_session(session_id)
+    session = await orch.get_session(session_id, tenant)
     if session is None:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="session not found")
