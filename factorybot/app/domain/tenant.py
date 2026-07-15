@@ -36,7 +36,11 @@ class TenantContext(BaseModel):
 
     @classmethod
     def default(cls, tenant_id: str = "WS-A", workshop: str = "SMT-1", line: str = "L-01") -> "TenantContext":
-        """mock 场景的示例租户，拥有全部只读 scope。"""
+        """mock 场景的示例租户，拥有全部只读 scope。
+
+        WS = WorkShop（车间）；WS-A/WS-B 为示例车间代号（多租户隔离边界=车间），
+        生产环境换真实车间 ID。
+        """
         return cls(
             tenant_id=tenant_id,
             workshop=workshop,

@@ -23,7 +23,8 @@
       "Bash(python .claude/tmp_update_overview.py)",
       "Bash(bun .claude/tmp_update_overview.cjs)",
       "Bash(echo \"EXIT=$?\")",
-      "Bash(unix2dos \"RAG与Agent评测/RAG与Agent评测-设计与实现方案.md\")"
+      "Bash(unix2dos \"RAG与Agent评测/RAG与Agent评测-设计与实现方案.md\")",
+      "Bash(git add *)"
     ]
   }
 }

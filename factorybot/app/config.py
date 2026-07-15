@@ -45,6 +45,27 @@ class Settings(BaseSettings):
     default_workshop: str = "SMT-1"
     default_line: str = "L-01"
 
+    # ----- 租户权限（real 模式 scopes 来源；对应待办 #34 方案 B）-----
+    # tenant_id -> scope 列表。real 模式下 resolve_tenant_context 据此解析 scopes；
+    # 未配置的租户默认 scopes=[]（fail-closed，拒绝一切写操作），不再回退 WS-A 全量。
+    # 可用 scope 见 TenantContext.default()：read 类(pass/workorder/process/material/wip/
+    # device/equipment/rework/quality/tooling/rag/doc:read) + write 类(rework/process/pass:write)。
+    # 保守起步(2026-07-15)：WS-A 主线全权(含写)，WS-B 只读，其它租户 fail-closed。
+    # 生产用 env 覆盖真实车间 ID 与权限：TENANT_SCOPES='{"WS-A":[...],"WS-B":[...]}'
+    tenant_scopes: dict[str, list[str]] = Field(default_factory=lambda: {
+        "WS-A": [
+            "pass:read", "workorder:read", "process:read", "material:read", "wip:read",
+            "device:read", "equipment:read", "rework:read", "quality:read", "tooling:read",
+            "rag:read", "doc:read",
+            "rework:write", "process:write", "pass:write",
+        ],
+        "WS-B": [
+            "pass:read", "workorder:read", "process:read", "material:read", "wip:read",
+            "device:read", "equipment:read", "rework:read", "quality:read", "tooling:read",
+            "rag:read", "doc:read",
+        ],
+    })
+
     # ----- Agent 控制参数 -----
     diagnosis_recursion_limit: int = 20
     diagnosis_session_timeout: float = 60.0

@@ -49,4 +49,27 @@ def test_real_mode_uses_headers_and_blanks_optional():
     )
     assert ctx.tenant_id == "WS-B" and ctx.user_id == "u_li"
     assert ctx.workshop == ""          # 不泄漏 mock 默认 SMT-1
-    assert ctx.role == "ENGINEER"      # 缺失回退 ENGINEER
+    assert ctx.role == "VIEWER"        # 缺失回退最低权限 VIEWER（#34，非 ENGINEER）
+
+
+def test_real_mode_scopes_from_config_and_unconfigured_denied():
+    """#34 方案 B：scopes 来自配置表，未配置租户 fail-closed 拒绝写。"""
+    scopes = {"WS-B": ["pass:read", "rework:write"]}
+    # 配置表内的租户拿到对应 scopes
+    ctx = resolve_tenant_context(
+        tenant_id="WS-B", workshop=None, line=None, role=None, user_id="u_li",
+        is_mock=False, default=_default(), tenant_scopes=scopes,
+    )
+    assert ctx.scopes == ["pass:read", "rework:write"]
+    # 未配置的租户 fail-closed -> scopes=[] 拒绝写
+    ctx2 = resolve_tenant_context(
+        tenant_id="WS-C", workshop=None, line=None, role=None, user_id="u_li",
+        is_mock=False, default=_default(), tenant_scopes=scopes,
+    )
+    assert ctx2.scopes == []
+    # 不传 tenant_scopes（None）同样 fail-closed，不再回退 WS-A 全量
+    ctx3 = resolve_tenant_context(
+        tenant_id="WS-B", workshop=None, line=None, role=None, user_id="u_li",
+        is_mock=False, default=_default(),
+    )
+    assert ctx3.scopes == []

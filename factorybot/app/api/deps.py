@@ -11,12 +11,15 @@ def resolve_tenant_context(
     *, tenant_id: str | None, workshop: str | None, line: str | None,
     role: str | None, user_id: str | None,
     is_mock: bool, default: TenantContext,
+    tenant_scopes: dict[str, list[str]] | None = None,
 ) -> TenantContext:
     """纯逻辑：按模式解析租户上下文（脱离 FastAPI Header 依赖，便于单测）。
 
     mock 模式：header 缺失时回退默认租户（dev/test 便利）。
     real 模式：X-Tenant-Id / X-Tenant-User-Id 必填（缺失返 400），避免无鉴权调用方
-    被当作默认租户 WS-A；workshop/line/role 缺失用空串，不泄漏 mock 默认值。
+    被当作默认租户 WS-A；workshop/line 缺失用空串，role 缺失回退最低权限 VIEWER（非 ENGINEER）；
+    scopes 按 tenant_scopes 配置表查（对应待办 #34 方案 B），未配置租户 scopes=[] 拒绝写，
+    不再回退 WS-A 全量。
     """
     if is_mock:
         return TenantContext(
@@ -33,13 +36,14 @@ def resolve_tenant_context(
             status_code=400,
             detail="real 模式必须提供 X-Tenant-Id 与 X-Tenant-User-Id 请求头",
         )
+    # scopes 来自配置表（fail-closed：未配置租户 -> [] 拒绝写），不回退 default.scopes
     return TenantContext(
         tenant_id=tenant_id,
         workshop=workshop or "",
         line=line or "",
-        role=role or "ENGINEER",
+        role=role or "VIEWER",
         user_id=user_id,
-        scopes=default.scopes,
+        scopes=(tenant_scopes or {}).get(tenant_id, []),
     )
 
 
@@ -56,6 +60,7 @@ def tenant_from_headers(
         tenant_id=x_tenant_id, workshop=x_tenant_workshop, line=x_tenant_line,
         role=x_tenant_role, user_id=x_tenant_user_id,
         is_mock=c.settings.is_mock, default=c.default_tenant(),
+        tenant_scopes=c.settings.tenant_scopes,
     )
 
 
