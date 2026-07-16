@@ -74,7 +74,7 @@ MES 中的高频数据不止“设备数采”一类。下表给出全景，标�
 
 ### 1.4 按接入形态的设备分类（承接事件风暴 §1）
 
-上述五类数据来自四类接入形态的设备，差异在**事件载荷**而非**骨干链路**（所有设备走同一条 设备→网关→Kafka→平台 骨干，见 §3）：
+上述五类数据来自四类接入形态的设备，差异在**事件载荷**而非**骨干链路**（所有设备走同一条 设备->网关->Kafka->平台 骨干，见 §3）：
 
 | 接入形态 | 典型设备 | 主要产出数据类别 | 典型协议 |
 |---|---|---|---|
@@ -111,7 +111,7 @@ MES 中的高频数据不止“设备数采”一类。下表给出全景，标�
 
 | 可靠性维度 | Outbox（业务事件） | 本方案（采集数据） | 实现手段 |
 |---|---|---|---|
-| 不丢 | DB 事务原子 | 边缘缓冲 + 断点续传 | `EdgeBuffered` → `BackfillEnqueued` → `BackfillCompleted`（INV-05 先补后新） |
+| 不丢 | DB 事务原子 | 边缘缓冲 + 断点续传 | `EdgeBuffered` -> `BackfillEnqueued` -> `BackfillCompleted`（INV-05 先补后新） |
 | 不重 | `event_id` 幂等 | 平台 `msg_id` 去重 + 消费端幂等 | `PlatformIngestionService` 去重表（BIZ-02）+ 消费端 `msg_id` 幂等 |
 | 顺序 | 分区内有序 | 分区内有序 + 乱序矫正窗口 | `partition_key=equipment_id` + `LateArrivalReordered`（打 LATE 质量标） |
 | 与业务状态原子 | 是 | **否**（刻意降级） | 采集只搬运不解释（INV-CX-01），不与过点判定同事务 |
@@ -143,7 +143,7 @@ MES 中的高频数据不止“设备数采”一类。下表给出全景，标�
 │  边缘网关 EdgeGateway（部署在产线侧，靠近设备）                         │
 │   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐             │
 │   │ProtocolAdapter│ │  DataPacket  │  │BackfillCursor│             │
-│   │ 协议解码      │→│ 打标/封装     │→│ 边缘缓冲/补传 │             │
+│   │ 协议解码      │->│ 打标/封装     │->│ 边缘缓冲/补传 │             │
 │   │(DecodingStrategy)│ │(msg_id,ts三元组)│ │(INV-05 先补后新)│            │
 │   └──────────────┘  └──────┬───────┘  └──────┬───────┘             │
 │                            │ 大载荷(E类)       │                      │
@@ -172,7 +172,7 @@ MES 中的高频数据不止“设备数采”一类。下表给出全景，标�
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  平台接入 PlatformIngestionService                                    │
-│   PacketReceived → Deduplicate(msg_id) → BufferReorder → PersistAndPublish│
+│   PacketReceived -> Deduplicate(msg_id) -> BufferReorder -> PersistAndPublish│
 │                    (BIZ-02去重)        (乱序矫正,LATE标)  (落库+分发)   │
 └──────────────────────────────────────┬──────────────────────────────┘
                                        ▼
@@ -243,7 +243,7 @@ ProtocolAdapter（聚合根，持有 ProtocolProfile）
 | 维度 | 设计 | 说明 |
 |---|---|---|
 | 缓冲载体 | 🔴 本地持久化存储（RocksDB / SQLite / 磁盘顺序文件 三选一） | 需兼顾写吞吐与游标查询；RocksDB 适合高写吞吐，SQLite 适合简单部署，磁盘文件最轻量 |
-| 游标机制 | `BackfillCursor`（`buffered_cursor` / `backfilled_cursor` 单调递增，INV-05） | 恢复后 `beginResume` → 按位点顺序 `advance` → `complete`，先补齐再放新 |
+| 游标机制 | `BackfillCursor`（`buffered_cursor` / `backfilled_cursor` 单调递增，INV-05） | 恢复后 `beginResume` -> 按位点顺序 `advance` -> `complete`，先补齐再放新 |
 | 缓冲容量 | 🔴 按最长预估断连时长 × 峰值速率估算 | 断网超容量后的丢弃策略需定（打 BAD 质量标 + 告警，还是仅告警） |
 | 缓冲清理 | 补传完成后可清 | `BackfillCompleted` 后释放对应位点 |
 
@@ -252,18 +252,18 @@ ProtocolAdapter（聚合根，持有 ProtocolProfile）
 ### 4.4 断点续传时序
 
 ```text
-连接正常:  DataPacket.seal → dispatch() → PacketDispatched → Kafka 直连
-                                      └ (大载荷) MinIO 直传 → object_uri 入主流
+连接正常:  DataPacket.seal -> dispatch() -> PacketDispatched -> Kafka 直连
+                                      └ (大载荷) MinIO 直传 -> object_uri 入主流
 
-连接异常:  DataPacket.seal → enqueueBackfill(cursor) → BackfillEnqueued → 本地缓冲
+连接异常:  DataPacket.seal -> enqueueBackfill(cursor) -> BackfillEnqueued -> 本地缓冲
                                                                      (buffered_cursor++)
 
 恢复重连:  ReconnectService.onReconnectSucceeded
-             → BackfillService.onChannelRestored
-                 → BackfillCursor.beginResume → BackfillResuming
-                 → 按 cursor 顺序逐条 advance → (重发 Kafka)
-                 → backfilled_cursor == buffered_cursor → complete → BackfillCompleted
-             → Equipment.recoverEquipment / clearSuspect (解除降级)
+             -> BackfillService.onChannelRestored
+                 -> BackfillCursor.beginResume -> BackfillResuming
+                 -> 按 cursor 顺序逐条 advance -> (重发 Kafka)
+                 -> backfilled_cursor == buffered_cursor -> complete -> BackfillCompleted
+             -> Equipment.recoverEquipment / clearSuspect (解除降级)
 ```
 
 > 若 Kafka 已发送成功但网关宕机前未推进 `backfilled_cursor`，恢复后会**重复发送同一 `msg_id`**，平台去重吸收（§6，BIZ-02）。这是"不丢"换"可能重复"的取舍，由去重兜底。
@@ -376,10 +376,10 @@ E 类数据（扭矩曲线、AOI 图像、烧录日志）**不进 Kafka**（Kafk
 
 ```text
 网关侧:
-  1. 解析出大载荷 → 计算 sha256
+  1. 解析出大载荷 -> 计算 sha256
   2. 向平台请求预签名 PUT URL（或用 STS 临时凭证）
   3. 直传 MinIO（大文件走 multipart 分片续传）
-  4. 上传成功 + sha256 校验通过 → DataPacket.seal(object_uri, sha256)
+  4. 上传成功 + sha256 校验通过 -> DataPacket.seal(object_uri, sha256)
   5. 主流 PacketDispatched 只带 object_uri，不发字节
 
 平台/消费侧:
@@ -399,7 +399,7 @@ MinIO 的 bucket 规划（`dc/{kind}/{equipment_id}/{yyyy-MM-dd}/{msg_id}.{ext}`
 
 ## 6. 平台接收：去重与乱序矫正
 
-平台侧 `PlatformIngestionService`（领域建模 §3.6）编排四步：`PacketReceived → Deduplicate → BufferReorder → PersistAndPublish`。
+平台侧 `PlatformIngestionService`（领域建模 §3.6）编排四步：`PacketReceived -> Deduplicate -> BufferReorder -> PersistAndPublish`。
 
 ### 6.1 msg_id 去重（BIZ-02）
 
@@ -407,11 +407,11 @@ MinIO 的 bucket 规划（`dc/{kind}/{equipment_id}/{yyyy-MM-dd}/{msg_id}.{ext}`
 
 ```text
 PacketReceived(msg_id, ...)
-  → 查去重表
-      命中  → DuplicateDiscarded        (丢弃，不落库不分发)
-      未命中 → PacketAccepted
-              → INSERT 去重表(msg_id)   (占位，防并发重复)
-              → 进入乱序矫正 / 落库 / 分发
+  -> 查去重表
+      命中  -> DuplicateDiscarded        (丢弃，不落库不分发)
+      未命中 -> PacketAccepted
+              -> INSERT 去重表(msg_id)   (占位，防并发重复)
+              -> 进入乱序矫正 / 落库 / 分发
 ```
 
 去重存储选型 🔴：
@@ -432,9 +432,9 @@ PacketReceived(msg_id, ...)
 BufferReorder:
   按 equipment_id 分组，维护近期 source_ts 窗口
   到达报文:
-    source_ts 在窗口内且有序 → 直接通过
-    source_ts 落后于窗口已提交位点 → LateArrivalReordered（打 LATE 质量标，INV-04）补入
-    source_ts 超前 → 缓冲等待中间报文，超时则放行（避免无限阻塞）
+    source_ts 在窗口内且有序 -> 直接通过
+    source_ts 落后于窗口已提交位点 -> LateArrivalReordered（打 LATE 质量标，INV-04）补入
+    source_ts 超前 -> 缓冲等待中间报文，超时则放行（避免无限阻塞）
 ```
 
 | 参数 | 设计目标 🔴 | 说明 |
@@ -448,8 +448,8 @@ BufferReorder:
 
 去重 + 矫正通过后 `PersistAndPublish`：
 
-- `DataPacket.markPersisted` → `PacketPersisted`（落温层存储，§7.2）
-- `DataPacket.markPublished` → `PacketPublished`（分发到下游 `dc.*` 主题供上下文外消费）
+- `DataPacket.markPersisted` -> `PacketPersisted`（落温层存储，§7.2）
+- `DataPacket.markPublished` -> `PacketPublished`（分发到下游 `dc.*` 主题供上下文外消费）
 
 > 平台落库与分发**不在同一事务**（Kafka 发送不与 DB 事务原子）--这正是采集侧的可靠性模型：落库成功但分发前宕机，靠 Kafka 重投 + 消费端 `msg_id` 幂等兜底（与 Outbox 的可靠性边界同理，见 [Outbox设计方案 §7.8](../业务事件/Outbox设计方案.md)）。
 
@@ -467,7 +467,7 @@ BufferReorder:
 |---|---|
 | 载体 | 🔴 Redis（按 `equipment_id` hash 维护各设备最新数据点） |
 | 写入 | 平台 `PersistAndPublish` 时同步刷新热层最新值（覆盖写） |
-| 查询 | 过点执行上下文 REST 查 `DataQueryAppService` → 读 Redis |
+| 查询 | 过点执行上下文 REST 查 `DataQueryAppService` -> 读 Redis |
 | 保留 | 只保留最新值（或最近 N 个采样），不存历史 |
 | 失效 | 设备 `OFFLINE` 后保留最后值 + 标记离线时间；`CLOSED` 终态后清除 |
 

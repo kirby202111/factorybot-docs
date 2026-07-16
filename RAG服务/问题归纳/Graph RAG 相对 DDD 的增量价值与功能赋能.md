@@ -43,7 +43,7 @@ Graph RAG 把它们物化成显式边，traceability 从副产品升级为**可�
 | 版本 | 可能取到当前生效版（已失效） | `SNAPSHOT_OF_ROUTE` 锁当时版本 |
 | 证据 | LLM 自由发挥 | 强制引用 `node_id`，无证据判失败重试 |
 
-MES 对错误答案零容忍（错给一条失效工艺 → 批量不良），"LLM 只综合、不找路径"不是性能取舍，是**安全取舍**。
+MES 对错误答案零容忍（错给一条失效工艺 -> 批量不良），"LLM 只综合、不找路径"不是性能取舍，是**安全取舍**。
 
 ### 2.4 版本快照的"可检索性"——与通用 RAG 最大的区别
 
@@ -61,7 +61,7 @@ DDD 写侧已保证版本一致（INV-09：过点记录绑 `routeVersion`）。�
 
 ### 2.6 证据链可回溯 + 置信度兜底，把 MES 防错理念带进 AI 检索
 
-每个节点带 `source_event_id`，答案的每个假设都能回溯到原始领域事件；`confidence < 0.6` 或投影滞后超阈值 → `needs_human_review`，不展示给操作工。
+每个节点带 `source_event_id`，答案的每个假设都能回溯到原始领域事件；`confidence < 0.6` 或投影滞后超阈值 -> `needs_human_review`，不展示给操作工。
 
 这把 MES"宁可拦下让人判"的防错理念落进了 LLM 输出层——传统 DDD 服务不存在这个维度，因为它不直接面向"给人一个带置信度的根因假设"。
 
@@ -76,14 +76,14 @@ DDD 写侧已保证版本一致（INV-09：过点记录绑 `routeVersion`）。�
 
 ## 三、为 MES 新增的功能（传统 MES 基本没有的）
 
-| # | 新增能力 | 图路径 | 原状 → 新状 | MVP 覆盖 |
+| # | 新增能力 | 图路径 | 原状 -> 新状 | MVP 覆盖 |
 |---|---------|--------|------------|---------|
-| 1 | **自然语言 5M1E 根因诊断** | `WipUnit{sn}` → 五维扩展 → LLM 假设排序 | 工程师跨 5 界面手动串、靠经验 → 一问即出带证据链的 5M1E 假设 | ✅ Man/Material/Method/Measurement |
-| 2 | **批次/供应商反向追溯（召回场景）** | `InventoryBatch` ←`CONSUMED_BATCH`← `WipUnit`；`SUPPLIED_BY` | 召回时让数据组临时写报表、慢且易漏 → "B-77 这批锡膏进了哪些单件、现在在哪"一跳反向查询 | ✅ Material，🔴 `CONSUMED_BATCH` 边契约待对齐，MVP 先 ACL 降级补齐 |
-| 3 | **跨单件共性因子挖掘 / 批次异常影响面** | `BatchQualityAnomaly` →`AFFECTS`→ `WipUnit`；多不良回溯共同上游 | 数据分析师写 SQL 找共性 → 图结构天然支持"这 5 个不良的共同因子"自动比对 | `BatchQualityAnomaly` 已投影；🔴 共性挖掘用 GDS 图算法属延伸，超出当前 MVP 设计 |
-| 4 | **工艺变更影响面预判** | `RouteVersion` ←`BINDS_ROUTE`/`SNAPSHOT_OF_ROUTE`← `WorkOrder`/`WipUnit` | 变更评审靠人评估影响面 → 激活新版本前反查哪些在制单件绑了旧版本，影响面一目了然 | ✅ Method |
-| 5 | **L1 多步递进诊断 Agent** | 图作快路径给全貌，Agent 在某一维深挖追问 | 无 → 复杂跨上下文递进诊断 | 对接在实现阶段五，强依赖图先建起来 |
-| 6 | **诊断 + 处置一体化（与文档型 RAG 协同）** | `TraceAnswer.suggested_action` → 路线 B `search_docs(query, version_anchor)` | 诊断结果与处置 SOP 分属两套系统 → 给根因假设同时给带版本过滤的处置 SOP | 设计上协同，依赖路线 B 先行验证 |
+| 1 | **自然语言 5M1E 根因诊断** | `WipUnit{sn}` -> 五维扩展 -> LLM 假设排序 | 工程师跨 5 界面手动串、靠经验 -> 一问即出带证据链的 5M1E 假设 | ✅ Man/Material/Method/Measurement |
+| 2 | **批次/供应商反向追溯（召回场景）** | `InventoryBatch` ←`CONSUMED_BATCH`← `WipUnit`；`SUPPLIED_BY` | 召回时让数据组临时写报表、慢且易漏 -> "B-77 这批锡膏进了哪些单件、现在在哪"一跳反向查询 | ✅ Material，🔴 `CONSUMED_BATCH` 边契约待对齐，MVP 先 ACL 降级补齐 |
+| 3 | **跨单件共性因子挖掘 / 批次异常影响面** | `BatchQualityAnomaly` ->`AFFECTS`-> `WipUnit`；多不良回溯共同上游 | 数据分析师写 SQL 找共性 -> 图结构天然支持"这 5 个不良的共同因子"自动比对 | `BatchQualityAnomaly` 已投影；🔴 共性挖掘用 GDS 图算法属延伸，超出当前 MVP 设计 |
+| 4 | **工艺变更影响面预判** | `RouteVersion` ←`BINDS_ROUTE`/`SNAPSHOT_OF_ROUTE`← `WorkOrder`/`WipUnit` | 变更评审靠人评估影响面 -> 激活新版本前反查哪些在制单件绑了旧版本，影响面一目了然 | ✅ Method |
+| 5 | **L1 多步递进诊断 Agent** | 图作快路径给全貌，Agent 在某一维深挖追问 | 无 -> 复杂跨上下文递进诊断 | 对接在实现阶段五，强依赖图先建起来 |
+| 6 | **诊断 + 处置一体化（与文档型 RAG 协同）** | `TraceAnswer.suggested_action` -> 路线 B `search_docs(query, version_anchor)` | 诊断结果与处置 SOP 分属两套系统 -> 给根因假设同时给带版本过滤的处置 SOP | 设计上协同，依赖路线 B 先行验证 |
 
 ---
 
@@ -93,7 +93,7 @@ DDD 写侧已保证版本一致（INV-09：过点记录绑 `routeVersion`）。�
 |---|---|---|---|
 | **质量追溯**（MES 核心价值） | "能查到"但要人工跨界面串 | 一次取齐 5M1E + AI 可解释 + 证据 `source_event_id` 可回溯 | 跨上下文边 + 结构化子图 |
 | **不良品返修/报废决策** | 返修上下文 `ReworkTask` 的去向靠人判 | 5M1E 证据 + 置信度建议，低置信度转人工 | 5M1E 扩展 + `needs_human_review` |
-| **供应商质量评估** | 数据组做报表、滞后、批次聚合级 | 按 `Supplier`→`InventoryBatch`→`WipUnit`→`QualityVerdict` 聚合不良率，可下钻到单件 | 反向多跳遍历 |
+| **供应商质量评估** | 数据组做报表、滞后、批次聚合级 | 按 `Supplier`->`InventoryBatch`->`WipUnit`->`QualityVerdict` 聚合不良率，可下钻到单件 | 反向多跳遍历 |
 | **设备–质量联动**（Machine 维度） | 设备台账/维修/点检/计量与质量是两个孤岛 | 不良证据直接挂"该设备当时维修/点检/计量状态" | `USED_EQUIPMENT` + `REPAIRS`/`INSPECTS`/`CERTIFIES` |
 | **审计与合规** | 人工抽审追溯记录 | 每个 AI 答案的假设都能回溯到领域事件，可解释、可复核 | `source_event_id` 证据链 |
 

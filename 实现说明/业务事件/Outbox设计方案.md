@@ -694,7 +694,7 @@ DLT topic 命名 `<source-topic>.DLT`。要求：DLT 必须有告警；DLT 消�
 
 **① 领取节流（claim throttle）——保护 DB、设定自然发送上限**
 
-`fixed-delay` + `batch-size` 给出单实例天然发送上限：`batch-size / (fixed-delay/1000)`。例如 `batch-size=100`、`fixed-delay=1000ms` → ≤100 事件/s/实例。这是最粗的限流，也是 DB 写入保护的第一道。
+`fixed-delay` + `batch-size` 给出单实例天然发送上限：`batch-size / (fixed-delay/1000)`。例如 `batch-size=100`、`fixed-delay=1000ms` -> ≤100 事件/s/实例。这是最粗的限流，也是 DB 写入保护的第一道。
 
 **② 全局发送令牌桶（global token bucket）——保护 Kafka Producer/broker**
 

@@ -13,9 +13,9 @@
 
 ## 方案：思路 D —— 在 model_node 喂 LLM 前压缩 history（不动 ToolNode）
 
-**为什么不在 ToolNode 压缩**：ToolNode 写入 `state.messages` 的 tool 消息是 `_guard_no_evidence` 的数据源。`query_traceability_graph` 的 FIELD_WHITELIST 不含 `nodes`，若在 ToolNode 压缩，`nodes` 被裁 → 护栏扫不到 nodes 里的 BLOCK 节点 → 漏判"证据不足"。思路 D 让**护栏读全文、LLM 读摘要**彻底解耦，且符合 ResultCompactor docstring"工具结果回灌前压缩"。
+**为什么不在 ToolNode 压缩**：ToolNode 写入 `state.messages` 的 tool 消息是 `_guard_no_evidence` 的数据源。`query_traceability_graph` 的 FIELD_WHITELIST 不含 `nodes`，若在 ToolNode 压缩，`nodes` 被裁 -> 护栏扫不到 nodes 里的 BLOCK 节点 -> 漏判"证据不足"。思路 D 让**护栏读全文、LLM 读摘要**彻底解耦，且符合 ResultCompactor docstring"工具结果回灌前压缩"。
 
-**压缩点**：`model_node` 构造喂 LLM 的 messages 时，对 history 中 `role==tool` 的消息解析 content → 压缩 `data`（`trace_id` 顶层保留不动）→ 重组序列化。`state.messages` 始终保持全文（ToolNode 不改），护栏/trace 读全文不受影响。
+**压缩点**：`model_node` 构造喂 LLM 的 messages 时，对 history 中 `role==tool` 的消息解析 content -> 压缩 `data`（`trace_id` 顶层保留不动）-> 重组序列化。`state.messages` 始终保持全文（ToolNode 不改），护栏/trace 读全文不受影响。
 
 ### 1. `app/infrastructure/cost/result_compactor.py` —— 修 #15
 无白名单工具分支加 warning（让缺口可见），**维持透传不裁剪**（不替领域拍板"无白名单工具留哪些字段"）：
@@ -43,7 +43,7 @@ def compact(self, tool_name, view):
 ```
 
 ### 2. `app/infrastructure/ai/react_graph.py` —— 接入压缩
-`build_react_graph` 加可选参数 `result_compactor=None`（None=不压缩，向后兼容）；新增**模块级** `_compact_tool_history(history, compactor)`（模块级以便单测）；`model_node` 中 `messages.extend(history)` → `messages.extend(_compact_tool_history(history, result_compactor))`：
+`build_react_graph` 加可选参数 `result_compactor=None`（None=不压缩，向后兼容）；新增**模块级** `_compact_tool_history(history, compactor)`（模块级以便单测）；`model_node` 中 `messages.extend(history)` -> `messages.extend(_compact_tool_history(history, result_compactor))`：
 ```python
 def _compact_tool_history(history, compactor):
     """喂 LLM 前：压缩 tool 消息的 data（trace_id 保留），其余原样。
@@ -66,11 +66,11 @@ def _compact_tool_history(history, compactor):
 ```
 
 ### 3. 透传 `result_compactor`（机械改签名，DI 正路）
-- `graph_builder.py`：`build_diagnosis_graph(..., result_compactor=None)` → 透传 `build_react_graph`。
-- `orchestration/agents/__init__.py`：`build_agent_registry(..., result_compactor=None)` → 传给各 agent 构造。
-- `root_cause_agent.py` / `fault_impact_agent.py` / `draft_agents.py`：`__init__(..., result_compactor=None)` → 透传 `build_react_graph`。
-- `traceability_agent.py`：`__init__(..., result_compactor=None)` → 透传 `build_diagnosis_graph`。
-- `diagnosis_service.py`：`__init__(..., result_compactor=None)` → `diagnose()` 内透传 `build_diagnosis_graph`。
+- `graph_builder.py`：`build_diagnosis_graph(..., result_compactor=None)` -> 透传 `build_react_graph`。
+- `orchestration/agents/__init__.py`：`build_agent_registry(..., result_compactor=None)` -> 传给各 agent 构造。
+- `root_cause_agent.py` / `fault_impact_agent.py` / `draft_agents.py`：`__init__(..., result_compactor=None)` -> 透传 `build_react_graph`。
+- `traceability_agent.py`：`__init__(..., result_compactor=None)` -> 透传 `build_diagnosis_graph`。
+- `diagnosis_service.py`：`__init__(..., result_compactor=None)` -> `diagnose()` 内透传 `build_diagnosis_graph`。
 
 ### 4. `app/container.py` —— 装配单例
 ```python
@@ -110,7 +110,7 @@ self.agents = build_agent_registry(
 - **备选（若嫌透传重）**：`build_react_graph` 内部默认 `ResultCompactor()`（3 文件改动），代价是失去 DI/可配置性、与 container cost 装配区不一致。本 plan 选注入式。
 
 ## 不在范围（后续阶段）
-- ModelRouter.route() 接入（被 LLM 单例→多实例架构 + provider 模型映射 + EvalGate 数据源三重阻塞）。
+- ModelRouter.route() 接入（被 LLM 单例->多实例架构 + provider 模型映射 + EvalGate 数据源三重阻塞）。
 - EarlyStopDetector 接 ReAct（需加 state 证据计数通道）。
 - CacheControl（强依赖 anthropic provider）。
 - PhaseToolBinder / ToolResultCache（默认关闭/灰度，语义风险）。

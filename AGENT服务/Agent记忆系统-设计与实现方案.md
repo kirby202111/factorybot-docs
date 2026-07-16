@@ -12,7 +12,7 @@
 记忆是一套**分层架构**，按两个正交维度切成五层：
 
 - **存给谁看**：给 LangGraph 引擎看（续跑用）/ 给 LLM 看（推理用）/ 给系统看（审计用）/ 给降本用（命中复用）
-- **活多久**：瞬时（单次 LLM 调用）→ 会话内（一个 session）→ 跨会话（多个 session）→ 永久（落库归档）
+- **活多久**：瞬时（单次 LLM 调用）-> 会话内（一个 session）-> 跨会话（多个 session）-> 永久（落库归档）
 
 一句话核心哲学，贯穿全栈：
 
@@ -513,7 +513,7 @@ Agent 侧重试不会导致重复写（如重复创建隔离单）。这是 L5 �
 
 ### 8.2 版本一致性红线贯穿全栈
 
-`route_version` 出现在：L3State 字段 → 工具入参（system prompt 强约束"查工艺必须带 route_version"）→ L4 缓存 key 哈希 → L3 trace。
+`route_version` 出现在：L3State 字段 -> 工具入参（system prompt 强约束"查工艺必须带 route_version"）-> L4 缓存 key 哈希 -> L3 trace。
 MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓存层 key 设计。
 
 ### 8.3 时变性决定缓存策略
@@ -558,12 +558,12 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 | `confirm:session:{sid}:{step}` | Redis | 防重复确认 | (session_id, step) | 30min | L5 幂等 | ✅ |
 | `tc:{tenant}:{tool}:{hash}` | Redis | 工具结果缓存 | tenant+tool+args+version_anchor | 按 tool 策略 | L4 降本 | 🔧 灰度 |
 | `llm_call_log` | MySQL (app) | LLM 调用指标 | call_id | 永久 | 可观测/降本归因 | ✅ |
-| `_active_tasks` | 进程内 dict | session_id→Task | session_id | 进程寿命 | 活跃任务跟踪 | ✅ |
+| `_active_tasks` | 进程内 dict | session_id->Task | session_id | 进程寿命 | 活跃任务跟踪 | ✅ |
 | prompt cache | provider 侧 | system prompt+工具定义 | 内容哈希 | 5m/1h | L2 降本 | 🔧 待接线 |
 
 ## 10. 落地状态与接线清单
 
-当前 mock（`RUN_MODE=mock`）已端到端跑通 L1 诊断 → L2 草稿 → L3 换线（3 个 gate interrupt/resume → DONE），
+当前 mock（`RUN_MODE=mock`）已端到端跑通 L1 诊断 -> L2 草稿 -> L3 换线（3 个 gate interrupt/resume -> DONE），
 7 个 pytest 全绿。但**记忆系统的各层落地进度不一致**，下表是真实模式接线清单：
 
 | 组件 | 类实现 | mock 接线 | 真实模式待办 |
@@ -572,7 +572,7 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 | `SqlSaver` (MySQL checkpointer) | 📐 注释示意 | — | 接 `langgraph.checkpoint.mysql.AsyncSqlSaver` + 连接池 |
 | `ToolCallTraceRepo` | ✅ | ✅ ToolNode | 替换为 SQLAlchemy 实现 |
 | `L3Repo` / `SessionManager` | ✅ | ✅ orchestrator | 替换为 SQLAlchemy 实现 |
-| `ConfirmationStore` | ✅ | ✅ orchestrator | FakeRedis → 真 Redis |
+| `ConfirmationStore` | ✅ | ✅ orchestrator | FakeRedis -> 真 Redis |
 | `ResultCompactor` | ✅ | 🔧 未接线 | ToolNode 回灌前调用 `compact()` |
 | `CacheControl` | ✅ | 🔧 未接线 | ObservableChatModel 外层套 `apply()` |
 | `EarlyStopDetector` | ✅ | 🔧 未接线 | L1 图条件边接入 `should_stop()` |
@@ -598,4 +598,4 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 > **一句话总结**：factorybot Agent 的记忆是五层分层架构--L1 工作记忆（checkpointer 续跑）、
 > L2 上下文窗口记忆（压缩 + prompt 缓存）、L3 证据链长期记忆（全文落库审计）、
 > L4 跨会话缓存（版本化精确缓存）、L5 会话元数据 & 令牌（生命周期 + 写动作闸门）。
-> 核心哲学"模型看摘要，trace 落全文"贯穿 L2↔L3；版本一致性红线贯穿 L1→L4；时变性红线决定 L4 缓存策略。
+> 核心哲学"模型看摘要，trace 落全文"贯穿 L2↔L3；版本一致性红线贯穿 L1->L4；时变性红线决定 L4 缓存策略。

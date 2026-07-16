@@ -14,28 +14,28 @@
 
 ```
 HTTP POST /agent/l3/changeover/start
-  → L3Orchestrator.start()
-    → l3_session 写入 MySQL (status=PLANNING)
-    → asyncio.create_task(_drive(session))    ← 异步点火，HTTP 立即返回 session_id
-    → 返回 session_id 给调用方
+  -> L3Orchestrator.start()
+    -> l3_session 写入 MySQL (status=PLANNING)
+    -> asyncio.create_task(_drive(session))    ← 异步点火，HTTP 立即返回 session_id
+    -> 返回 session_id 给调用方
 
 后台 asyncio Task:
   _drive(session)
-    → supervisor.ainvoke(initial_state)       ← LangGraph 图开始执行
-      → plan_node (代码)                      ← 每一步都推进 state
-      → first_article (代码)
-      → gate_first_article                    ← interrupt! state 落 MySQL，Task 暂停
+    -> supervisor.ainvoke(initial_state)       ← LangGraph 图开始执行
+      -> plan_node (代码)                      ← 每一步都推进 state
+      -> first_article (代码)
+      -> gate_first_article                    ← interrupt! state 落 MySQL，Task 暂停
         ... 等人确认 ...
         POST /agent/l3/{session_id}/confirm   ← 人确认
-          → Command(resume=token)             ← 唤醒 Task
-      → process_switch (代码)
-      → gate_process_switch                   ← interrupt again...
+          -> Command(resume=token)             ← 唤醒 Task
+      -> process_switch (代码)
+      -> gate_process_switch                   ← interrupt again...
         ... 等人确认 ...
-      → tooling_check ‖ kitting_check (并行)  ← 两条分支并发
-      → barrier_node (代码)
-      → ... 继续直到 done_node
-    → supervisor.ainvoke 返回
-  → session.status = DONE
+      -> tooling_check ‖ kitting_check (并行)  ← 两条分支并发
+      -> barrier_node (代码)
+      -> ... 继续直到 done_node
+    -> supervisor.ainvoke 返回
+  -> session.status = DONE
 ```
 
 **关键认知**：整个长程任务的生命周期由三个组件协作完成：
@@ -232,12 +232,12 @@ async def confirm_gate(session_id: str, req: ConfirmRequest, ...):
 ```python
 # 第一次调用：启动图
 await graph.ainvoke(initial_state, config={"configurable": {"thread_id": session_id}})
-# → 图跑到 interrupt，state 落 MySQL，ainvoke 阻塞等待
+# -> 图跑到 interrupt，state 落 MySQL，ainvoke 阻塞等待
 
 # 第二次调用（可以在不同进程）：
 await graph.ainvoke(Command(resume=token), config={"configurable": {"thread_id": session_id}})
-# → 从 MySQL 加载 state，让 interrupt 返回 token，继续执行
-# → 如果又遇到 interrupt，再次阻塞等待
+# -> 从 MySQL 加载 state，让 interrupt 返回 token，继续执行
+# -> 如果又遇到 interrupt，再次阻塞等待
 ```
 
 ### 3.4 跨进程恢复的完整时序
@@ -245,21 +245,21 @@ await graph.ainvoke(Command(resume=token), config={"configurable": {"thread_id":
 ```
 进程 A (agent-service pod-1):
   asyncio.create_task(_drive(session))
-    → graph.ainvoke(initial_state, thread_id=S-001)
-      → plan_node ✓
-      → first_article ✓
-      → gate_first_article → interrupt! → state 落 MySQL checkpoint
-      → ainvoke 阻塞等待...
+    -> graph.ainvoke(initial_state, thread_id=S-001)
+      -> plan_node ✓
+      -> first_article ✓
+      -> gate_first_article -> interrupt! -> state 落 MySQL checkpoint
+      -> ainvoke 阻塞等待...
 
   ──── pod-1 被 OOM Kill 或滚动更新重启 ────
 
 进程 B (agent-service pod-2):
   # 人确认了，POST /confirm 到达
-  → graph.ainvoke(Command(resume=token), thread_id=S-001)
-    → SqlSaver 从 MySQL 加载 thread_id=S-001 的最新 checkpoint
-    → 反序列化 state（gate_first_article 处）
-    → interrupt 返回 token
-    → 继续执行: process_switch → gate_process_switch → ...
+  -> graph.ainvoke(Command(resume=token), thread_id=S-001)
+    -> SqlSaver 从 MySQL 加载 thread_id=S-001 的最新 checkpoint
+    -> 反序列化 state（gate_first_article 处）
+    -> interrupt 返回 token
+    -> 继续执行: process_switch -> gate_process_switch -> ...
 ```
 
 **关键**：进程 A 和进程 B 可以是完全不同的进程，甚至不同的 Pod——只要 `thread_id` 相同、MySQL 可达，就能从断点续跑。
@@ -291,7 +291,7 @@ async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
 ```python
 class L3Orchestrator:
     def __init__(self, ...):
-        self._active_tasks: dict[str, asyncio.Task] = {}  # session_id → Task
+        self._active_tasks: dict[str, asyncio.Task] = {}  # session_id -> Task
 
     async def start(self, req, tenant):
         session = await self._sessions.create(req, tenant)
@@ -413,18 +413,18 @@ class ConfirmationToken:
 
 ```
 人确认
-  → POST /confirm {session_id, step, approved, user_id}
-  → ConfirmationStore.issue() → 生成 token_id，存 Redis
-  → graph.ainvoke(Command(resume=token))
-  → interrupt 返回 token
-  → GateManager.await_confirmation 继续执行:
+  -> POST /confirm {session_id, step, approved, user_id}
+  -> ConfirmationStore.issue() -> 生成 token_id，存 Redis
+  -> graph.ainvoke(Command(resume=token))
+  -> interrupt 返回 token
+  -> GateManager.await_confirmation 继续执行:
       if not confirmation.valid_for(card.writes_via_action()):
           return "REJECT"        ← token 与写动作不匹配，拒绝
       return "PASS" if confirmation.approved else "REJECT"
-  → 若 PASS，gate 节点返回
-  → write_via_appservice 节点拿 token 调 ACL 写客户端
-  → ACL 写客户端调 REST 时，header 带 X-Confirmation-Token: {token_id}
-  → 应用服务收到后，可选地回调 ConfirmationStore.validate() 二次校验
+  -> 若 PASS，gate 节点返回
+  -> write_via_appservice 节点拿 token 调 ACL 写客户端
+  -> ACL 写客户端调 REST 时，header 带 X-Confirmation-Token: {token_id}
+  -> 应用服务收到后，可选地回调 ConfirmationStore.validate() 二次校验
 ```
 
 ---
@@ -488,7 +488,7 @@ class ActionCard(BaseModel):
 ```python
 class GateManager:
     def __init__(self, ...):
-        self._deadlines: dict[str, asyncio.Task] = {}  # card_id → deadline timer
+        self._deadlines: dict[str, asyncio.Task] = {}  # card_id -> deadline timer
 
     async def await_confirmation(self, session_id, step, card):
         await self._dispatcher.push(card)
@@ -535,38 +535,38 @@ class GateManager:
 
 ```
 Step 1: FaultImpactAgent (B) 推理
-  → 调设备遥测 ACL → 故障模式 = "软漂移"
-  → 调 FMEA ACL → 漂移参数 × 产品敏感度
-  → 调批次 ACL → 窗口内批次 = [B1, B2, B3]
-  → 草拟隔离卡: draft_isolation_card(batches=[B1,B2,B3], reason="...")
+  -> 调设备遥测 ACL -> 故障模式 = "软漂移"
+  -> 调 FMEA ACL -> 漂移参数 × 产品敏感度
+  -> 调批次 ACL -> 窗口内批次 = [B1, B2, B3]
+  -> 草拟隔离卡: draft_isolation_card(batches=[B1,B2,B3], reason="...")
 
 Step 2: gate: ISOLATION
-  → 动作卡推给质量工程师
-  → 工程师点开 evidence trace_id，验证 agent 推理
-  → 工程师确认 → POST /confirm
+  -> 动作卡推给质量工程师
+  -> 工程师点开 evidence trace_id，验证 agent 推理
+  -> 工程师确认 -> POST /confirm
 
 Step 3: gate 返回 PASS
-  → write_via_appservice 节点执行
-  → 调 ReworkWriteAclClient.issue_isolation(batches, reason, confirmation)
+  -> write_via_appservice 节点执行
+  -> 调 ReworkWriteAclClient.issue_isolation(batches, reason, confirmation)
 
 Step 4: ReworkWriteAclClient
-  → 校验 confirmation token 有效性
-  → POST /api/isolation-orders {batches, reason, confirmation_id}
-  → header: X-Confirmation-Token: {token_id}
+  -> 校验 confirmation token 有效性
+  -> POST /api/isolation-orders {batches, reason, confirmation_id}
+  -> header: X-Confirmation-Token: {token_id}
 
 Step 5: 返工上下文应用服务 (Java)
-  → IsolationOrderApplicationService.issue()
-  → IsolationAggregate.issue(batch_set, reason)
-    → 聚合根不变式校验：
+  -> IsolationOrderApplicationService.issue()
+  -> IsolationAggregate.issue(batch_set, reason)
+    -> 聚合根不变式校验：
       - 批次状态必须允许隔离
       - 隔离原因不能为空
       - ...
-  → 事务提交：isolation_order 行 + outbox_event(BatchIsolated) 同一事务
-  → 返回 201 Created
+  -> 事务提交：isolation_order 行 + outbox_event(BatchIsolated) 同一事务
+  -> 返回 201 Created
 
 Step 6: Agent 收到 201
-  → gate_decision = PASS 落 l3_step_record
-  → 图继续执行下一步
+  -> gate_decision = PASS 落 l3_step_record
+  -> 图继续执行下一步
 ```
 
 ### 7.2 ACL 写客户端的实现细节
@@ -688,9 +688,9 @@ class L3State(BaseModel):
 ### 9.1 隔离机制
 
 ```
-session S-001 (thread_id=S-001)  →  StateGraph 实例 A
-session S-002 (thread_id=S-002)  →  StateGraph 实例 B (同一 CompiledGraph 的不同调用)
-session S-003 (thread_id=S-003)  →  StateGraph 实例 C
+session S-001 (thread_id=S-001)  ->  StateGraph 实例 A
+session S-002 (thread_id=S-002)  ->  StateGraph 实例 B (同一 CompiledGraph 的不同调用)
+session S-003 (thread_id=S-003)  ->  StateGraph 实例 C
 ```
 
 - 同一 `CompiledGraph`（换线图）可以被多个 session 并发调用。
@@ -739,9 +739,9 @@ class ToolRegistry:
 ### 10.1 session 的状态流转
 
 ```
-PLANNING → RUNNING → DONE
-                   → SUSPENDED → (手动恢复) → RUNNING → DONE
-                   → FAILED
+PLANNING -> RUNNING -> DONE
+                   -> SUSPENDED -> (手动恢复) -> RUNNING -> DONE
+                   -> FAILED
 ```
 
 ### 10.2 各状态的含义与触发条件
@@ -901,9 +901,9 @@ async def lifespan(app: FastAPI):
 | "进程重启了怎么办" | state 在 MySQL 不在进程内存，新进程用同一个 thread_id 调 ainvoke 即可从 checkpoint 恢复 | §3.4 |
 | "token 怎么防伪造" | Redis 存储，token_id 随机 32 字符 hex，绑定 action:target，带 30 分钟 TTL，校验时查 Redis 验证存在性 + action 匹配 | §5 |
 | "写怎么不走旁路" | ACL 写客户端调应用服务 REST，写路径过聚合根不变式 + 事务发件箱；confirmation_id 做幂等键 | §7 |
-| "多个 session 怎么隔离" | thread_id 不同 → checkpoint 行不同 → state 物理隔离；agent 能力 subgraph 用 sub-thread_id | §9 |
+| "多个 session 怎么隔离" | thread_id 不同 -> checkpoint 行不同 -> state 物理隔离；agent 能力 subgraph 用 sub-thread_id | §9 |
 | "超时怎么计时" | asyncio.wait_for 包住整个 ainvoke，从 _drive 开始计时，包含 gate 等待时间；gate 单独有 deadline 计时器 | §4.3 / §6.3 |
-| "agent 失败怎么隔离" | FailureTracker 按 session+capability 计数，连续 2 次失败 → status=SUSPENDED，不自动重试 | §11 |
+| "agent 失败怎么隔离" | FailureTracker 按 session+capability 计数，连续 2 次失败 -> status=SUSPENDED，不自动重试 | §11 |
 | "红线怎么保证" | 5 条启动断言，进程起不来 = 配置有问题，不靠文档或代码审查 | §12 |
 | "走一遍具体场景" | 4 类典型长程任务（换线 / 故障复产 / 客诉 8D / 工艺变更）的逐步运行细节：每步节点性质（CODE/AGENT）、state 变化、checkpoint 链、interrupt-resume、ACL/应用服务落库、l3_step_record | §14 |
 
@@ -939,17 +939,17 @@ SMT 车间 1 线 L-01，白班 08:00 开始把工单 `WO-2026-0701` 从产品 A 
 | T+0 | `start` HTTP | L3Orchestrator.start：session 写 MySQL（status=PLANNING），create_task(_drive) 点火，返回 session_id | session.status=PLANNING | l3_session 行写入 |
 | T+1s | `plan`（CODE） | 代码节点：按 scenario=CHANGEOVER 决定步骤序列 | current_step=PLAN | cp-1(parent=null)；step=PLAN, node_type=CODE |
 | T+2s | `first_article`（CODE） | query_first_article：调过点 ACL 查首件状态，返回 PASS | first_article_result={status:PASS, article_id:FA-001} | cp-2(parent=cp-1) |
-| T+3s | `gate_first_article`（CODE） | _gate：build_action_card（intent="首件 FA-001 已合格，确认进入工艺激活"）→ save_step(GATE_WAITING) → dispatcher.push（WebSocket 推张工 + Kafka 持久）→ **interrupt(value=card)** | current_step=GATE_FIRST_ARTICLE | cp-3(parent=cp-2) 落 MySQL，ainvoke 挂起；step=FIRST_ARTICLE, status=GATE_WAITING |
-| T+3s~T+5min | （等待人确认） | 张工看板点确认 → `POST /confirm` {step:FIRST_ARTICLE, approved:true, user_id:u_zhang} → ConfirmationStore.issue token（确认动作，无写落库）→ `graph.ainvoke(Command(resume=token), thread_id=S-CO-...001)` | （interrupt 返回 token） | SqlSaver 加载 cp-3，resume；step=FIRST_ARTICLE, status=CONFIRMED, gate_decision=PASS, gate_decided_by=u_zhang |
+| T+3s | `gate_first_article`（CODE） | _gate：build_action_card（intent="首件 FA-001 已合格，确认进入工艺激活"）-> save_step(GATE_WAITING) -> dispatcher.push（WebSocket 推张工 + Kafka 持久）-> **interrupt(value=card)** | current_step=GATE_FIRST_ARTICLE | cp-3(parent=cp-2) 落 MySQL，ainvoke 挂起；step=FIRST_ARTICLE, status=GATE_WAITING |
+| T+3s~T+5min | （等待人确认） | 张工看板点确认 -> `POST /confirm` {step:FIRST_ARTICLE, approved:true, user_id:u_zhang} -> ConfirmationStore.issue token（确认动作，无写落库）-> `graph.ainvoke(Command(resume=token), thread_id=S-CO-...001)` | （interrupt 返回 token） | SqlSaver 加载 cp-3，resume；step=FIRST_ARTICLE, status=CONFIRMED, gate_decision=PASS, gate_decided_by=u_zhang |
 | T+5min | `process_switch`（CODE） | query_active_route：调工艺管理 ACL（强制 route_version=v4）查路线，返回 ACTIVE | process_switch_result={route_id:RR-B, version:v4, status:ACTIVE} | cp-4(parent=cp-3)；step=PROCESS_SWITCH, node_type=CODE |
-| T+6min | `gate_process_switch`（CODE） | _gate：card intent="激活工艺路线 RR-B v4"，writes_via="工艺管理上下文.application.activate_route" → push → interrupt | current_step=GATE_PROCESS_SWITCH | cp-5(parent=cp-4) 落 MySQL，挂起；step=PROCESS_SWITCH, status=GATE_WAITING |
-| T+6min~T+9min | （等待人确认） | 工艺工程师李工确认激活 → POST /confirm → issue token（action=`process_route.activate:RR-B:v4`）→ Command(resume=token) | （resume） | 加载 cp-5，resume；step=PROCESS_SWITCH, status=CONFIRMED, gate_decision=PASS |
+| T+6min | `gate_process_switch`（CODE） | _gate：card intent="激活工艺路线 RR-B v4"，writes_via="工艺管理上下文.application.activate_route" -> push -> interrupt | current_step=GATE_PROCESS_SWITCH | cp-5(parent=cp-4) 落 MySQL，挂起；step=PROCESS_SWITCH, status=GATE_WAITING |
+| T+6min~T+9min | （等待人确认） | 工艺工程师李工确认激活 -> POST /confirm -> issue token（action=`process_route.activate:RR-B:v4`）-> Command(resume=token) | （resume） | 加载 cp-5，resume；step=PROCESS_SWITCH, status=CONFIRMED, gate_decision=PASS |
 | T+9min | **写落库**（gate PASS 触发） | write_via_appservice 拿 token 调工艺管理上下文 ACL：POST /api/process-routes/RR-B/activate，header `X-Confirmation-Token`。应用服务过聚合根不变式 + 事务发件箱落 ProcessRouteActivated | gate_process_switch=PASS | cp-6(parent=cp-5)；step=PROCESS_SWITCH_WRITE, node_type=CODE |
-| T+9min | `tooling_check` ‖ `kitting_check`（CODE，并行） | conditional_edges 返回 ["tooling_check","kitting_check"] 并行派发。tooling：expected=ST-B vs 扫码 actual=ST-B → PASS；expected=PB-B-v4 vs 本地 PB-B-v4 → PASS。kitting：齐套率=100% → PASS | tooling_result={status:PASS}, kitting_result={status:PASS} | cp-7(parent=cp-6) 两分支汇合；step=TOOLING_CHECK/KITTING_CHECK, node_type=CODE |
-| T+10min | `barrier`（CODE） | _barrier_node：t=PASS ∧ k=PASS → barrier_route=draft_release（确定性分流，非 agent） | barrier_route=draft_release | cp-8(parent=cp-7)；step=BARRIER, node_type=CODE |
+| T+9min | `tooling_check` ‖ `kitting_check`（CODE，并行） | conditional_edges 返回 ["tooling_check","kitting_check"] 并行派发。tooling：expected=ST-B vs 扫码 actual=ST-B -> PASS；expected=PB-B-v4 vs 本地 PB-B-v4 -> PASS。kitting：齐套率=100% -> PASS | tooling_result={status:PASS}, kitting_result={status:PASS} | cp-7(parent=cp-6) 两分支汇合；step=TOOLING_CHECK/KITTING_CHECK, node_type=CODE |
+| T+10min | `barrier`（CODE） | _barrier_node：t=PASS ∧ k=PASS -> barrier_route=draft_release（确定性分流，非 agent） | barrier_route=draft_release | cp-8(parent=cp-7)；step=BARRIER, node_type=CODE |
 | T+10min | `draft_release`（CODE） | draft_release_card：结构化拼装放行卡（非 LLM），intent="WO-2026-0701 换线核对完成，放行生产" | action_card=放行卡 | cp-9(parent=cp-8) |
-| T+10min | `gate_release`（CODE） | _gate：push → interrupt | current_step=GATE_RELEASE | cp-10(parent=cp-9) 落 MySQL，挂起；step=RELEASE, status=GATE_WAITING |
-| T+10min~T+12min | （等待人确认） | 张工确认放行 → POST /confirm → issue token（action=`pass_execution.release:WO-2026-0701`）→ Command(resume=token) | （resume） | 加载 cp-10，resume；step=RELEASE, status=CONFIRMED, gate_decision=PASS |
+| T+10min | `gate_release`（CODE） | _gate：push -> interrupt | current_step=GATE_RELEASE | cp-10(parent=cp-9) 落 MySQL，挂起；step=RELEASE, status=GATE_WAITING |
+| T+10min~T+12min | （等待人确认） | 张工确认放行 -> POST /confirm -> issue token（action=`pass_execution.release:WO-2026-0701`）-> Command(resume=token) | （resume） | 加载 cp-10，resume；step=RELEASE, status=CONFIRMED, gate_decision=PASS |
 | T+12min | **写落库**（放行） | write_via_appservice 调**过点上下文应用服务**放行（**过点主事务 + 规则引擎判定 P99≤200ms，agent 不进主事务**），发件箱落 PassReleased | gate_release=PASS | cp-11(parent=cp-10)；step=RELEASE_WRITE, node_type=CODE |
 | T+12min | `done`（CODE） | session.status=DONE | status=DONE | cp-12(parent=cp-11)；step=DONE |
 
@@ -962,20 +962,20 @@ SMT 车间 1 线 L-01，白班 08:00 开始把工单 `WO-2026-0701` 从产品 A 
 | 时刻 | 节点（性质） | 程序运行细节 | state 变化 | 持久化（checkpoint / l3_step_record） |
 |------|------|------|------|------|
 | … | …（plan/first_article/process_switch 同快路径，略） | | gate_process_switch=PASS | cp-6 |
-| T+9min | `tooling_check` ‖ `kitting_check`（CODE，并行） | tooling：expected=ST-B vs actual=ST-A → FAIL(code=TOOLING_STENCIL_MISMATCH)。kitting：齐套=100% → PASS | tooling_result={status:FAIL, code:TOOLING_STENCIL_MISMATCH, expected:ST-B, actual:ST-A}, kitting_result={status:PASS} | cp-7(parent=cp-6)；step=TOOLING_CHECK, node_type=CODE, tooling_result 落库 |
-| T+10min | `barrier`（CODE） | _barrier_node：t=FAIL → barrier_route=root_cause，把 expected/actual/code 注入 state 给 agent | barrier_route=root_cause, expected=ST-B, actual=ST-A, mismatch_code=TOOLING_STENCIL_MISMATCH | cp-8(parent=cp-7)；step=BARRIER, node_type=CODE |
-| T+10min | `root_cause`（**AGENT A**） | _run_agent("root_cause")：subgraph.ainvoke，**thread_id=`S-CO-...001_root_cause`**（sub-thread，见 §9.2，与 supervisor checkpoint 分开）。RootCauseAgent 自适应取证（LLM + 只读 toolset）：<br>① query_stencil_lending → ST-A 借出未还<br>② query_last_changeover_close → 上工单 WO-2026-0630 收线未触发归还<br>③ query_route_audit → v4 录入 ST-B 无误<br>④ 输出根因假设"ST-A 未还库 + ST-B 未领"，confidence=high，草拟处置卡（suggested_actions: 归还 ST-A / 领用 ST-B，route_to: 库管+线长） | agent_hypothesis={root_cause:"ST-A 未还库 + ST-B 未领",...}, agent_confidence=high, action_card=处置卡 | supervisor cp-9(parent=cp-8)；subgraph 内部 checkpoint 落 sub-thread；step=ROOT_CAUSE, **node_type=AGENT**, capability=A, tool_call_traces=[trace_id 列表] |
-| T+11min | `gate_disposition`（CODE） | _gate：build_action_card（含 agent_hypothesis + evidence trace_id + confidence=high + risk_note）→ push → interrupt。**确认人可点开 evidence 回溯 agent 推理，基于证据确认而非盲批**。同时启动 deadline 计时器（card.deadline，见 §6.3） | current_step=GATE_DISPOSITION | cp-10(parent=cp-9) 落 MySQL，挂起；step=DISPOSITION, status=GATE_WAITING, agent_hypothesis 落库 |
-| T+11min~T+18min | （等待人确认） | 库管确认处置 → POST /confirm {step:DISPOSITION, approved:true} → issue token（action=`tooling.swap:ASSET-01`）→ Command(resume=token)。**期间 deadline 计时器在走，超时则 _suspend_session 推异常卡** | （resume；取消 deadline 计时器） | 加载 cp-10，resume；step=DISPOSITION, status=CONFIRMED, gate_decision=PASS |
+| T+9min | `tooling_check` ‖ `kitting_check`（CODE，并行） | tooling：expected=ST-B vs actual=ST-A -> FAIL(code=TOOLING_STENCIL_MISMATCH)。kitting：齐套=100% -> PASS | tooling_result={status:FAIL, code:TOOLING_STENCIL_MISMATCH, expected:ST-B, actual:ST-A}, kitting_result={status:PASS} | cp-7(parent=cp-6)；step=TOOLING_CHECK, node_type=CODE, tooling_result 落库 |
+| T+10min | `barrier`（CODE） | _barrier_node：t=FAIL -> barrier_route=root_cause，把 expected/actual/code 注入 state 给 agent | barrier_route=root_cause, expected=ST-B, actual=ST-A, mismatch_code=TOOLING_STENCIL_MISMATCH | cp-8(parent=cp-7)；step=BARRIER, node_type=CODE |
+| T+10min | `root_cause`（**AGENT A**） | _run_agent("root_cause")：subgraph.ainvoke，**thread_id=`S-CO-...001_root_cause`**（sub-thread，见 §9.2，与 supervisor checkpoint 分开）。RootCauseAgent 自适应取证（LLM + 只读 toolset）：<br>① query_stencil_lending -> ST-A 借出未还<br>② query_last_changeover_close -> 上工单 WO-2026-0630 收线未触发归还<br>③ query_route_audit -> v4 录入 ST-B 无误<br>④ 输出根因假设"ST-A 未还库 + ST-B 未领"，confidence=high，草拟处置卡（suggested_actions: 归还 ST-A / 领用 ST-B，route_to: 库管+线长） | agent_hypothesis={root_cause:"ST-A 未还库 + ST-B 未领",...}, agent_confidence=high, action_card=处置卡 | supervisor cp-9(parent=cp-8)；subgraph 内部 checkpoint 落 sub-thread；step=ROOT_CAUSE, **node_type=AGENT**, capability=A, tool_call_traces=[trace_id 列表] |
+| T+11min | `gate_disposition`（CODE） | _gate：build_action_card（含 agent_hypothesis + evidence trace_id + confidence=high + risk_note）-> push -> interrupt。**确认人可点开 evidence 回溯 agent 推理，基于证据确认而非盲批**。同时启动 deadline 计时器（card.deadline，见 §6.3） | current_step=GATE_DISPOSITION | cp-10(parent=cp-9) 落 MySQL，挂起；step=DISPOSITION, status=GATE_WAITING, agent_hypothesis 落库 |
+| T+11min~T+18min | （等待人确认） | 库管确认处置 -> POST /confirm {step:DISPOSITION, approved:true} -> issue token（action=`tooling.swap:ASSET-01`）-> Command(resume=token)。**期间 deadline 计时器在走，超时则 _suspend_session 推异常卡** | （resume；取消 deadline 计时器） | 加载 cp-10，resume；step=DISPOSITION, status=CONFIRMED, gate_decision=PASS |
 | T+18min | **写落库**（处置） | write_via_appservice 调钢网上下文应用服务：POST /api/tooling/returns（归还 ST-A）+ POST /api/tooling/issues（领用 ST-B），header 带 X-Confirmation-Token，**confirmation_id 做幂等键**（见 §7.3）。过聚合根不变式 + 发件箱 | gate_disposition=PASS, retry_tooling=true | cp-11(parent=cp-10)；step=DISPOSITION_WRITE, node_type=CODE |
-| T+18min | `gate_disposition` 条件边 → `tooling_check`（重检） | conditional_edges：retry_tooling=true → 回 tooling_check（**代码节点重检，agent 不参与"重检通过没"的判定**） | — | cp-12(parent=cp-11) |
-| T+19min | `tooling_check`（CODE，重检） | 产线已换上 ST-B：expected=ST-B vs actual=ST-B → PASS | tooling_result={status:PASS} | cp-13(parent=cp-12)；step=TOOLING_CHECK, node_type=CODE |
-| T+19min~T+21min | `barrier` → `draft_release` → `gate_release` → 放行写落库 → `done` | 同快路径后半段 | status=DONE | cp-14… |
+| T+18min | `gate_disposition` 条件边 -> `tooling_check`（重检） | conditional_edges：retry_tooling=true -> 回 tooling_check（**代码节点重检，agent 不参与"重检通过没"的判定**） | — | cp-12(parent=cp-11) |
+| T+19min | `tooling_check`（CODE，重检） | 产线已换上 ST-B：expected=ST-B vs actual=ST-B -> PASS | tooling_result={status:PASS} | cp-13(parent=cp-12)；step=TOOLING_CHECK, node_type=CODE |
+| T+19min~T+21min | `barrier` -> `draft_release` -> `gate_release` -> 放行写落库 -> `done` | 同快路径后半段 | status=DONE | cp-14… |
 
 **慢路径要点**：
-- **agent A 只在 mismatch 分支触发**：barrier 的分流是确定性代码（PASS→放行 / FAIL→A / 缺料→挂起），agent 不参与"要不要放行"的判定。
+- **agent A 只在 mismatch 分支触发**：barrier 的分流是确定性代码（PASS->放行 / FAIL->A / 缺料->挂起），agent 不参与"要不要放行"的判定。
 - **subgraph 用 sub-thread_id**（§9.2）：`S-CO-...001_root_cause`，与 supervisor 的 checkpoint 物理隔离，不互相覆盖。
-- **重检回路**：A 草拟处置 → 人确认 → 处置落库 → 回 tooling_check 重检（代码），agent 不参与重检判定——这是实现方案 §5.1 的硬边界。
+- **重检回路**：A 草拟处置 -> 人确认 -> 处置落库 -> 回 tooling_check 重检（代码），agent 不参与重检判定——这是实现方案 §5.1 的硬边界。
 - **取证路径由中间结果驱动**：A 查到"ST-A 借出未还"后自适应去查上工单收线记录，不是固定 JOIN——这是痛点 A 降复杂度的核心（见痛点文档 §A.3）。
 
 ---
@@ -992,21 +992,21 @@ SMT-1 线 L-01，14:30 贴片机 ASSET-01 报警停机（温控阀故障）。�
 
 #### 14.2.2 逐步运行细节
 
-图结构见架构图 §4.1：`draft_repair_order ‖ FaultImpactAgent(B)` 并行 → `gate:REPAIR ‖ gate:ISOLATION` 并行 → 计量复校 gate → 复产首件 gate → done。
+图结构见架构图 §4.1：`draft_repair_order ‖ FaultImpactAgent(B)` 并行 -> `gate:REPAIR ‖ gate:ISOLATION` 并行 -> 计量复校 gate -> 复产首件 gate -> done。
 
 | 时刻 | 节点（性质） | 程序运行细节 | state 变化 | 持久化（checkpoint / l3_step_record） |
 |------|------|------|------|------|
 | T+0 | `start` HTTP | 设备故障事件触发，session 写 MySQL（status=PLANNING），create_task 点火 | session.status=PLANNING | l3_session 行 |
 | T+1s | `plan`（CODE） | 按 scenario=FAULT_RESPONSE 决定步骤序列 | current_step=PLAN | cp-1 |
 | T+2s | `draft_repair_order` ‖ `fault_impact`（并行派发） | conditional_edges 返回两目标并行：<br>左 `draft_repair_order`（CODE）：结构化拼装维修单（设备 ASSET-01、故障现象、报修人李工）<br>右 `fault_impact`（**AGENT B**）：subgraph thread_id=`...001_fault_impact`，LLM + 只读 toolset 自适应取证 | （并行执行） | cp-2(parent=cp-1) |
-| T+2s~T+30s | `fault_impact`（**AGENT B**，子步骤） | B 推理故障模式 × 漂移窗口 × 产品敏感度：<br>① query_equipment_telemetry → 温控阀温度曲线长期偏移，**推理故障模式=软漂移**，估漂移起始窗口=[昨晚 22:00, 14:30]（时序形态判断，规则引擎做不了）<br>② query_batches_in_window → 窗口内 ASSET-01 生产批次=[B-501(夜班), B-502(夜班), B-503(白班)]<br>③ query_process_fmea + query_product_sensitivity → 漂移参数=贴装压力，敏感产品=0201 细间距（B-501、B-502），0603 粗间距（B-503）不受影响<br>④ draft_isolation_card → 隔离集={B-501,B-502}，放行 B-503，含每批次隔离理由 + 证据 trace_id | agent_hypothesis={fault_mode:"软漂移", drift_window:["22:00","14:30"], isolation_set:["B-501","B-502"], release:["B-503"], sensitivity_reason:...}, agent_confidence=high, action_card=隔离卡 | supervisor cp-3；subgraph checkpoint 落 sub-thread；step=FAULT_IMPACT, **node_type=AGENT**, capability=B, tool_call_traces 落库 |
-| T+30s | `gate_repair` ‖ `gate_isolation`（CODE，并行） | 两 gate 并行 interrupt：gate_repair 推维修单卡给李工；gate_isolation 推隔离卡给质量工程师王工（含 agent_hypothesis + evidence + confidence）→ interrupt。各启 deadline 计时器 | current_step=GATE_REPAIR / GATE_ISOLATION | cp-4(parent=cp-3) 落 MySQL，两 gate 各自挂起；step=REPAIR/ISOLATION, status=GATE_WAITING |
-| T+30s~T+20min | （并行等待人确认） | 李工确认维修单（边修边确认）；王工点开隔离卡 evidence 验证 B 的推理（漂移窗口 + 敏感度理由），确认隔离集。各 POST /confirm → 各 issue token（维修单 action=`repair_order.issue:ASSET-01`；隔离 action=`isolation.issue:WS-A`）→ 各 Command(resume=token) | （两 interrupt 各自 resume） | 加载 cp-4，分别 resume；step=REPAIR/ISOLATION, status=CONFIRMED, gate_decision=PASS |
-| T+20min | **写落库**（隔离） | write_via_appservice 调返工上下文 ACL（ReworkWriteAclClient，见 §7.2）：校验 token → POST /api/isolation-orders {batches:[B-501,B-502], reason, confirmation_id}，header X-Confirmation-Token。返工上下文 IsolationAggregate.issue 过不变式 + 事务发件箱落 BatchIsolated。**confirmation_id 做幂等键** | gate_isolation=PASS | cp-5(parent=cp-4)；step=ISOLATION_WRITE, node_type=CODE |
+| T+2s~T+30s | `fault_impact`（**AGENT B**，子步骤） | B 推理故障模式 × 漂移窗口 × 产品敏感度：<br>① query_equipment_telemetry -> 温控阀温度曲线长期偏移，**推理故障模式=软漂移**，估漂移起始窗口=[昨晚 22:00, 14:30]（时序形态判断，规则引擎做不了）<br>② query_batches_in_window -> 窗口内 ASSET-01 生产批次=[B-501(夜班), B-502(夜班), B-503(白班)]<br>③ query_process_fmea + query_product_sensitivity -> 漂移参数=贴装压力，敏感产品=0201 细间距（B-501、B-502），0603 粗间距（B-503）不受影响<br>④ draft_isolation_card -> 隔离集={B-501,B-502}，放行 B-503，含每批次隔离理由 + 证据 trace_id | agent_hypothesis={fault_mode:"软漂移", drift_window:["22:00","14:30"], isolation_set:["B-501","B-502"], release:["B-503"], sensitivity_reason:...}, agent_confidence=high, action_card=隔离卡 | supervisor cp-3；subgraph checkpoint 落 sub-thread；step=FAULT_IMPACT, **node_type=AGENT**, capability=B, tool_call_traces 落库 |
+| T+30s | `gate_repair` ‖ `gate_isolation`（CODE，并行） | 两 gate 并行 interrupt：gate_repair 推维修单卡给李工；gate_isolation 推隔离卡给质量工程师王工（含 agent_hypothesis + evidence + confidence）-> interrupt。各启 deadline 计时器 | current_step=GATE_REPAIR / GATE_ISOLATION | cp-4(parent=cp-3) 落 MySQL，两 gate 各自挂起；step=REPAIR/ISOLATION, status=GATE_WAITING |
+| T+30s~T+20min | （并行等待人确认） | 李工确认维修单（边修边确认）；王工点开隔离卡 evidence 验证 B 的推理（漂移窗口 + 敏感度理由），确认隔离集。各 POST /confirm -> 各 issue token（维修单 action=`repair_order.issue:ASSET-01`；隔离 action=`isolation.issue:WS-A`）-> 各 Command(resume=token) | （两 interrupt 各自 resume） | 加载 cp-4，分别 resume；step=REPAIR/ISOLATION, status=CONFIRMED, gate_decision=PASS |
+| T+20min | **写落库**（隔离） | write_via_appservice 调返工上下文 ACL（ReworkWriteAclClient，见 §7.2）：校验 token -> POST /api/isolation-orders {batches:[B-501,B-502], reason, confirmation_id}，header X-Confirmation-Token。返工上下文 IsolationAggregate.issue 过不变式 + 事务发件箱落 BatchIsolated。**confirmation_id 做幂等键** | gate_isolation=PASS | cp-5(parent=cp-4)；step=ISOLATION_WRITE, node_type=CODE |
 | T+20min | **写落库**（维修单） | 调设备/维修上下文应用服务落维修单 | gate_repair=PASS | （同 checkpoint 链）；step=REPAIR_WRITE, node_type=CODE |
 | T+20min~T+45min | （维修进行 + 计量复校） | 李工完成维修，设备计量复校，复校结果回填 | — | — |
-| T+45min | `gate_recalibration`（CODE） | 计量复校 gate：推复校确认卡 → interrupt → 人确认（**确定性 gate，不嵌 agent，agent 不碰复校红线**）。issue token（action=`calibration.confirm:ASSET-01`，确认动作） | gate_recalibration=PASS | cp-6；step=RECALIBRATION, status=CONFIRMED |
-| T+46min | `gate_restart_first_article`（CODE） | barrier 等复校+点检 PASS → 推复产首件放行卡 → interrupt → 人确认 → 过点上下文放行复产（过点主事务 + 规则引擎） | gate_restart_first_article=PASS | cp-7；step=RESTART_FA, status=CONFIRMED |
+| T+45min | `gate_recalibration`（CODE） | 计量复校 gate：推复校确认卡 -> interrupt -> 人确认（**确定性 gate，不嵌 agent，agent 不碰复校红线**）。issue token（action=`calibration.confirm:ASSET-01`，确认动作） | gate_recalibration=PASS | cp-6；step=RECALIBRATION, status=CONFIRMED |
+| T+46min | `gate_restart_first_article`（CODE） | barrier 等复校+点检 PASS -> 推复产首件放行卡 -> interrupt -> 人确认 -> 过点上下文放行复产（过点主事务 + 规则引擎） | gate_restart_first_article=PASS | cp-7；step=RESTART_FA, status=CONFIRMED |
 | T+47min | `done`（CODE） | session.status=DONE | status=DONE | cp-8；step=DONE |
 
 **场景②要点**：
@@ -1027,7 +1027,7 @@ SMT-1 线 L-01，14:30 贴片机 ASSET-01 报警停机（温控阀故障）。�
 
 #### 14.3.2 逐步运行细节
 
-图结构见架构图 §4.2：`TraceabilityAgent(C)` → `供应商批次追溯 ‖ 隔离范围判定` 并行 → `gate:ISOLATION` → `DraftAgents.draft_8d(D)` → `gate:8D_PUBLISH` → done。
+图结构见架构图 §4.2：`TraceabilityAgent(C)` -> `供应商批次追溯 ‖ 隔离范围判定` 并行 -> `gate:ISOLATION` -> `DraftAgents.draft_8d(D)` -> `gate:8D_PUBLISH` -> done。
 
 | 时刻 | 节点（性质） | 程序运行细节 | state 变化 | 持久化（checkpoint / l3_step_record） |
 |------|------|------|------|------|
@@ -1035,18 +1035,18 @@ SMT-1 线 L-01，14:30 贴片机 ASSET-01 报警停机（温控阀故障）。�
 | T+1s | `plan`（CODE） | 按 scenario=COMPLAINT_8D 决定步骤序列 | current_step=PLAN | cp-1 |
 | T+2s | `traceability`（**AGENT C**，嵌入 L1） | _run_agent("traceability")：subgraph thread_id=`...001_traceability`，C 把 L1 诊断图作为子图调用：<br>① **版本钉死（ACL 代码做，非 agent）**：从过点记录强取批次 P 用的 route_version=v3（不是当前 v5），后续工艺查询强制 v3——agent 只消费钉死后的版本<br>② 汇聚跨上下文证据：过点 TestResult、设备遥测、锡膏批次 B-77、同批次不良率<br>③ **5M1E 假设排序（LLM 加权推理，规则引擎做不了）**：料因（B-77 在别处也有不良）置信度高、机因（设备参数漂移幅度小）置信度中<br>④ 输出排序假设 + 证据链 + 置信度 | agent_hypothesis={hypotheses:[{cause:"料-锡膏B-77",confidence:high},{cause:"机-设备漂移",confidence:medium}], evidence_chain:[...]}, agent_confidence=high | supervisor cp-2；subgraph checkpoint 落 sub-thread；step=TRACEABILITY, **node_type=AGENT**, capability=C, tool_call_traces 落库 |
 | T+20s | `supplier_trace` ‖ `isolation_scope`（并行） | 左 `supplier_trace`（CODE，版本钉死后查）：查 B-77 供应商批次、在库品。右 `isolation_scope`（代码或复用 B 逻辑）：判同批次在库品隔离范围 | （并行） | cp-3(parent=cp-2)；step=SUPPLIER_TRACE/ISOLATION_SCOPE, node_type=CODE |
-| T+25s | `gate_isolation`（CODE） | _gate：build_action_card（隔离集 + 每批次理由 + agent_hypothesis + evidence）→ push 给王工 → **interrupt(value=card)**。state 落 MySQL cp-4，ainvoke 挂起等待 | current_step=GATE_ISOLATION | **cp-4(parent=cp-3) 落 MySQL**，pod-1 的 _drive 协程挂起；step=ISOLATION, status=GATE_WAITING |
+| T+25s | `gate_isolation`（CODE） | _gate：build_action_card（隔离集 + 每批次理由 + agent_hypothesis + evidence）-> push 给王工 -> **interrupt(value=card)**。state 落 MySQL cp-4，ainvoke 挂起等待 | current_step=GATE_ISOLATION | **cp-4(parent=cp-3) 落 MySQL**，pod-1 的 _drive 协程挂起；step=ISOLATION, status=GATE_WAITING |
 | T+25s~T+10min | ⚠️ **pod-1 被 OOM Kill**（跨进程恢复演示） | 14:35 pod-1 因内存压力被 K8s OOM Kill，_drive 协程销毁。**但 state 已在 MySQL cp-4，不在进程内存**——session 在 DB 仍 RUNNING，gate 步骤仍 GATE_WAITING。期间王工在另一终端确认隔离 | （pod-1 进程已死） | MySQL cp-4 仍在 |
-| T+10min | 王工确认 → POST /confirm（**打到 pod-2**） | 王工点开隔离卡 evidence（trace_id 回溯 C 的 5M1E 推理），确认隔离 → POST /confirm {step:ISOLATION, approved:true} → **请求被负载均衡到 pod-2** → ConfirmationStore.issue token（action=`isolation.issue:WS-A`）→ pod-2 调 `graph.ainvoke(Command(resume=token), thread_id=S-CP-...001)` | （pod-2 接管） | **SqlSaver 从 MySQL 加载 cp-4**，反序列化 state（GATE_ISOLATION 处），interrupt 返回 token，继续执行；step=ISOLATION, status=CONFIRMED, gate_decision=PASS, gate_decided_by=u_wang |
+| T+10min | 王工确认 -> POST /confirm（**打到 pod-2**） | 王工点开隔离卡 evidence（trace_id 回溯 C 的 5M1E 推理），确认隔离 -> POST /confirm {step:ISOLATION, approved:true} -> **请求被负载均衡到 pod-2** -> ConfirmationStore.issue token（action=`isolation.issue:WS-A`）-> pod-2 调 `graph.ainvoke(Command(resume=token), thread_id=S-CP-...001)` | （pod-2 接管） | **SqlSaver 从 MySQL 加载 cp-4**，反序列化 state（GATE_ISOLATION 处），interrupt 返回 token，继续执行；step=ISOLATION, status=CONFIRMED, gate_decision=PASS, gate_decided_by=u_wang |
 | T+10min | **写落库**（隔离） | write_via_appservice 调返工上下文 ACL：POST /api/isolation-orders，header X-Confirmation-Token，confirmation_id 幂等。过聚合根不变式 + 发件箱 | gate_isolation=PASS | **cp-5(parent=cp-4)**（pod-2 写入，链续上）；step=ISOLATION_WRITE, node_type=CODE |
-| T+11min | `draft_8d`（**AGENT D**） | _run_agent("draft_8d")：subgraph thread_id=`...001_draft_8d`，D 拉追溯链（C 已汇聚）+ 历史 8D 案例库（query_history_8d）→ **草拟 8D 报告**（根因/纠正/预防/案例对照，开放生成，代码写不出） | agent_hypothesis={draft_8d:{...}}, action_card=8D 发布卡 | supervisor cp-6(parent=cp-5)；subgraph checkpoint 落 sub-thread；step=DRAFT_8D, **node_type=AGENT**, capability=D |
-| T+12min | `gate_8d_publish`（CODE） | _gate：推 8D 发布卡给王工 → interrupt | current_step=GATE_8D_PUBLISH | cp-7(parent=cp-6) 落 MySQL，挂起；step=8D_PUBLISH, status=GATE_WAITING |
-| T+12min~T+30min | （等待人确认） | 王工审改 8D 草稿，确认发布 → POST /confirm → issue token（action=`report.publish_8d:P-2026-0605`）→ Command(resume=token) | （resume） | 加载 cp-7，resume；step=8D_PUBLISH, status=CONFIRMED, gate_decision=PASS |
+| T+11min | `draft_8d`（**AGENT D**） | _run_agent("draft_8d")：subgraph thread_id=`...001_draft_8d`，D 拉追溯链（C 已汇聚）+ 历史 8D 案例库（query_history_8d）-> **草拟 8D 报告**（根因/纠正/预防/案例对照，开放生成，代码写不出） | agent_hypothesis={draft_8d:{...}}, action_card=8D 发布卡 | supervisor cp-6(parent=cp-5)；subgraph checkpoint 落 sub-thread；step=DRAFT_8D, **node_type=AGENT**, capability=D |
+| T+12min | `gate_8d_publish`（CODE） | _gate：推 8D 发布卡给王工 -> interrupt | current_step=GATE_8D_PUBLISH | cp-7(parent=cp-6) 落 MySQL，挂起；step=8D_PUBLISH, status=GATE_WAITING |
+| T+12min~T+30min | （等待人确认） | 王工审改 8D 草稿，确认发布 -> POST /confirm -> issue token（action=`report.publish_8d:P-2026-0605`）-> Command(resume=token) | （resume） | 加载 cp-7，resume；step=8D_PUBLISH, status=CONFIRMED, gate_decision=PASS |
 | T+30min | **写落库**（8D 发布） | write_via_appservice 调文档/质量上下文应用服务发布 8D，过不变式 + 发件箱 | gate_8d_publish=PASS | cp-8(parent=cp-7)；step=8D_PUBLISH_WRITE, node_type=CODE |
 | T+30min | `done`（CODE） | session.status=DONE（done 节点标 DONE，不依赖已死的 pod-1 _drive） | status=DONE | cp-9；step=DONE |
 
 **场景③要点**：
-- **跨进程恢复真实演练**（§3.4）：pod-1 OOM Kill 后，state 不丢（在 MySQL cp-4 不在进程内存），pod-2 用同一 thread_id 调 ainvoke(Command(resume=...)) 从 cp-4 续跑，checkpoint 链 cp-4→cp-5 跨 pod 续上——这是 SqlSaver + thread_id=session_id 映射（§2.3）的价值。done 节点是代码节点，自行标 DONE，不依赖原 _drive 协程。
+- **跨进程恢复真实演练**（§3.4）：pod-1 OOM Kill 后，state 不丢（在 MySQL cp-4 不在进程内存），pod-2 用同一 thread_id 调 ainvoke(Command(resume=...)) 从 cp-4 续跑，checkpoint 链 cp-4->cp-5 跨 pod 续上——这是 SqlSaver + thread_id=session_id 映射（§2.3）的价值。done 节点是代码节点，自行标 DONE，不依赖原 _drive 协程。
 - **版本钉死是 ACL 代码做**（非 agent）：C 只消费钉死后的 v3，不会用当前 v5 套历史批次 P——这层是代码红线，agent 不碰版本校验（痛点 C.4）。
 - **5M1E 假设排序是 LLM 加权推理**：同样证据在不同产品族/历史背景下排序不同，规则引擎做不了（痛点 C.2）。
 - **8D 草拟是 D 的开放生成**：代码写不出自然语言 8D，agent 草拟 + 人审改兜底幻觉（痛点 D）。
@@ -1059,22 +1059,22 @@ SMT-1 线 L-01，14:30 贴片机 ASSET-01 报警停机（温控阀故障）。�
 
 工艺路线 RR-B 从 v4 升 v5，回流焊温区 3 从 240℃ 调到 245℃（为改善 0201 元件立碑）。工艺变更发布后，订阅 `ProcessRouteActivated` 事件触发 L3：要草拟新 SOP + 核对操作工资质 + 新工艺首件验证（痛点 D，见痛点文档 §D.1）。
 
-触发：Kafka 监听器收 `ProcessRouteActivated{route_id:RR-B, version:v5}` → 调 `POST /agent/l3/process_change/start`。session id=`S-PC-20260712-001`，scenario=PROCESS_CHANGE。
+触发：Kafka 监听器收 `ProcessRouteActivated{route_id:RR-B, version:v5}` -> 调 `POST /agent/l3/process_change/start`。session id=`S-PC-20260712-001`，scenario=PROCESS_CHANGE。
 
 #### 14.4.2 逐步运行细节
 
-图结构见架构图 §4.3：`draft_sop(D) ‖ 资质核对(CODE)` 并行 → `barrier` → `gate:SOP_PUBLISH` → 新工艺首件验证 gate → done。
+图结构见架构图 §4.3：`draft_sop(D) ‖ 资质核对(CODE)` 并行 -> `barrier` -> `gate:SOP_PUBLISH` -> 新工艺首件验证 gate -> done。
 
 | 时刻 | 节点（性质） | 程序运行细节 | state 变化 | 持久化（checkpoint / l3_step_record） |
 |------|------|------|------|------|
-| T+0 | 事件触发 `start` | Kafka 监听器收 ProcessRouteActivated → POST /agent/l3/process_change/start。session 写 MySQL，create_task 点火 | session.status=PLANNING | l3_session 行 |
+| T+0 | 事件触发 `start` | Kafka 监听器收 ProcessRouteActivated -> POST /agent/l3/process_change/start。session 写 MySQL，create_task 点火 | session.status=PLANNING | l3_session 行 |
 | T+1s | `plan`（CODE） | 按 scenario=PROCESS_CHANGE 决定步骤序列 | current_step=PLAN | cp-1 |
-| T+2s | `draft_sop` ‖ `qualification_check`（并行派发） | conditional_edges 返回两目标并行：<br>左 `draft_sop`（**AGENT D**）：subgraph thread_id=`...001_draft_sop`，D 查 query_route_diff（v4→v5：温区3 +5℃）+ query_prior_sop（v4 旧 SOP）+ query_fmea（0201 立碑风险）→ **草拟新 SOP**（含差异点提示："温区3 245℃，关注 0201 立碑，首件重点检"）<br>右 `qualification_check`（**CODE，确定性，不嵌 agent**）：query 操作工资质 ∈ 工艺要求资质集？张工=回流焊资质√，李工=无资质✗（需培训） | 左 agent_hypothesis={draft_sop:{...}}, action_card=SOP 发布卡；右 qualification_result={qualified:[张工], unqualified:[李工]} | supervisor cp-2；D 的 subgraph checkpoint 落 sub-thread；step=DRAFT_SOP, **node_type=AGENT**, capability=D；step=QUALIFICATION, node_type=CODE |
-| T+15s | `barrier`（CODE） | 等双分支汇合：SOP 草拟完成 ∧ 资质核对完成 → barrier_route=draft_release（资质不全则分流挂起推培训） | barrier_route=draft_release | cp-3(parent=cp-2)；step=BARRIER, node_type=CODE |
-| T+15s | `gate_sop_publish`（CODE） | _gate：推 SOP 发布卡给工艺工程师（含 D 草拟的 SOP + 差异点提示 + evidence）→ interrupt | current_step=GATE_SOP_PUBLISH | cp-4(parent=cp-3) 落 MySQL，挂起；step=SOP_PUBLISH, status=GATE_WAITING |
-| T+15s~T+25min | （等待人确认） | 工艺工程师审改 SOP 草稿，确认发布 → POST /confirm → issue token（action=`sop.publish:RR-B:v5`）→ Command(resume=token) | （resume） | 加载 cp-4，resume；step=SOP_PUBLISH, status=CONFIRMED, gate_decision=PASS |
+| T+2s | `draft_sop` ‖ `qualification_check`（并行派发） | conditional_edges 返回两目标并行：<br>左 `draft_sop`（**AGENT D**）：subgraph thread_id=`...001_draft_sop`，D 查 query_route_diff（v4->v5：温区3 +5℃）+ query_prior_sop（v4 旧 SOP）+ query_fmea（0201 立碑风险）-> **草拟新 SOP**（含差异点提示："温区3 245℃，关注 0201 立碑，首件重点检"）<br>右 `qualification_check`（**CODE，确定性，不嵌 agent**）：query 操作工资质 ∈ 工艺要求资质集？张工=回流焊资质√，李工=无资质✗（需培训） | 左 agent_hypothesis={draft_sop:{...}}, action_card=SOP 发布卡；右 qualification_result={qualified:[张工], unqualified:[李工]} | supervisor cp-2；D 的 subgraph checkpoint 落 sub-thread；step=DRAFT_SOP, **node_type=AGENT**, capability=D；step=QUALIFICATION, node_type=CODE |
+| T+15s | `barrier`（CODE） | 等双分支汇合：SOP 草拟完成 ∧ 资质核对完成 -> barrier_route=draft_release（资质不全则分流挂起推培训） | barrier_route=draft_release | cp-3(parent=cp-2)；step=BARRIER, node_type=CODE |
+| T+15s | `gate_sop_publish`（CODE） | _gate：推 SOP 发布卡给工艺工程师（含 D 草拟的 SOP + 差异点提示 + evidence）-> interrupt | current_step=GATE_SOP_PUBLISH | cp-4(parent=cp-3) 落 MySQL，挂起；step=SOP_PUBLISH, status=GATE_WAITING |
+| T+15s~T+25min | （等待人确认） | 工艺工程师审改 SOP 草稿，确认发布 -> POST /confirm -> issue token（action=`sop.publish:RR-B:v5`）-> Command(resume=token) | （resume） | 加载 cp-4，resume；step=SOP_PUBLISH, status=CONFIRMED, gate_decision=PASS |
 | T+25min | **写落库**（SOP 发布） | write_via_appservice 调工艺/SOP 上下文应用服务发布 SOP v5，过不变式 + 发件箱落 SOPPublished | gate_sop_publish=PASS | cp-5(parent=cp-4)；step=SOP_PUBLISH_WRITE, node_type=CODE |
-| T+25min | `gate_new_route_first_article`（CODE） | 新工艺首件验证 gate：推首件放行卡 → interrupt → 人确认 → 过点上下文放行首件（过点主事务 + 规则引擎）。issue token（action=`pass_execution.release:RR-B:v5`） | gate_new_route_first_article=PASS | cp-6(parent=cp-5)；step=NEW_ROUTE_FA, status=CONFIRMED |
+| T+25min | `gate_new_route_first_article`（CODE） | 新工艺首件验证 gate：推首件放行卡 -> interrupt -> 人确认 -> 过点上下文放行首件（过点主事务 + 规则引擎）。issue token（action=`pass_execution.release:RR-B:v5`） | gate_new_route_first_article=PASS | cp-6(parent=cp-5)；step=NEW_ROUTE_FA, status=CONFIRMED |
 | T+26min | `done`（CODE） | session.status=DONE | status=DONE | cp-7；step=DONE |
 
 **场景④要点**：

@@ -59,7 +59,7 @@ async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
 ```
 
 - HTTP 请求 `/agent/l3/{scenario}/start` 只做两件事：创建 session 记录 + 启动异步任务，**立即返回** `session_id`。
-- 后续流程（plan → gate → agent → gate → done）在后台异步执行，gate 处 `interrupt` 暂停等人，不占 HTTP 连接。
+- 后续流程（plan -> gate -> agent -> gate -> done）在后台异步执行，gate 处 `interrupt` 暂停等人，不占 HTTP 连接。
 - 调用方拿到 `session_id` 后轮询 session 状态或通过 WebSocket 收动作卡推送。
 
 **为什么是亮点**：长程任务最忌讳"一个 HTTP 请求从头等到尾"——MES 换线可能要 30 分钟，HTTP 连接早就超时了。异步驱动 + interrupt 让 HTTP 只做"点火"，真正的长跑在后台，gate 等人时进程不占连接、不占 CPU。这是**长程任务设计的第一个分水岭**：不懂的人会让 HTTP 一直 block 到流程结束；懂的人知道"启动后立即返回，状态靠查询/推送"。
@@ -111,7 +111,7 @@ l3_step_record
 
 - `node_type` 区分代码节点与 agent 节点，可统计"本次换线调了几次 LLM"。
 - `gate_decision` + `gate_decided_by` + `gate_decided_at` 让每次人工确认可审计——谁、何时、基于哪张卡、agent 假设是什么。
-- `status` 枚举覆盖完整生命周期：PLANNING → RUNNING → SUSPENDED/DONE/FAILED。
+- `status` 枚举覆盖完整生命周期：PLANNING -> RUNNING -> SUSPENDED/DONE/FAILED。
 
 **防守话术**："`l3_step_record` 的 `node_type` 字段把代码节点和 agent 节点区分落库——可观测时能量化'本次换线调了几次 LLM'。换线全程 PASS 时 agent 调用为 0，这个指标本身就是健康度信号。"
 
@@ -125,12 +125,12 @@ l3_step_record
 
 ```
 Agent 草拟 intent + draft（动作卡）
-  → gate interrupt 暂停，推卡给人
-  → 人查看 evidence + agent_hypothesis + confidence
-  → 人确认/拒绝
-  → /confirm 端点发 confirmation token（绑定 action:target + 过期）
-  → resume 后写落库走各上下文应用服务 REST
-  → 应用服务过聚合根不变式 + 事务发件箱
+  -> gate interrupt 暂停，推卡给人
+  -> 人查看 evidence + agent_hypothesis + confidence
+  -> 人确认/拒绝
+  -> /confirm 端点发 confirmation token（绑定 action:target + 过期）
+  -> resume 后写落库走各上下文应用服务 REST
+  -> 应用服务过聚合根不变式 + 事务发件箱
 ```
 
 **为什么是亮点**：写动作的一致性不是靠"Agent 记住要写什么"，而是靠"**草稿 + 人确认 + token + 走正常应用服务**"四段式。这保证了：
@@ -292,7 +292,7 @@ class ActionCard(BaseModel):
 
 **Q：你这套 Agent 系统里，哪个模块是长程任务？为什么它是长程？**
 
-A：L3 编排型 Agent。它处理的是跨多个限界上下文、含人工确认的完整业务流程——一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等处置确认，全程可能 30 分钟到 1 小时。L0/L1/L2 都是短程——L0 单次问答，L1 多步只读推理秒级完成，L2 草拟后即结束。只有 L3 涉及"启动 → 等人确认 → 继续 → 再等人确认 → 完成"的异步长链。
+A：L3 编排型 Agent。它处理的是跨多个限界上下文、含人工确认的完整业务流程——一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等处置确认，全程可能 30 分钟到 1 小时。L0/L1/L2 都是短程——L0 单次问答，L1 多步只读推理秒级完成，L2 草拟后即结束。只有 L3 涉及"启动 -> 等人确认 -> 继续 -> 再等人确认 -> 完成"的异步长链。
 
 **Q：长程任务的状态怎么管理？HTTP 请求一直等到结束吗？**
 
@@ -364,7 +364,7 @@ A：状态全在 MySQL（`l3_session` + `l3_step_record` + SqlSaver checkpointer
 
 **Q：如果 MySQL 挂了（SqlSaver 写不进去），长程任务还能跑吗？**
 
-A：不能——这是有意的设计取舍。SqlSaver 写失败意味着 state 无法持久化，此时继续跑风险太高（gate 等人期间如果进程重启，状态全丢）。所以降级策略是：SqlSaver 写失败 → session 标 FAILED → 推异常卡 → 流程退回人工编排。
+A：不能——这是有意的设计取舍。SqlSaver 写失败意味着 state 无法持久化，此时继续跑风险太高（gate 等人期间如果进程重启，状态全丢）。所以降级策略是：SqlSaver 写失败 -> session 标 FAILED -> 推异常卡 -> 流程退回人工编排。
 
 这反过来验证了"状态外置"的必要性——如果 state 在进程内存里，MySQL 挂了进程还能跑，但进程重启就全丢。把 state 绑在 MySQL 上，MySQL 挂了你明确知道"现在不能跑长程任务"，而不是"假装能跑但随时可能丢状态"。
 
@@ -412,8 +412,8 @@ A：骨架够用，需要调整两个参数。`SqlSaver` 的状态持久化本�
 
 A：传统工作流引擎做的是"确定性步骤编排 + 人工任务 + 补偿"——换线 5 步的顺序、gate 等人、超时挂起，这些工作流引擎都能做。但 L3 多了一个工作流引擎做不了的东西：**在非确定决策点嵌入 agent 能力**。
 
-- 工作流引擎能做：plan → 查首件 → gate → 查工艺 → gate → 查钢网/齐套 → barrier → 放行 → gate。
-- 工作流引擎做不了：钢网 mismatch 时，自适应取证（查钢网借还记录 → 查到 ST-A 借出未还 → 自适应查上工单收线记录），根因推理（产线拿错 / 未还库 / 台账改名 / 工艺录错），草拟处置卡（路由给谁 + 建议动作）。
+- 工作流引擎能做：plan -> 查首件 -> gate -> 查工艺 -> gate -> 查钢网/齐套 -> barrier -> 放行 -> gate。
+- 工作流引擎做不了：钢网 mismatch 时，自适应取证（查钢网借还记录 -> 查到 ST-A 借出未还 -> 自适应查上工单收线记录），根因推理（产线拿错 / 未还库 / 台账改名 / 工艺录错），草拟处置卡（路由给谁 + 建议动作）。
 
 所以 L3 不是"用 LangGraph 替代工作流引擎"，而是"工作流引擎能做的用代码节点做（零 LLM 调用），工作流引擎做不了的用 agent 能力做"。如果某场景完全确定、没有非确定决策点，那就不该上 L3，直接上工作流引擎就够了——这是"懂什么时候不用 AI"的体现。
 

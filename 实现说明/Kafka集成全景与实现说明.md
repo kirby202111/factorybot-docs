@@ -120,19 +120,19 @@
 
 ## 3. 九大 Kafka 使用模式（场景分析）
 
-> 以下按"Kafka 在该场景中扮演的角色"归纳为九类使用模式。每类给出：典型业务节点 → Kafka 核心使用方式与作用 → 架构闪光点 → 实施重难点与技术挑战。具体 topic / 事件见各模式引用。
+> 以下按"Kafka 在该场景中扮演的角色"归纳为九类使用模式。每类给出：典型业务节点 -> Kafka 核心使用方式与作用 -> 架构闪光点 -> 实施重难点与技术挑战。具体 topic / 事件见各模式引用。
 
 ### 模式 A：配置型主数据的"发布—缓存刷新"投影
 
 **典型业务节点**
 
-- 工艺版本生效 `process.route.lifecycle`（`ProcessRouteActivated`/`Deprecated`）→ 在制品执行刷新 `ProcessRouteCache`
-- 质量门禁规则生效 `quality.gate.lifecycle`（`QualityGateRuleActivated`/`Deprecated`）→ 在制品执行刷新 `QualityGateCache`
-- BOM / 替代料生效 `material.bom.lifecycle` / `material.substitute.lifecycle` → 在制品执行刷新物料防错缓存
-- 设备可用性变更 `eam.asset.availability` → 在制品执行刷新 `EquipmentAvailabilityCache`
-- 齐套状态 `wo.kit.status` → 在制品执行刷新 `KitStatusCache`
-- 首件门禁 `fai.article.released` / `fai.article.blocked` → 在制品执行首件门禁投影
-- 资产生命周期 `eam.asset.lifecycle` → 点检保养 / 计量检定 / 维修激活或停用对应规则
+- 工艺版本生效 `process.route.lifecycle`（`ProcessRouteActivated`/`Deprecated`）-> 在制品执行刷新 `ProcessRouteCache`
+- 质量门禁规则生效 `quality.gate.lifecycle`（`QualityGateRuleActivated`/`Deprecated`）-> 在制品执行刷新 `QualityGateCache`
+- BOM / 替代料生效 `material.bom.lifecycle` / `material.substitute.lifecycle` -> 在制品执行刷新物料防错缓存
+- 设备可用性变更 `eam.asset.availability` -> 在制品执行刷新 `EquipmentAvailabilityCache`
+- 齐套状态 `wo.kit.status` -> 在制品执行刷新 `KitStatusCache`
+- 首件门禁 `fai.article.released` / `fai.article.blocked` -> 在制品执行首件门禁投影
+- 资产生命周期 `eam.asset.lifecycle` -> 点检保养 / 计量检定 / 维修激活或停用对应规则
 
 **Kafka 核心使用方式与作用**
 
@@ -142,7 +142,7 @@
 
 1. **CQRS 读侧缓存投影 + 降级兜底**：缓存是读优化投影不是事实源，丢失可从权威源重建（[高频数据 §7.1](高频数据/MES高频数据方案.md) 同构思想）。`EquipmentOnline ≠ AssetCommissioned`——通信视角与资产视角独立维护，缓存语义不混淆。
 2. **版本快照不可变**：过点记录锁定 `routeVersion`，工艺变更事件只影响变更后首次过点的在制品，历史追溯免疫后续变更（[领域总览 §5.1](../领域模型/领域总览.md)）。图投影侧用 `[:SNAPSHOT_OF_ROUTE]` 边把版本一致性变成结构属性。
-3. **配置生效走 Outbox 同事务**：`ProcessRouteActivated` 与 RouteVersion 状态变更（SUBMITTED→ACTIVATED）+ 旧版本 Deprecate 在同一本地事务，保证"新版本生效 + 旧版本失效 + 通知下游"原子（INV-CX-02）。
+3. **配置生效走 Outbox 同事务**：`ProcessRouteActivated` 与 RouteVersion 状态变更（SUBMITTED->ACTIVATED）+ 旧版本 Deprecate 在同一本地事务，保证"新版本生效 + 旧版本失效 + 通知下游"原子（INV-CX-02）。
 4. **`superseded_by` 区分取代与整体退役**：`QualityGateDeprecated(superseded_by=null)` 才通知工艺管理标记 DRAFT stale 并通知过点移除缓存；规则修订（`rule_id` 不变）不广播，避免噪声。
 
 **实施重难点与技术挑战**
@@ -158,12 +158,12 @@
 
 **典型业务节点**
 
-- **工单下达链**：`wo.order.released` → 在制品执行（缓存工单状态允许过点）+ 首件处理（触发首件判定）+ 排产（待排工单入积压生成 PENDING 建议）
-- **过点—进度—完工链**：`mes.checkpoint.lifecycle`（首次过点 `CheckpointReleased`）→ 工单管理（RELEASED→IN_PROGRESS 自动转态）；`mes.workorder.progress`（`WorkOrderProgressAccrued`）→ 工单管理（完工判定与自动结案）
-- **排产—齐套链**：`schedule.confirmed` → 物料（齐套预占）+ 工单（回写 MES 排产快照）；`material.kit.reservation-failed` → 排产（缺料重排）
-- **返修/返工再入链**：`mes.unit.routed-to-rework` → 返修（创建返修任务）；`rework.task.completed` → 在制品（再入点校验 + RoutingProgress 推进）；`mes.reentry.rejected` → 返修/返工（再入点重判）
-- **质量判定链**：`mes.testresult.structured` → 质量（异步业务判定 `QualityVerdictIssued`）；`quality.anomaly.batch`（`BatchQualityAnomalyDetected`，BATCH_SYSTEMIC）→ 返工（生成 `BatchReworkOrder`）
-- **首件闭环链**：`wo.order.released` → 首件处理（触发）；`fai.article.released/blocked` → 在制品（解除/强制首件门禁）；`fai.flow.completed` → 质量（首件检验结果回写）
+- **工单下达链**：`wo.order.released` -> 在制品执行（缓存工单状态允许过点）+ 首件处理（触发首件判定）+ 排产（待排工单入积压生成 PENDING 建议）
+- **过点—进度—完工链**：`mes.checkpoint.lifecycle`（首次过点 `CheckpointReleased`）-> 工单管理（RELEASED->IN_PROGRESS 自动转态）；`mes.workorder.progress`（`WorkOrderProgressAccrued`）-> 工单管理（完工判定与自动结案）
+- **排产—齐套链**：`schedule.confirmed` -> 物料（齐套预占）+ 工单（回写 MES 排产快照）；`material.kit.reservation-failed` -> 排产（缺料重排）
+- **返修/返工再入链**：`mes.unit.routed-to-rework` -> 返修（创建返修任务）；`rework.task.completed` -> 在制品（再入点校验 + RoutingProgress 推进）；`mes.reentry.rejected` -> 返修/返工（再入点重判）
+- **质量判定链**：`mes.testresult.structured` -> 质量（异步业务判定 `QualityVerdictIssued`）；`quality.anomaly.batch`（`BatchQualityAnomalyDetected`，BATCH_SYSTEMIC）-> 返工（生成 `BatchReworkOrder`）
+- **首件闭环链**：`wo.order.released` -> 首件处理（触发）；`fai.article.released/blocked` -> 在制品（解除/强制首件门禁）；`fai.flow.completed` -> 质量（首件检验结果回写）
 
 **Kafka 核心使用方式与作用**
 
@@ -171,7 +171,7 @@
 
 **架构闪光点**
 
-1. **再入点重判防死循环**：返修/返工再入点被在制品拒绝（`mes.reentry.rejected`）后，返修/返工上下文重新判定再入点，用 `reeval_count` 阈值（如 3 次）封顶，耗尽后走默认回退或报废建议，避免"拒绝→重判→再拒绝"无限循环。
+1. **再入点重判防死循环**：返修/返工再入点被在制品拒绝（`mes.reentry.rejected`）后，返修/返工上下文重新判定再入点，用 `reeval_count` 阈值（如 3 次）封顶，耗尽后走默认回退或报废建议，避免"拒绝->重判->再拒绝"无限循环。
 2. **前缀物理隔离防串台**：`wo.*`（正常工单）/ `brework.*`（批量返工）/ `rework.*`（单件返修）/ `repair.*`（设备维修）语义相近，靠 topic 前缀物理隔离，消费方不会把返工事件错当返修处理。
 3. **进度事件按状态变化发布**：`WorkOrderProgressAccrued` 仅在完工状态变化时发布，不是每次普通过点都发——避免过点高频场景下进度 topic 被打爆（与高频采集走 dc.* 的分流同源思想）。
 4. **同步门禁 vs 异步判定职责切分**：过点执行做**同步门禁**（`QualityGateEvaluated`，权威，驱动放行/拦截）；质量上下文做**异步业务判定**（`QualityVerdictIssued`，记录性，供首件/SPC）。两者不要求强一致，异步 BLOCK 不回溯拦截已放行过点（INV-CX-04）。
@@ -189,17 +189,17 @@
 
 **典型业务节点**
 
-物料上下文发布多源事件 → 工单管理上下文重算 `KitStatus` → 发布 `wo.kit.status` → 下游消费：
+物料上下文发布多源事件 -> 工单管理上下文重算 `KitStatus` -> 发布 `wo.kit.status` -> 下游消费：
 
-- `material.bom.lifecycle`（`BomActivated`/`BomDeprecated`）→ 重算
-- `material.inventory.changed`（`InventoryChanged`）→ 重算
-- `material.substitute.lifecycle`（`SubstituteRuleActivated`/`Deactivated`）→ 重算
-- `material.kit.reserved` / `material.kit.released` → 重算
-- 结果 `wo.kit.status`（`KitStatusChanged`）→ 在制品执行（首次过点齐套防错）+ 排产（齐套失效重排）
+- `material.bom.lifecycle`（`BomActivated`/`BomDeprecated`）-> 重算
+- `material.inventory.changed`（`InventoryChanged`）-> 重算
+- `material.substitute.lifecycle`（`SubstituteRuleActivated`/`Deactivated`）-> 重算
+- `material.kit.reserved` / `material.kit.released` -> 重算
+- 结果 `wo.kit.status`（`KitStatusChanged`）-> 在制品执行（首次过点齐套防错）+ 排产（齐套失效重排）
 
 **Kafka 核心使用方式与作用**
 
-齐套状态不是单一事件的直接映射，而是**多源物料事件汇聚后的重算结果**。工单管理上下文是 `KitStatus` 的唯一判定方（物料上下文不判定齐套）。状态双向可逆：`READY ↔ NOT_READY`。Kafka 在此承担"多源信号汇聚 → 单点重算 → 结果再广播"的扇入扇出枢纽。
+齐套状态不是单一事件的直接映射，而是**多源物料事件汇聚后的重算结果**。工单管理上下文是 `KitStatus` 的唯一判定方（物料上下文不判定齐套）。状态双向可逆：`READY ↔ NOT_READY`。Kafka 在此承担"多源信号汇聚 -> 单点重算 -> 结果再广播"的扇入扇出枢纽。
 
 **架构闪光点**
 
@@ -222,12 +222,12 @@
 
 设备工装台账上下文是**设备状态唯一事实源**，消费四源结果事件综合重算可用性：
 
-- 点检保养 `pm.inspection.completed`（FAIL→SuspendAsset）/ `pm.inspection.overdue`（MarkAssetUnavailable）/ `pm.maintenance.completed` / `pm.maintenance.overdue` / `pm.fixture.life`（寿命超限→SuspendAsset）
-- 计量检定 `calibration.task.dispatched`（送检→SuspendAsset）/ `calibration.certificate.issued`（恢复）/ `calibration.task.failed` / `calibration.certificate.expired`
-- 维修 `repair.order.completed`（恢复）/ `repair.scrap.recommendation`（触发报废审批）/ `mes.malfunction.reported`（产线报修→SuspendAsset）
-- 设备数据接入 `dc.equipment.lifecycle`（`ChannelEscalated`→SuspendAsset 通信丢失）/ `dc.equipment.alarm.raw`（`EquipmentAlarmRaised` severity=CRITICAL→SuspendAsset）/ `dc.equipment.runtime`（运行时长累积）/ `dc.station.event.raw`（工装计数累积）
-- 结果 `eam.asset.availability`（`AssetAvailabilityChanged` + blocking_reasons[]）→ 生产执行（派工准入）+ 排产（产能受损重排）
-- 累积度量链：`dc.equipment.runtime`（`EquipmentRunHourAggregated`）→ 台账（`EquipmentRunHourAccrued` 发 `eam.asset.metric`）→ 点检保养（阈值判定 → `pm.maintenance.due`/`pm.fixture.life`）→ 台账（SuspendAsset）
+- 点检保养 `pm.inspection.completed`（FAIL->SuspendAsset）/ `pm.inspection.overdue`（MarkAssetUnavailable）/ `pm.maintenance.completed` / `pm.maintenance.overdue` / `pm.fixture.life`（寿命超限->SuspendAsset）
+- 计量检定 `calibration.task.dispatched`（送检->SuspendAsset）/ `calibration.certificate.issued`（恢复）/ `calibration.task.failed` / `calibration.certificate.expired`
+- 维修 `repair.order.completed`（恢复）/ `repair.scrap.recommendation`（触发报废审批）/ `mes.malfunction.reported`（产线报修->SuspendAsset）
+- 设备数据接入 `dc.equipment.lifecycle`（`ChannelEscalated`->SuspendAsset 通信丢失）/ `dc.equipment.alarm.raw`（`EquipmentAlarmRaised` severity=CRITICAL->SuspendAsset）/ `dc.equipment.runtime`（运行时长累积）/ `dc.station.event.raw`（工装计数累积）
+- 结果 `eam.asset.availability`（`AssetAvailabilityChanged` + blocking_reasons[]）-> 生产执行（派工准入）+ 排产（产能受损重排）
+- 累积度量链：`dc.equipment.runtime`（`EquipmentRunHourAggregated`）-> 台账（`EquipmentRunHourAccrued` 发 `eam.asset.metric`）-> 点检保养（阈值判定 -> `pm.maintenance.due`/`pm.fixture.life`）-> 台账（SuspendAsset）
 
 **Kafka 核心使用方式与作用**
 
@@ -248,8 +248,8 @@
 
 1. **多源事件并发重算可用性的乐观锁竞争**：点检 FAIL、检定过期、维修完成可能近乎同时到达，都触发同一资产的可用性重算。需 `asset_id + version` 乐观锁 + 重试，且重算必须基于"当前所有阻塞维度"而非单事件增量——否则会丢阻塞维度。
 2. **阻塞维度叠加与解除的幂等**：同一资产可能同时有"点检超期 + 检定过期"两个阻塞原因，解除检定阻塞时不能误清点检阻塞。`blocking_reasons[]` 必须按原因维度独立增删，幂等按 `(asset_id, reason, source_event_id)`。
-3. **同服务本地事务与跨服务事件的边界判定**：哪些运维异常走本地事务、哪些走事件，是设计时必须拍死的边界。判错会导致强防错场景出现一致性窗口（本该同步却走了异步），或低频场景过度同步拖累事务。判定准则：**同服务 + 强防错（停用直接影响过点准入）→ 本地事务；跨服务或非强防错 → 事件**。
-4. **累积度量去重与基准重置**：`accumulated_value - reset_baseline` 与阈值比较，`reset_baseline` 由台账维护（保养完成后 `MaintenanceCompleted(metric_reset=true)` → `MetricBaselineReset`）。翻修 `FixtureRefurbished(life_reset=true)` 重置 accumulated_cycles=0。基准重置事件若丢失或重复，寿命判定会错。需按 `(fixture_id, 翻修序号)` 去重 + 重置后立即重算寿命消耗。
+3. **同服务本地事务与跨服务事件的边界判定**：哪些运维异常走本地事务、哪些走事件，是设计时必须拍死的边界。判错会导致强防错场景出现一致性窗口（本该同步却走了异步），或低频场景过度同步拖累事务。判定准则：**同服务 + 强防错（停用直接影响过点准入）-> 本地事务；跨服务或非强防错 -> 事件**。
+4. **累积度量去重与基准重置**：`accumulated_value - reset_baseline` 与阈值比较，`reset_baseline` 由台账维护（保养完成后 `MaintenanceCompleted(metric_reset=true)` -> `MetricBaselineReset`）。翻修 `FixtureRefurbished(life_reset=true)` 重置 accumulated_cycles=0。基准重置事件若丢失或重复，寿命判定会错。需按 `(fixture_id, 翻修序号)` 去重 + 重置后立即重算寿命消耗。
 5. **通信故障的二级处理**：`ChannelEscalated` 不直接进维修，而是台账先 `SuspendAsset(reason=CommunicationLost)`，维修上下文订阅 `AssetSuspended(reason=CommunicationLost)` 后生成**草稿**故障报告待人工确认（避免通信抖动误报维修）。这条"先停用再评估"的两级处理，是通信视角与维修视角解耦的关键。
 
 ---
@@ -258,7 +258,7 @@
 
 **典型业务节点**
 
-设备 → 边缘网关（协议适配 `DecodingStrategy` + 打质量标 + 边缘缓冲 + 断点续传 + 大载荷卸载 MinIO）→ Kafka `dc.*` 直连（不经 Outbox、不开 DB 事务）→ 平台接入（`msg_id` 去重 + 乱序矫正）→ 落库 + 分发到下游 `dc.*` 主题。
+设备 -> 边缘网关（协议适配 `DecodingStrategy` + 打质量标 + 边缘缓冲 + 断点续传 + 大载荷卸载 MinIO）-> Kafka `dc.*` 直连（不经 Outbox、不开 DB 事务）-> 平台接入（`msg_id` 去重 + 乱序矫正）-> 落库 + 分发到下游 `dc.*` 主题。
 
 - `dc.process.sample.raw`：工艺参数原始采样（印刷 / 波峰焊 / 老化环境），A/B/D 类窄流
 - `dc.station.event.raw`：工位会话级事件 + 工装计数（过板 / 拧紧 / 烧录 / AOI / 测试），C 类单件事件
@@ -298,9 +298,9 @@
 
 E 类大载荷（扭矩曲线数百点/枪、AOI 图像、烧录日志、振动频谱、固件文件）**不进 Kafka**（单消息默认 1MB 上限），走 MinIO 直传，主流 `DataPacket` 只承载 `object_uri + sha256`：
 
-- 智能电批扭矩曲线 → MinIO，`dc.station.event.raw` 主流只带峰值/最终值 + `curve_uri`
-- AOI 图像 → MinIO，主流带 `image_uri + sha256 + retain_until`
-- 烧录日志 / 固件文件 → MinIO，主流带 `log_uri` / 固件指纹校验
+- 智能电批扭矩曲线 -> MinIO，`dc.station.event.raw` 主流只带峰值/最终值 + `curve_uri`
+- AOI 图像 -> MinIO，主流带 `image_uri + sha256 + retain_until`
+- 烧录日志 / 固件文件 -> MinIO，主流带 `log_uri` / 固件指纹校验
 
 **Kafka 核心使用方式与作用**
 
@@ -333,7 +333,7 @@ rag-service 的 `GraphProjector` 订阅领域事件流，增量构建 / 更新 N
 
 **Kafka 核心使用方式与作用**
 
-图不是凭空建模，是各上下文领域事件的**只读投影**——与在制品执行的 `ProcessRouteCache` / `EquipmentAvailabilityCache` 同构，只是投影目标是属性图而非键值缓存（[追溯型 RAG §2.3](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md)）。Kafka 承担"事实流 → 图增量写入"的投影通道。复用既有领域事件 envelope 与消费侧幂等模式，不造新契约。
+图不是凭空建模，是各上下文领域事件的**只读投影**——与在制品执行的 `ProcessRouteCache` / `EquipmentAvailabilityCache` 同构，只是投影目标是属性图而非键值缓存（[追溯型 RAG §2.3](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md)）。Kafka 承担"事实流 -> 图增量写入"的投影通道。复用既有领域事件 envelope 与消费侧幂等模式，不造新契约。
 
 **架构闪光点**
 
@@ -359,20 +359,20 @@ rag-service 的 `GraphProjector` 订阅领域事件流，增量构建 / 更新 N
 
 agent-service 订阅只读领域事件，把 Agent 从"被动问答"变"主动巡检 / 编排"：
 
-- 订阅 `ProcessRouteActivated`（工艺升版 v4→v5）→ 触发 L3 `process_change` 编排（草拟新 SOP + 核对操作工资质 + 新工艺首件验证）/ 触发 L2 SOP 草拟
-- 订阅 `equipment.fault`（设备故障，Kafka topic 或维修看板手动触发）→ 触发 L3 `fault_response` 故障复产编排
-- 订阅不良率突增事件 → 触发 L1 同批次诊断（`DefectRateSpikeListener`）
+- 订阅 `ProcessRouteActivated`（工艺升版 v4->v5）-> 触发 L3 `process_change` 编排（草拟新 SOP + 核对操作工资质 + 新工艺首件验证）/ 触发 L2 SOP 草拟
+- 订阅 `equipment.fault`（设备故障，Kafka topic 或维修看板手动触发）-> 触发 L3 `fault_response` 故障复产编排
+- 订阅不良率突增事件 -> 触发 L1 同批次诊断（`DefectRateSpikeListener`）
 
 **Kafka 核心使用方式与作用**
 
-Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承担"业务异常 / 变更 → Agent 触发"的信号通道。agent-service 用 aiokafka 异步非阻塞消费，只订阅只读事件、不消费任何写命令——主动触发的是"诊断 / 草拟 / 编排"，写动作仍走人在回路 confirmation gate。
+Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承担"业务异常 / 变更 -> Agent 触发"的信号通道。agent-service 用 aiokafka 异步非阻塞消费，只订阅只读事件、不消费任何写命令——主动触发的是"诊断 / 草拟 / 编排"，写动作仍走人在回路 confirmation gate。
 
 **架构闪光点**
 
 1. **Agent 只读旁路物理隔离**：跨语言物理边界天然强制 Agent 不进过点主事务、不旁路应用服务写路径。最坏情况是"没诊断出来"，不会产生写副作用（[整体技术选型 §1.3](../整体技术选型与模块划分.md)）。
 2. **事件驱动非问答主动触发**：复用既有领域事件契约，不造新管道。Agent 的触发源从"人点按钮"变成"业务事件"，覆盖"工程师还没注意到但系统已该介入"的场景。
 3. **L3 代码+agent 混合编排的零 LLM 快路径**：换线全程 PASS 时 agent 节点根本不触发，LLM 调用为 0（[整体技术选型 §4.3](../整体技术选型与模块划分.md)）。事件触发后先走代码节点（plan / query+compare / gate），仅非确定分支才调 agent 能力——"代码能做的不交给 LLM"。
-4. **跨语言 trace 串联**：Python 侧 httpx OTel instrumentation 自动注入 W3C `traceparent`，Java 侧 OTel agent 续接同一 trace；Kafka 消费侧同样透传 `trace_id`，实现"事件触发 → Agent 推理 → 受限写"全链路追踪。
+4. **跨语言 trace 串联**：Python 侧 httpx OTel instrumentation 自动注入 W3C `traceparent`，Java 侧 OTel agent 续接同一 trace；Kafka 消费侧同样透传 `trace_id`，实现"事件触发 -> Agent 推理 -> 受限写"全链路追踪。
 
 **实施重难点与技术挑战**
 
@@ -400,7 +400,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 
 1. **双通道互补**：WebSocket 的实时性 + Kafka 的持久性。实时通道失败（责任人未连 WS）不影响持久通道；持久通道消费侧（前端拉取 / 重连补送）兜底。
 2. **Kafka 兜底离线 / 重连补送**：与 L3 长程任务的 interrupt/resume 同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `thread_id` 续跑。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
-3. **跨语言 Python 生产**：agent-service（Python aiokafka）生产 `agent.action_cards`，是本系统唯一的 Python→Kafka 生产路径（其余 Python 服务都是消费）。partition_key=`session_id` 保证同一编排会话的动作卡有序。
+3. **跨语言 Python 生产**：agent-service（Python aiokafka）生产 `agent.action_cards`，是本系统唯一的 Python->Kafka 生产路径（其余 Python 服务都是消费）。partition_key=`session_id` 保证同一编排会话的动作卡有序。
 
 **实施重难点与技术挑战**
 
@@ -464,7 +464,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 
 ### 5.4 长链路事件编排的最终一致与中间态可观测
 
-**挑战**：模式 B 的工单下达→过点→进度→完工链跨 6+ 上下文，任一环消费滞后或进 DLT 都会导致流程"卡在某步"，且无中心编排器可查"当前到哪了"。
+**挑战**：模式 B 的工单下达->过点->进度->完工链跨 6+ 上下文，任一环消费滞后或进 DLT 都会导致流程"卡在某步"，且无中心编排器可查"当前到哪了"。
 
 **应对**：① `correlation_id`（业务流程关联）+ `causation_id`（因果上游）贯穿全链，配合 `trace_id` 做端到端时序还原；② 关键节点（工单状态、过点进度、齐套状态）建读模型投影供"当前状态"查询；③ DLT 必须有告警 + 人工处理流程，不静默丢弃（[Outbox §8.4](业务事件/Outbox设计方案.md)）。
 
@@ -478,11 +478,11 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 
 **挑战**：近百个领域事件，字段会演进。不兼容变更会打破消费方。
 
-**应对**（[Outbox §7.7](业务事件/Outbox设计方案.md)）：新增字段必须可选或有默认值；不删除已有字段、不改变语义与类型；重大不兼容变更用新 `event_version` 或新 `event_type`；每条事件必带 `event_type + event_version`，消费方据此分发。跨语言（Java→Python）还需共享 schema 定义（JSON Schema / AsyncAPI）防反序列化静默失败。
+**应对**（[Outbox §7.7](业务事件/Outbox设计方案.md)）：新增字段必须可选或有默认值；不删除已有字段、不改变语义与类型；重大不兼容变更用新 `event_version` 或新 `event_type`；每条事件必带 `event_type + event_version`，消费方据此分发。跨语言（Java->Python）还需共享 schema 定义（JSON Schema / AsyncAPI）防反序列化静默失败。
 
 ### 5.7 跨上下文 trace 串联
 
-**挑战**：跨服务事件链路，`trace_id` 如何在 Kafka 消息中透传并续接？Java 发 → Kafka → Java 消 / Python 消，三段 trace 须同源。
+**挑战**：跨服务事件链路，`trace_id` 如何在 Kafka 消息中透传并续接？Java 发 -> Kafka -> Java 消 / Python 消，三段 trace 须同源。
 
 **应对**：① 事件 envelope 的 `trace_id` 写入 Kafka header（用于路由 / 过滤 / 排障）+ payload（持久化）；② 消费侧从 header / payload 取 `trace_id` 续接 span；③ Python 侧 httpx OTel + Java 侧 OTel agent 续接同一 W3C `traceparent`（[整体技术选型 §1.3](../整体技术选型与模块划分.md)）；④ `correlation_id`（业务流程）与 `trace_id`（技术链路）分离，前者跨长业务流，后者单次请求链路。
 
@@ -490,7 +490,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 
 **挑战**：模式 D 的设备管理服务，哪些运维异常走本地事务、哪些走事件，判错会导致强防错场景出现一致性窗口，或低频场景过度同步拖累事务。
 
-**判定准则**：**同服务 + 强防错（停用直接影响过点准入）→ 本地事务同步**（点检异常 / 超期、保养超期 / 完成、寿命超限、CRITICAL 故障）；**跨服务或非强防错 → 事件解耦**（检定、维修完成恢复、报废审批）。这条边界须在设计时拍死并文档化，不能由开发临时判断。
+**判定准则**：**同服务 + 强防错（停用直接影响过点准入）-> 本地事务同步**（点检异常 / 超期、保养超期 / 完成、寿命超限、CRITICAL 故障）；**跨服务或非强防错 -> 事件解耦**（检定、维修完成恢复、报废审批）。这条边界须在设计时拍死并文档化，不能由开发临时判断。
 
 ### 5.9 DLT 治理与人工补偿
 
@@ -545,7 +545,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 
 ## 7. 跨上下文事件协作总览矩阵
 
-> 行=发布方，列=消费方。✓=有事件协作。仅列跨上下文协作，上下文内 CQRS（如在制品执行写侧→`WipUnit` 读侧进程内订阅，不走 Kafka）不在此列。
+> 行=发布方，列=消费方。✓=有事件协作。仅列跨上下文协作，上下文内 CQRS（如在制品执行写侧->`WipUnit` 读侧进程内订阅，不走 Kafka）不在此列。
 
 | 发布方 \ 消费方 | 工单管理 | 在制品执行 | 首件处理 | 返修 | 返工 | 排产 | 物料 | 工艺管理 | 质量 | 台账 | 点检保养 | 计量检定 | 维修 | 设备数据接入 |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -557,11 +557,11 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | 排产 `schedule.*` | ✓（快照回写） | | | | | — | ✓（齐套预占） | | | | | | | |
 | 物料 `material.*` | ✓（KitStatus 重算） | ✓（防错缓存） | ✓（换料触发） | | | ✓（缺料反馈） | — | | | | | | | |
 | 工艺管理 `process.*` | | ✓（工艺缓存） | ✓（ECN 触发） | | | | | — | | | | | | |
-| 质量 `quality.*` | | ✓（质量门缓存） | ✓（FA 标准/判定） | | ✓（批量异常→返工） | | ✓（IQC 入库） | ✓（规则弃用标记） | — | | | | | |
+| 质量 `quality.*` | | ✓（质量门缓存） | ✓（FA 标准/判定） | | ✓（批量异常->返工） | | ✓（IQC 入库） | ✓（规则弃用标记） | — | | | | | |
 | 台账 `eam.*` | | ✓（可用性缓存） | | | | ✓（产能重排） | | ✓（规格引用） | | — | ✓（规则激活/停用） | ✓（规则激活/停用） | ✓（Suspended/Retired/scrap） | ✓（AssetRegistered 绑定） |
-| 点检保养 `pm.*` | | | | | | | | | | ✓（结果→状态） | — | | ✓（RepairSuggested） | |
-| 计量检定 `calibration.*` | | | | | | | | | | ✓（证书→状态） | | — | | |
-| 维修 `repair.*` | | ✓（试产验证） | | | | | | | | ✓（完成→恢复/报废） | ✓（保养建议） | | — | |
+| 点检保养 `pm.*` | | | | | | | | | | ✓（结果->状态） | — | | ✓（RepairSuggested） | |
+| 计量检定 `calibration.*` | | | | | | | | | | ✓（证书->状态） | | — | | |
+| 维修 `repair.*` | | ✓（试产验证） | | | | | | | | ✓（完成->恢复/报废） | ✓（保养建议） | | — | |
 | 设备数据接入 `dc.*` | | ✓（实时数据 REST） | | | | | ✓（线边仓事件） | | ✓（采样） | ✓（通信/报警/度量） | | | | — |
 
 > Python 旁路消费：rag-service GraphProjector 消费 `mes.*`/`process.*`/`material.*`/`quality.*`；agent-service 消费 `process.route.lifecycle`/`equipment.fault`/不良率突增等。均不在上表（上下文外，复用契约）。
@@ -575,10 +575,10 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | 阶段 | 交付 | 优先级理由 |
 |---|---|---|
 | **P0 基础设施** | Kafka 集群（3 broker / RF=3 / min.insync=2）+ Spring Kafka 基础配置 + Outbox 表 + consumed_event 表 + DLT 机制 | 所有场景的前提 |
-| **P1 业务事件骨干** | Outbox Publisher + 限流四层 + 消费幂等框架；先通"工单下达→过点→进度→完工"主链（`wo.*`/`mes.*`） | 主链跑通即覆盖模式 B 核心，验证 Outbox 端到端 |
+| **P1 业务事件骨干** | Outbox Publisher + 限流四层 + 消费幂等框架；先通"工单下达->过点->进度->完工"主链（`wo.*`/`mes.*`） | 主链跑通即覆盖模式 B 核心，验证 Outbox 端到端 |
 | **P2 配置缓存投影** | 模式 A 的 5 大缓存（工艺 / 设备 / 质量门 / 齐套 / 工单）+ 降级 REST；通 `process.*`/`eam.asset.availability`/`quality.gate.lifecycle`/`wo.kit.status` | 过点 ≤200ms 的硬要求依赖此 |
-| **P3 物料齐套闭环** | 模式 C 的 KitStatus 重算链（`material.*`→`wo.kit.status`）+ 排产齐套预占链（`schedule.*`↔`material.*`） | 验证多源重算与双向可逆状态机 |
-| **P4 设备可用性聚合** | 模式 D 的 `eam.asset.availability` 聚合 + 同服务本地事务 vs 跨服务事件切分；通 `pm.*`/`calibration.*`/`repair.*`→台账 | 过点准入硬门禁，强防错边界落地 |
+| **P3 物料齐套闭环** | 模式 C 的 KitStatus 重算链（`material.*`->`wo.kit.status`）+ 排产齐套预占链（`schedule.*`↔`material.*`） | 验证多源重算与双向可逆状态机 |
+| **P4 设备可用性聚合** | 模式 D 的 `eam.asset.availability` 聚合 + 同服务本地事务 vs 跨服务事件切分；通 `pm.*`/`calibration.*`/`repair.*`->台账 | 过点准入硬门禁，强防错边界落地 |
 | **P5 高频采集管道** | 模式 E 的 dc.* 直连 + 边缘网关 + 断点续传 + 去重 + 乱序矫正；模式 F 的 MinIO 大载荷卸载 | 与业务事件独立可并行，但依赖车间设备实测 |
 | **P6 Python 旁路** | 模式 G 的 GraphProjector（先 MVP 4 上下文）+ 模式 H 的 Agent 主动触发 + 模式 I 的动作卡双通道 | 依赖业务事件契约稳定后接入 |
 | **P7 可观测与治理** | 全链路 trace 串联 + DLT 告警 + 限流可观测 + schema 演进规范 + 重放机制验证 | 贯穿各阶段，P7 集中补齐 |
@@ -593,7 +593,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 4. **`partition_key=聚合根ID` 保序 + 幂等 Producer + 至少一次 + 消费端幂等**——所有 topic 统一可靠性基线。
 5. **配置型主数据走"发布—缓存刷新"投影 + 降级 REST**，过点 ≤200ms 读本地缓存，缓存丢失可重建。
 6. **版本快照不可变**（`routeVersion` / `SNAPSHOT_OF_ROUTE`），历史追溯免疫后续变更。
-7. **强防错本地事务 vs 跨服务异步事件精细切分**：同服务 + 强防错 → 本地事务；跨服务或非强防错 → 事件。
+7. **强防错本地事务 vs 跨服务异步事件精细切分**：同服务 + 强防错 -> 本地事务；跨服务或非强防错 -> 事件。
 8. **采集只搬运不解释**（INV-CX-01），网关 / 平台不做业务判定，协议适配器免疫工艺变更。
 9. **大载荷走 MinIO，主流只传 URI + sha256**，对象先于引用存在。
 10. **跨语言 Python 旁路复用既有 Kafka 契约**，物理边界强制只读，零新管道。
@@ -614,7 +614,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | 图投影降级阈值 | 图覆盖度低于多少触发降级 REST | 🔴 待 L1 诊断实测定 | 模式 G |
 | `CONSUMED_BATCH` 边事件契约 | 物料消耗明细事件是否定义 | MVP 用降级 REST，待物料上下文明确定义后改投影 | 模式 G |
 | Agent 触发规则归属 | 触发条件配置在 Agent 侧还是 MES 事件契约 | 🔴 待定 | 模式 H |
-| 同服务本地事务 vs 事件的边界 | 哪些运维异常走本地事务 | 同服务 + 强防错 → 本地事务；跨服务或非强防错 → 事件 | 模式 D / §5.8 |
+| 同服务本地事务 vs 事件的边界 | 哪些运维异常走本地事务 | 同服务 + 强防错 -> 本地事务；跨服务或非强防错 -> 事件 | 模式 D / §5.8 |
 | 全局 / 各 topic 发送配额 | 事件/s、burst、字节/s | 全局 200/s、burst 2×，按业务紧急度分配；上线前压测定 | [Outbox §9.6](业务事件/Outbox设计方案.md) |
 | `consumed_event` 幂等保留期 | ≥ 最长重投窗口 | ≥ Kafka retention 或 ≥ 7 天 | [Outbox §12](业务事件/Outbox设计方案.md) |
 | Kafka 集群级配额 | per client-id 字节配额 | 业务与 dc client-id 分离设配额兜底 | [Outbox §9.4](业务事件/Outbox设计方案.md) |

@@ -4,7 +4,7 @@
 在 B 路线（文档型 RAG）第一阶段召回中，用 **混合检索 (Hybrid Retrieval)** 取代当前纯稠密检索：
 - **稀疏检索 (BM25)**：关键词精确匹配，解决专有名词（设备型号、故障码、工艺参数名）。
 - **稠密检索 (Embedding)**：语义向量，解决同义词与模糊表达。
-- **RRF (Reciprocal Rank Fusion)** 融合两路排名 → 统一候选集，交给既有 rerank 精排。
+- **RRF (Reciprocal Rank Fusion)** 融合两路排名 -> 统一候选集，交给既有 rerank 精排。
 
 ## 设计原则（贴合既有架构）
 - 遵循 DDD / Ports & Adapters / 组合根单点装配；`from __future__ import annotations`、中文 docstring、惰性 import、`async`。
@@ -24,7 +24,7 @@ routes/document/
     chunk_filter.py          # 新增：build_where() + build_predicate() 共享（DRY）
     chromadb/
       retriever.py           # 改：_build_where 委托 chunk_filter（行为不变）
-      chunk_repo.py          # 改：可选 bm25_index 协作（upsert→add, soft_delete/delete→remove）
+      chunk_repo.py          # 改：可选 bm25_index 协作（upsert->add, soft_delete/delete->remove）
     bm25/                    # 新增包
       __init__.py
       tokenizer.py           # jieba 分词，缺失时降级正则
@@ -49,7 +49,7 @@ class RetrieverPort(Protocol):
     async def retrieve(self, *, query, tenant, route_version=None,
                        asset_id=None, doc_types=None, top_k=20) -> list[ChunkHit]: ...
 ```
-与现 `VectorRetriever.retrieve` 签名一致 → 零行为改动。
+与现 `VectorRetriever.retrieve` 签名一致 -> 零行为改动。
 
 ### 2. ChunkFilter（infrastructure/chunk_filter.py）
 - `build_where(tenant, route_version, asset_id, doc_types) -> dict`：与现 `_build_where` 等价（state=PUBLISHED + 等值 + $in）。
@@ -70,7 +70,7 @@ class RetrieverPort(Protocol):
 
 ### 5. Bm25Retriever（infrastructure/bm25/bm25_retriever.py）
 - 持有 `Bm25Index` + `Tokenizer`。
-- `retrieve()`：复用 `ChunkFilter.build_predicate` 过滤 → `index.search` → 映射 `ChunkHit`（`score = bm25_score`，归一化到 [0,1] 仅供观察，融合只用排名）。
+- `retrieve()`：复用 `ChunkFilter.build_predicate` 过滤 -> `index.search` -> 映射 `ChunkHit`（`score = bm25_score`，归一化到 [0,1] 仅供观察，融合只用排名）。
 
 ### 6. HybridRetriever（application/hybrid_retriever.py）
 - 持有 `dense: RetrieverPort` + `sparse: RetrieverPort` + 融合参数。
@@ -78,7 +78,7 @@ class RetrieverPort(Protocol):
   1. 两路并发 `asyncio.gather`，各自过取 `recall_candidate_k`（默认 50，> top_k）。
   2. RRF：`score(d) = dense_weight/(rrf_k + rank_dense(d)) + bm25_weight/(rrf_k + rank_bm25(d))`，单路命中按 0 计另一项。
   3. 按融合分降序，截断 `top_k`；`ChunkHit.score` = RRF 分。
-  4. 任一路异常 → 降级为另一路（可观测记录），不整体失败。
+  4. 任一路异常 -> 降级为另一路（可观测记录），不整体失败。
 
 ### 7. 组合根装配（routes/document/__init__.py）
 ```

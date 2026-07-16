@@ -108,22 +108,22 @@ structured = self._lc.with_structured_output(schema, **kwargs)
 
 ### 4.2 工具调用（L1 ReAct）
 
-ReAct 用 `bind_tools(tools)`（`tool_choice` 默认 `auto`，模型自主决定是否调工具），思考模型支持。L1 诊断多步 ReAct 验证通过：DeepSeek 主动调 `query_traceability_graph` → `query_pass_records` → 输出报告。
+ReAct 用 `bind_tools(tools)`（`tool_choice` 默认 `auto`，模型自主决定是否调工具），思考模型支持。L1 诊断多步 ReAct 验证通过：DeepSeek 主动调 `query_traceability_graph` -> `query_pass_records` -> 输出报告。
 
 ---
 
 ## 5. 多步 ReAct 的 tool_call_id 贯穿
 
-**问题**：`_LangChainAdapter._to_lc` 原丢弃 assistant 消息的 `tool_calls` 和 tool 消息的 `tool_call_id`。真实模型多步 ReAct 第二轮（喂回工具结果）时，`tool` 消息无对应 `tool_call_id` → API 400。
+**问题**：`_LangChainAdapter._to_lc` 原丢弃 assistant 消息的 `tool_calls` 和 tool 消息的 `tool_call_id`。真实模型多步 ReAct 第二轮（喂回工具结果）时，`tool` 消息无对应 `tool_call_id` -> API 400。
 
 **修复**：`tool_call_id` 贯穿全链路：
 
 ```
 ModelResponse.tool_calls[i].id  (模型返回)
-  → assistant_msg(tool_calls=[{id,...}])        (agent_node 透传)
-  → pending_tool_calls[i].id                    (state)
-  → tool_msg(tool_call_id=id)                   (ToolNode 产出)
-  → AIMessage(tool_calls=[{id,type="tool_call"}]) + ToolMessage(tool_call_id=id)  (_to_lc 还原)
+  -> assistant_msg(tool_calls=[{id,...}])        (agent_node 透传)
+  -> pending_tool_calls[i].id                    (state)
+  -> tool_msg(tool_call_id=id)                   (ToolNode 产出)
+  -> AIMessage(tool_calls=[{id,type="tool_call"}]) + ToolMessage(tool_call_id=id)  (_to_lc 还原)
 ```
 
 - `ToolCall` 加 `id: str = ""`（[base.py](../factorybot/app/infrastructure/ai/base.py)）。
@@ -150,7 +150,7 @@ ModelResponse.tool_calls[i].id  (模型返回)
 
 ## 7. L3 多 interrupt resume（并行 gate）
 
-**问题**：`fault_response` 图 `gate_repair ‖ gate_isolation` **并行**，两个 gate 都 `interrupt(value=card)` → 2 个 pending interrupt。且两 gate 的 `step`（REPAIR/ISOLATION）与 `writes_via` 不同，单 token 的 `action` 无法同时匹配。`Command(resume=token)` 报 `must specify the interrupt id when resuming`。
+**问题**：`fault_response` 图 `gate_repair ‖ gate_isolation` **并行**，两个 gate 都 `interrupt(value=card)` -> 2 个 pending interrupt。且两 gate 的 `step`（REPAIR/ISOLATION）与 `writes_via` 不同，单 token 的 `action` 无法同时匹配。`Command(resume=token)` 报 `must specify the interrupt id when resuming`。
 
 **修复**（[l3_orchestrator.py](../factorybot/app/application/l3_orchestrator.py)）：
 

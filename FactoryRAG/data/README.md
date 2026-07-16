@@ -42,9 +42,9 @@ data/
 | DeepSeek LLM（A） | `_StubTraceLLM` | 从子图 prompt 抽取真实 node_id 作证据，返回 JSON 假设（禁实体幻觉） |
 | Redis / subgraph_repo | 内存 / `FakeSubgraphRepo` | 缓存与持久化置空或内存版 |
 
-**A→B 跨路线**：A 的 `doc_rag` 注入**真实** `InProcessDocRagAdapter` 包裹**真实** B
+**A->B 跨路线**：A 的 `doc_rag` 注入**真实** `InProcessDocRagAdapter` 包裹**真实** B
 `DocumentRetrievalService`（真实 BM25 over mock SOP），验证版本一致性三段链第一段：
-图锁定 v3 → A 透传 ROUTE 锚点 v3 → B 仅召回 v3 SOP。
+图锁定 v3 -> A 透传 ROUTE 锚点 v3 -> B 仅召回 v3 SOP。
 
 ## 跑测试
 

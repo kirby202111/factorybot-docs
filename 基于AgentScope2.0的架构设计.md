@@ -2,7 +2,7 @@
 
 > 本文是对 `整体技术选型与模块划分.md` 的一次**技术选型重构**，核心目标：
 > **尽可能全面地采用 AgentScope 2.0 的技术与组件替换现有方案**（LangGraph / 自研横切能力 / 自研编排层等），
-> 在保持"查 → 诊断 → 草拟 → 推动作"业务链与"写动作闸门在人手里"安全底线不变的前提下，
+> 在保持"查 -> 诊断 -> 草拟 -> 推动作"业务链与"写动作闸门在人手里"安全底线不变的前提下，
 > 借助 AgentScope 2.0 的生产级基础设施显著提升**多智能体协同、分布式支持与可扩展性**。
 >
 > 适用读者：架构评审、Agent/RAG 研发、平台/SRE。
@@ -50,7 +50,7 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 │  A/B/E 三路线      │   │  Pipeline 协同 + Permission 闸门 + Workspace │
 └─────────┬──────────┘   └──────────────┬───────────────────────────┘
           │ Kafka 事件流投影              │ Tool（httpx）只读 REST + 受限写
-          │ (GraphProjector)             │ + Kafka 事件订阅 → 事件系统
+          │ (GraphProjector)             │ + Kafka 事件订阅 -> 事件系统
           ▼                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │            MES 主体服务 (Java/Spring，已有，不替换)                    │
@@ -65,7 +65,7 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 
 | 服务 | 语言/框架 | 职责定位 | 写权限 |
 |------|----------|---------|--------|
-| **agent-service** | Python + AgentScope 2.0 | 把"查 → 诊断 → 草拟处置 → 推动作"串成自动链；写闸门由 **Permission 系统**承载 | L1 全程只读；L2 仅产草稿不落库；L3 受限写 + Permission gate |
+| **agent-service** | Python + AgentScope 2.0 | 把"查 -> 诊断 -> 草拟处置 -> 推动作"串成自动链；写闸门由 **Permission 系统**承载 | L1 全程只读；L2 仅产草稿不落库；L3 受限写 + Permission gate |
 | **rag-service** | Python + AgentScope 2.0（RAG 模块 / Toolkit） | 把"工程师手动查 5 个界面"变成一次问答；三路线分线落地 | 全程只读 |
 | **MES 主体服务** | Java/Spring | 14 个限界上下文核心业务与写路径 | 唯一业务写权限，聚合根不变式 + 事务发件箱 |
 | **mes-eval** | Python + AgentScope 评测/OpenJudge | RAG 三路线 + Agent 三层级评测、标定、漂移、CI 门禁 | 只读评测 |
@@ -150,14 +150,14 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 |------|------|----------|
 | **AgentScope 事件系统** | 统一事件总线：服务前端 agent 应用 + human-in-the-loop 协作；`reply_stream` 产出 agent events | **替换自研 WebSocket/SSE 推送编排** |
 | **`AGUIProtocolMiddleware`** | 流式传输到前端（动作卡实时渲染） | 前端实时推送内生化 |
-| **Kafka (`aiokafka`)** | ① 领域事件订阅（`ProcessRouteActivated`/`equipment.fault` 主动触发）→ 桥接进事件系统；② 动作卡持久推送 topic（离线兜底）；③ RAG 侧 `GraphProjector` 订阅 | 保留 Kafka 作为跨服务事件总线；进程内协同改用 AgentScope 事件系统 |
+| **Kafka (`aiokafka`)** | ① 领域事件订阅（`ProcessRouteActivated`/`equipment.fault` 主动触发）-> 桥接进事件系统；② 动作卡持久推送 topic（离线兜底）；③ RAG 侧 `GraphProjector` 订阅 | 保留 Kafka 作为跨服务事件总线；进程内协同改用 AgentScope 事件系统 |
 
 ### 2.8 可观测
 
 | 组件 | 用途 | 替换/说明 |
 |------|------|----------|
 | **`TracingMiddleware`** | OTel tracing 新入口（从 Agent 类移出，关注点分离） | **替换自研 `obs/Tracing`**；埋点内生、provider 无关 |
-| **OTel Collector / W3C traceparent** | 跨语言链路串联（Python→Java） | 不变，注入点改为 Middleware |
+| **OTel Collector / W3C traceparent** | 跨语言链路串联（Python->Java） | 不变，注入点改为 Middleware |
 | prometheus-client / structlog | 指标埋点 + 结构化日志（`trace_id`/`span_id`） | 保留，作为 Middleware 之外的补充埋点 |
 | Tempo/Jaeger、Prometheus、Loki、Grafana | trace/指标/日志存储与看板 + SLI/SLO 告警 | 不变 |
 | **AgentScope Studio** | 开发期可视化调试、事件/追踪查看 | **新增**：研发期观测提效 |
@@ -207,7 +207,7 @@ agent_service/app/
 ├── pipelines/                    # 多智能体协同编排（声明式，替换 supervisor_graph）
 │   ├── changeover.py             # ① 换线：sequential + gate
 │   ├── fault_response.py         # ② 设备故障复产：fanout 并行 + MsgHub 汇合
-│   ├── complaint_8d.py           # ③ 客诉 8D：sequential（诊断→追溯→草拟）
+│   ├── complaint_8d.py           # ③ 客诉 8D：sequential（诊断->追溯->草拟）
 │   └── process_change.py         # ④ 工艺变更落地
 │
 ├── plans/                        # Plan 模块：长链路任务分解与跟踪
@@ -280,20 +280,20 @@ agent_service/app/
 
 | 集成点 | 接口/契约 | 方向 | 说明 |
 |--------|----------|------|------|
-| L1 调图 | `query_traceability_graph` Tool（封装 `POST /rag/trace/query`） | Agent → RAG | 注册在 L1 Toolkit **首位**，system prompt 引导"先调图" |
-| L1 降级 REST | 各上下文只读 REST Tool | Agent → MES | 图覆盖不足时降级补齐 |
-| L2 回查图 | `fetch_subgraph_nodes(subgraph_ref)` Tool | Agent → RAG | 按 L1 透传 `subgraph_ref` 回查，**不重查图** |
-| L2 调文档 RAG | `search_docs(query, route_version_filter)` Tool | Agent → RAG | 8D/SOP 草拟检索历史同类 |
-| L3 受限写 | ACL 写 Tool → 应用服务 REST（header `X-Confirmation-Token` + `X-Confirmed-By`） | Agent → MES | **由 Permission gate 放行后**才可调用，走聚合根不变式 + 事务发件箱 |
-| 图投影 | Kafka 领域事件流 | MES → RAG | `GraphProjector` 订阅构建 Neo4j |
-| 主动触发 | `ProcessRouteActivated`/`equipment.fault` → 事件系统 | MES → Agent | 触发 L2 异步草拟 / L3 故障复产 |
-| 动作卡推送 | 事件系统 + `AGUIProtocolMiddleware` + Kafka 兜底 | Agent → 前端 | 实时 + 离线双通道 |
-| 评测接入 | EvalTarget 适配器 | mes-eval → Agent/RAG | 统一跑集判定 |
-| 跨语言追踪 | W3C `traceparent` | Agent → MES | 由 `TracingMiddleware` 注入 |
+| L1 调图 | `query_traceability_graph` Tool（封装 `POST /rag/trace/query`） | Agent -> RAG | 注册在 L1 Toolkit **首位**，system prompt 引导"先调图" |
+| L1 降级 REST | 各上下文只读 REST Tool | Agent -> MES | 图覆盖不足时降级补齐 |
+| L2 回查图 | `fetch_subgraph_nodes(subgraph_ref)` Tool | Agent -> RAG | 按 L1 透传 `subgraph_ref` 回查，**不重查图** |
+| L2 调文档 RAG | `search_docs(query, route_version_filter)` Tool | Agent -> RAG | 8D/SOP 草拟检索历史同类 |
+| L3 受限写 | ACL 写 Tool -> 应用服务 REST（header `X-Confirmation-Token` + `X-Confirmed-By`） | Agent -> MES | **由 Permission gate 放行后**才可调用，走聚合根不变式 + 事务发件箱 |
+| 图投影 | Kafka 领域事件流 | MES -> RAG | `GraphProjector` 订阅构建 Neo4j |
+| 主动触发 | `ProcessRouteActivated`/`equipment.fault` -> 事件系统 | MES -> Agent | 触发 L2 异步草拟 / L3 故障复产 |
+| 动作卡推送 | 事件系统 + `AGUIProtocolMiddleware` + Kafka 兜底 | Agent -> 前端 | 实时 + 离线双通道 |
+| 评测接入 | EvalTarget 适配器 | mes-eval -> Agent/RAG | 统一跑集判定 |
+| 跨语言追踪 | W3C `traceparent` | Agent -> MES | 由 `TracingMiddleware` 注入 |
 
 **版本一致性三段传递链**（核心安全契约，不变）：
 ```
-图 SNAPSHOT_OF_ROUTE{route_version} → L1 evidence.route_version → L2 Draft.route_version → MES 应用服务校验 ACTIVE
+图 SNAPSHOT_OF_ROUTE{route_version} -> L1 evidence.route_version -> L2 Draft.route_version -> MES 应用服务校验 ACTIVE
 ```
 
 ---
@@ -304,7 +304,7 @@ agent_service/app/
 
 | 层级 | 名称 | AgentScope 2.0 承载 | Permission 策略 |
 |------|------|---------------------|----------------|
-| L0 | 收口型问答 | Routing/Handoffs Agent → RAG 工具 | 只读 |
+| L0 | 收口型问答 | Routing/Handoffs Agent -> RAG 工具 | 只读 |
 | **L1** | **诊断型** | 单 `Agent`（ReAct 事件流），多步只读推理 | `readonly_policy` |
 | **L2** | **草稿型** | `Agent` + 策略化 draft agents，产草稿不落库 | `nowrite_policy`，`requires_confirmation` 恒 True |
 | **L3** | **编排型** | **Pipeline（sequential/fanout/MsgHub）+ Plan + 多 Agent 协同** | `gated_write_policy` + HITL |
@@ -313,23 +313,23 @@ agent_service/app/
 ### 4.2 层间数据流
 
 ```
-L1 诊断 Agent → DiagnosisReport + subgraph_ref
+L1 诊断 Agent -> DiagnosisReport + subgraph_ref
               ↓（AgentState 透传）
-L2 草稿 Agent → 按 subgraph_ref 回查图节点 → Draft（requires_confirmation=True）
+L2 草稿 Agent -> 按 subgraph_ref 回查图节点 -> Draft（requires_confirmation=True）
               ↓ 人确认（MES 正式界面）
           MES 正式应用服务落库（过聚合根不变式 + 事务发件箱）
 
-L3 Pipeline → sequential/fanout 调度确定性步骤 + 多 Agent 能力 A/B/C/D（MsgHub 共享上下文）
-              ↓ 非确定分支触发 Agent → ActionCard
-              ↓ Permission gate（拦截 → 事件系统 HITL 确认 → 续跑）
+L3 Pipeline -> sequential/fanout 调度确定性步骤 + 多 Agent 能力 A/B/C/D（MsgHub 共享上下文）
+              ↓ 非确定分支触发 Agent -> ActionCard
+              ↓ Permission gate（拦截 -> 事件系统 HITL 确认 -> 续跑）
           MES 正式应用服务落库
 ```
 
 ### 4.3 L3 "代码 + agent 混合编排" 判定标准（原则不变，落点更清晰）
 
 一个步骤是否需要 Agent，看三问：**输入是否开放？是否需要推理/生成？分支是否难以穷举？**
-- 三问皆否 → **Pipeline 确定性节点/普通函数**（不调 LLM）
-- 三问有一 → **AgentScope `Agent` 节点**（调 LLM）
+- 三问皆否 -> **Pipeline 确定性节点/普通函数**（不调 LLM）
+- 三问有一 -> **AgentScope `Agent` 节点**（调 LLM）
 
 > 换线全程 PASS 时 Agent 节点不触发，**LLM 调用为 0**。"代码能做的不交给 LLM"仍是核心原则；Pipeline 让确定性步骤与 Agent 步骤在同一编排里清晰共存。
 
@@ -371,7 +371,7 @@ L3 Pipeline → sequential/fanout 调度确定性步骤 + 多 Agent 能力 A/B/C
 ### 6.1 多智能体协同能力
 
 - **统一 Agent 类 + 事件流**：每个 Agent 是 pure producer，协同各方通过事件总线交互，天然支持并发与实时干预。
-- **Pipeline 三形态**：`sequential`（诊断→追溯→草拟串行）、`fanout`（故障复产多能力并行）、**`MsgHub`**（多 Agent 广播共享上下文，如 A 根因 + B 隔离范围互相看到彼此结论）。
+- **Pipeline 三形态**：`sequential`（诊断->追溯->草拟串行）、`fanout`（故障复产多能力并行）、**`MsgHub`**（多 Agent 广播共享上下文，如 A 根因 + B 隔离范围互相看到彼此结论）。
 - **Handoffs/Routing**：L0/E 入口按问题类型移交给专精 Agent，协同从"手搓边"变为"声明式移交"。
 - **Plan 模块**：长链路场景（工艺变更落地）用 Plan 拆解任务、`Task*` 工具跟踪进度，多 Agent 认领子任务。
 
@@ -379,7 +379,7 @@ L3 Pipeline → sequential/fanout 调度确定性步骤 + 多 Agent 能力 A/B/C
 
 - **无状态水平扩展**：`AgentState` 显式化 + `SessionManager`（Redis-backed）持久会话，**任意副本恢复任意用户完整上下文**——Pod OOM/滚动更新后新副本按 `session_id` 续跑，无需自研 checkpoint。
 - **BackgroundTaskManager + SchedulerManager**：长程任务与定时巡检由框架托管，替代自研 asyncio 点火与 Celery。
-- **Workspace 分布式形态**：同一份业务代码按需切换 Local→Docker→E2B，执行环境可独立扩缩容。
+- **Workspace 分布式形态**：同一份业务代码按需切换 Local->Docker->E2B，执行环境可独立扩缩容。
 
 ### 6.3 可扩展性
 
@@ -398,7 +398,7 @@ L3 Pipeline → sequential/fanout 调度确定性步骤 + 多 Agent 能力 A/B/C
 | **第 0 步** | 底座切换 | 引入 AgentScope 2.0，搭 FastAPI Agent Service + SessionManager + TracingMiddleware，跑通空壳 |
 | **第 1 步** | L1 诊断迁移 | 将 StateGraph ReAct 重写为统一 Agent + Toolkit + `readonly_policy`；对齐评测基线 |
 | **第 2 步** | L2 草稿迁移 | draft agents + `nowrite_policy`；证据回查 Tool 化 |
-| **第 3 步** | 横切能力替换 | obs→TracingMiddleware、cost→Offloader/Middleware、longtask→Session/Permission |
+| **第 3 步** | 横切能力替换 | obs->TracingMiddleware、cost->Offloader/Middleware、longtask->Session/Permission |
 | **试点** | L3 换线编排 | Pipeline(sequential)+Permission gate+事件系统 HITL，confirmation 做扎实 |
 | **扩展** | L3 其余场景 | fanout/MsgHub 承载故障复产/客诉 8D/工艺变更 |
 | **收口** | L0 统一入口 + E Agentic RAG | Routing/Handoffs 收口到 RAG 工具 + L1-L3 能力 |
@@ -407,7 +407,7 @@ L3 Pipeline → sequential/fanout 调度确定性步骤 + 多 Agent 能力 A/B/C
 
 ---
 
-## 8. 附录：AgentScope 2.0 能力 → 本架构落点速查
+## 8. 附录：AgentScope 2.0 能力 -> 本架构落点速查
 
 | AgentScope 2.0 能力 | 本架构落点 |
 |---------------------|-----------|
