@@ -21,7 +21,6 @@ class ScenarioType(str, Enum):
     CHANGEOVER = "CHANGEOVER"                  # 换线
     FAULT_RESPONSE = "FAULT_RESPONSE"          # 设备故障复产
     COMPLAINT_8D = "COMPLAINT_8D"              # 客诉 8D
-    PROCESS_CHANGE = "PROCESS_CHANGE"          # 工艺变更落地
 
 
 class SessionStatus(str, Enum):
@@ -126,7 +125,7 @@ class OrchestrationStep(BaseModel):
 # ---------------------------------------------------------------------------
 
 class OrchestrationState(TypedDict, total=False):
-    """每个字段是一个 LangGraph channel。换线/故障/客诉/工艺变更共用一套 schema，
+    """每个字段是一个 LangGraph channel。换线/故障/客诉共用一套 schema，
     各场景只装配自己用到的子集。total=False：所有字段可选，节点用 state.get() 取。"""
 
     # 会话标识
@@ -180,11 +179,6 @@ class OrchestrationState(TypedDict, total=False):
     supplier_trace_result: Optional[dict]
     isolation_scope_result: Optional[dict]
     gate_8d_publish: Optional[str]
-
-    # 工艺变更场景
-    qualification_result: Optional[dict]
-    gate_sop_publish: Optional[str]
-    gate_new_route_first_article: Optional[str]
 
     # agent 调用相关
     pending_tool_calls: list[dict]

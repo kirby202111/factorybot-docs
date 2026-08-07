@@ -31,7 +31,6 @@ SCENARIO_MAP: dict[str, ScenarioType] = {
     "changeover": ScenarioType.CHANGEOVER,
     "fault_response": ScenarioType.FAULT_RESPONSE,
     "complaint_8d": ScenarioType.COMPLAINT_8D,
-    "process_change": ScenarioType.PROCESS_CHANGE,
 }
 
 

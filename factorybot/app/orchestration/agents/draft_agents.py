@@ -1,11 +1,11 @@
-"""能力 D：生成类（SOP / 8D / 返工工艺草拟）。开放生成，代码完全做不了。"""
+"""能力 D：生成类（8D / 返工工艺草拟）。开放生成，代码完全做不了。"""
 from __future__ import annotations
 
 from app.infrastructure.ai.react_graph import build_react_graph, to_tenant
 
 
 class DraftAgent:
-    """单个 draft 子能力 agent。capability ∈ draft_sop | draft_8d | draft_rework_craft。"""
+    """单个 draft 子能力 agent。capability ∈ draft_8d | draft_rework_craft。"""
 
     def __init__(self, capability: str, llm, registry, trace_repo, obs, result_compactor=None) -> None:
         self.CAPABILITY = capability
@@ -31,12 +31,6 @@ class DraftAgent:
         return res.get("result") or {"intent": "草拟", "draft_payload": {}, "confidence": "medium"}
 
     def _prompt(self, state: dict) -> str:
-        if self._kind == "draft_sop":
-            return (
-                "你是 MES SOP 草拟 agent。基于工艺升版草拟新 SOP（开放生成）。\n"
-                "输出 JSON：{\"intent\":\"...\",\"draft_payload\":{\"steps\":[],\"params\":{},\"version\":\"...\"},"
-                "\"confidence\":\"high|medium|low\"}"
-            )
         if self._kind == "draft_8d":
             return (
                 "你是 MES 8D 报告草拟 agent。基于追溯链草拟 8D 报告（开放生成）。\n"

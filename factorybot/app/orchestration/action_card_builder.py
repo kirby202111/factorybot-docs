@@ -23,8 +23,6 @@ STEP_WRITES_VIA: dict[str, str] = {
     "RESTART_FIRST_ARTICLE": "none.application.none",
     "ISOLATION_8D": "返工上下文.application.issue_isolation",
     "8D_PUBLISH": "工艺管理上下文.application.publish_sop",
-    "SOP_PUBLISH": "工艺管理上下文.application.publish_sop",
-    "NEW_ROUTE_FIRST_ARTICLE": "过点执行上下文.application.release",
 }
 
 
@@ -47,8 +45,6 @@ def build_action_card(state: dict, step: str, capability: Optional[str] = None) 
         "RESTART_FIRST_ARTICLE": "确认复产首件",
         "ISOLATION_8D": "下达同批次隔离",
         "8D_PUBLISH": "发布 8D 报告",
-        "SOP_PUBLISH": f"发布 {route_id} v{route_ver} 新 SOP",
-        "NEW_ROUTE_FIRST_ARTICLE": "新工艺路线首件放行",
     }
     intent = intent_map.get(step, f"确认 {step}")
 

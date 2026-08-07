@@ -1,6 +1,6 @@
 """场景图声明式装配：ScenarioSpec + ScenarioGraphBuilder。
 
-4 个场景（changeover/fault_response/complaint_8d/process_change）的 build_*_graph 曾各自
+3 个场景（changeover/fault_response/complaint_8d）的 build_*_graph 曾各自
 手写 StateGraph 装配（~80% 雷同）。此处用 dataclass spec 声明节点/边，由 ScenarioGraphBuilder
 统一装配，消除重复；新增场景只需追加一个 ScenarioSpec。
 
@@ -176,33 +176,8 @@ COMPLAINT_8D = ScenarioSpec(
 )
 
 
-PROCESS_CHANGE = ScenarioSpec(
-    name="PROCESS_CHANGE",
-    nodes=[
-        NodeSpec("plan", lambda sup: sup.plan),
-        NodeSpec("draft_sop", lambda sup: sup.run_agent("draft_sop")),
-        NodeSpec("qualification_check", lambda sup: sup.qc.check_operator_qualification),
-        NodeSpec("barrier", lambda sup: sup.barrier),
-        NodeSpec("gate_sop_publish", lambda sup: sup.gate("SOP_PUBLISH", capability="draft_sop")),
-        NodeSpec("gate_new_route_first_article", lambda sup: sup.gate("NEW_ROUTE_FIRST_ARTICLE")),
-        NodeSpec("done", lambda sup: sup.done),
-    ],
-    edges=[
-        EdgeSpec(_START, "plan"),
-        EdgeSpec("plan", ["draft_sop", "qualification_check"]),
-        EdgeSpec("draft_sop", "barrier"),
-        EdgeSpec("qualification_check", "barrier"),
-        EdgeSpec("barrier", "gate_sop_publish"),
-        EdgeSpec("gate_sop_publish", "gate_new_route_first_article"),
-        EdgeSpec("gate_new_route_first_article", "done"),
-        EdgeSpec("done", _END),
-    ],
-)
-
-
 SCENARIO_SPECS: dict[str, ScenarioSpec] = {
     "CHANGEOVER": CHANGEOVER,
     "FAULT_RESPONSE": FAULT_RESPONSE,
     "COMPLAINT_8D": COMPLAINT_8D,
-    "PROCESS_CHANGE": PROCESS_CHANGE,
 }

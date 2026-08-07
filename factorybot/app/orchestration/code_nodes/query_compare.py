@@ -106,11 +106,3 @@ class QueryCompareNodes:
 
     async def determine_isolation_scope(self, state: dict) -> dict:
         return {"isolation_scope_result": {"batches": [], "reason": "determined_by_code"}}
-
-    # ---- 工艺变更场景 ----
-    async def check_operator_qualification(self, state: dict) -> dict:
-        tenant = self._tenant(state)
-        res = await self._route_acl.check_qualification(
-            state["target_route_id"], state["target_route_version"], tenant,
-        )
-        return {"qualification_result": res.model_dump()}

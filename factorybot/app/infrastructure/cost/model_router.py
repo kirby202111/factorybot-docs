@@ -21,7 +21,6 @@ class ModelRouter:
         "root_cause": "claude-sonnet-5",         # 编排 能力 A
         "fault_impact": "claude-sonnet-5",       # 编排 能力 B
         "traceability": "claude-sonnet-5",       # 编排 能力 C
-        "draft_sop": "claude-sonnet-5",          # 编排 能力 D
         "entry_router": "haiku",                 # 入口路由分流（便宜分类器）
         "fallback": "deepseek",                  # cascading 降级
     }

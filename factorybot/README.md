@@ -48,7 +48,7 @@ factorybot/
 | `POST /agent/diagnose` | 诊断 | 诊断，返回 `DiagnosisReport`（含 `subgraph_ref`） |
 | `POST /agent/draft` | 草稿 | 草拟处置，返回 `Draft`（`requires_confirmation=True`） |
 | `GET /agent/draft/{id}/evidence` | 草稿 | 回溯草稿证据 |
-| `POST /agent/orchestration/{scenario}/start` | 编排 | 启动编排（changeover/fault_response/complaint_8d/process_change） |
+| `POST /agent/orchestration/{scenario}/start` | 编排 | 启动编排（changeover/fault_response/complaint_8d） |
 | `POST /agent/orchestration/{session_id}/confirm` | 编排 | gate 确认，`Command(resume=token)` 续跑 |
 | `GET /agent/orchestration/{session_id}/state` | 编排 | 查会话状态（调试用） |
 

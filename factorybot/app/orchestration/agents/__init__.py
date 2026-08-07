@@ -38,7 +38,6 @@ def build_agent_registry(
     reg.register(RootCauseAgent(llm, orchestration_registry, trace_repo, obs, result_compactor))         # A
     reg.register(FaultImpactAgent(llm, orchestration_registry, trace_repo, obs, result_compactor))       # B
     reg.register(TraceabilityAgent(llm, diagnosis_registry, trace_repo, obs, result_compactor))      # C
-    reg.register(DraftAgent("draft_sop", llm, orchestration_registry, trace_repo, obs, result_compactor))
     reg.register(DraftAgent("draft_8d", llm, orchestration_registry, trace_repo, obs, result_compactor))
     reg.register(DraftAgent("draft_rework_craft", llm, orchestration_registry, trace_repo, obs, result_compactor))
     return reg
