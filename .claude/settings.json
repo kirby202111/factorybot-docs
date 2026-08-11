@@ -24,7 +24,26 @@
       "Bash(bun .claude/tmp_update_overview.cjs)",
       "Bash(echo \"EXIT=$?\")",
       "Bash(unix2dos \"RAG与Agent评测/RAG与Agent评测-设计与实现方案.md\")",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(env)",
+      "Bash(python -c \"import anthropic; print\\('anthropic', anthropic.__version__\\)\")",
+      "Bash(python -c \"import langchain_anthropic; print\\('langchain_anthropic OK'\\)\")",
+      "Bash(python -c \"import langchain_openai; print\\('langchain_openai OK'\\)\")",
+      "Bash(python -c \"import pydantic; print\\('pydantic', pydantic.__version__\\)\")",
+      "Bash(python -c \"import langgraph; print\\('langgraph OK'\\)\")",
+      "Bash(py --version)",
+      "Bash(py -0)",
+      "Bash(d:/Code/factorybot-docs/factorybot/.venv/Scripts/python.exe --version)",
+      "Bash(d:/Code/factorybot-docs/factorybot/.venv/Scripts/python.exe -c 'import anthropic; print\\('\\\\''anthropic'\\\\'', anthropic.__version__\\)')",
+      "Bash(d:/Code/factorybot-docs/factorybot/.venv/Scripts/python.exe -c 'import langchain_anthropic; print\\('\\\\''langchain_anthropic OK'\\\\''\\)')",
+      "Bash(d:/Code/factorybot-docs/factorybot/.venv/Scripts/python.exe -c 'import langchain_openai; print\\('\\\\''langchain_openai OK'\\\\''\\)')",
+      "Bash(d:/Code/factorybot-docs/factorybot/.venv/Scripts/python.exe -c 'import openai; print\\('\\\\''openai'\\\\'', openai.__version__\\)')",
+      "Bash(d:/Code/factorybot-docs/factorybot/.venv/Scripts/python.exe -m pip install 'langchain-openai>=0.1')",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 d:/Code/factorybot-docs/factorybot/.venv/Scripts/python.exe d:/Code/factorybot-docs/factorybot/scripts/project_path_5m1e.py)",
+      "Bash(rm \"d:/Code/factorybot-docs/factorybot/scripts/project_path_5m1e.py\" && echo \"已删除\")"
+    ],
+    "additionalDirectories": [
+      "d:\\Code\\factorybot-docs\\factorybot\\scripts"
     ]
   }
 }
