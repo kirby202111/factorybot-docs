@@ -24,7 +24,18 @@
       "Bash(bun .claude/tmp_update_overview.cjs)",
       "Bash(echo \"EXIT=$?\")",
       "Bash(unix2dos \"RAG与Agent评测/RAG与Agent评测-设计与实现方案.md\")",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Read(//d/Code/LightRAG/lightrag/**)",
+      "Bash(cd /d/Code/LightRAG 2>/dev/null && echo \"=== python req ===\" && grep -E \"requires-python|name = \\\\\"lightrag\\\\\"|version\" pyproject.toml | head -5 && echo \"=== main deps \\(pyproject\\) ===\" && sed -n '/^\\\\[project\\\\]/,/^\\\\[project.optional-dependencies\\\\]/p' pyproject.toml 2>/dev/null | grep -E \"^\\\\\"[a-z]|^\\\\s+\\\\\"[a-z]|^dependencies\" | head -60)",
+      "Read(//d/Code/LightRAG/**)",
+      "Bash(cd /d/Code/LightRAG 2>/dev/null && echo \"=== lightrag/ top-level ===\" && ls -1 lightrag/ && echo \"=== llm/ ===\" && ls -1 lightrag/llm/ 2>/dev/null && echo \"=== api server entry ===\" && ls -1 lightrag/api/ 2>/dev/null && echo \"=== env.example \\(storage/provider keys\\) ===\" && grep -E \"STORAGE|LLM_BINDING|EMBEDDING|_API|_MODEL|HOST|PORT|^[A-Z_]+=\" env.example 2>/dev/null | head -60)",
+      "Bash(cd /d/Code/LightRAG 2>/dev/null && echo \"=== binding/storage keys ===\" && grep -oE \"^\\(LLM_BINDING|EMBEDDING_BINDING|LIGHTRAG_KV_STORAGE|LIGHTRAG_VECTOR_STORAGE|LIGHTRAG_GRAPH_STORAGE|LIGHTRAG_DOC_STATUS_STORAGE|SUMMARY_LANGUAGE|MAX_\\)[A-Z_]*\" env.example 2>/dev/null | sort -u && echo \"=== LLM_BINDING vals ===\" && grep -E \"LLM_BINDING=|EMBEDDING_BINDING=|LIGHTRAG_KV_STORAGE=|LIGHTRAG_VECTOR_STORAGE=|LIGHTRAG_GRAPH_STORAGE=\" env.example 2>/dev/null | grep -v \"^#\" | head && echo \"=== optional dep groups ===\" && grep -E \"^\\\\[\\(project.optional-dependencies|dependency-groups\\)\\\\]|^[a-z_-]+ = \\\\[\" pyproject.toml 2>/dev/null | head -40)",
+      "Bash(sed -n '/^api = \\\\[/,/^\\\\]/p' pyproject.toml)",
+      "Bash(sed -n '/^observability = \\\\[/,/^\\\\]/p' pyproject.toml)",
+      "Bash(sed -n '/^dependencies = \\\\[/,/^\\\\]/p' d:/Code/factorybot-docs/FactoryRAG/pyproject.toml)"
+    ],
+    "additionalDirectories": [
+      "d:\\Code\\factorybot-docs"
     ]
   }
 }
