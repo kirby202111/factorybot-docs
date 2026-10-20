@@ -35,7 +35,7 @@
       "Bash(sed -n '/^dependencies = \\\\[/,/^\\\\]/p' d:/Code/factorybot-docs/FactoryRAG/pyproject.toml)"
     ],
     "additionalDirectories": [
-      "d:\\Code\\factorybot-docs"
-    ]
+    
+    ],
   }
 }
