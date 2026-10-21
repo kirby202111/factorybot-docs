@@ -22,10 +22,10 @@
 |---|------|------|
 | 1 | 模块化单体 + 共享内核（Shared Kernel） | 三路线基础设施 90% 同构，合并单服务消除重复基类 |
 | 2 | 可拆性是硬约束 | 路线间调用走 `shared/acl/` Port/Adapter，拆服务只换 Adapter 绑定 |
-| 3 | 多存储共存于单进程 | Neo4j/ChromaDB/MySQL/Redis/MinIO 共存，Port 隔离故障域，按路线降级 |
+| 3 | 多存储共存于单进程 | Neo4j/ChromaDB/MySQL/Redis 共存，Port 隔离故障域，按路线降级 |
 | 4 | 只读红线靠启动断言兜底 | 统一 `ReadOnly*Gate` 在 lifespan 启动期扫描，发现写动作即拒绝启动 |
 | 5 | **选型收敛到一张表，解决三路线版本漂移** | 三路线文档各自钉死版本且存在不一致（LangGraph 0.1+ vs ≥0.2）；本文以共享内核为权威收敛口径，路线文档以本文为准回填 |
-| 6 | **B 向量库选 ChromaDB（而非 PGVector/专用向量库）** | 车间 ToB 文档量小 + 查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值）+ 求开发简；chunk 不可变绕开多记录事务弱点，MinIO 重建兜底备份弱。详见 §1.2 |
+| 6 | **B 向量库选 ChromaDB（而非 PGVector/专用向量库）** | 车间 ToB 文档量小 + 查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值）+ 求开发简；chunk 不可变绕开多记录事务弱点。详见 §1.2 |
 
 > 不选多服务的理由见整体结构设计 §0 末。选型层同样遵循"先收敛、再灰度引入（B -> A -> E）"。
 
@@ -56,7 +56,6 @@
 | MySQL 驱动 | SQLAlchemy 2.0 async + asyncmy | 2.0+，asyncmy ≥0.2.9 | shared / A / E / B | shared |
 | ORM 基类 | SQLAlchemy 2.0 `DeclarativeBase` | 2.0+ | `shared/persistence/base.py`，MySQL | shared |
 | 迁移工具 | Alembic | 1.13+ | 统一管 MySQL 多 schema（Neo4j/ChromaDB 除外） | shared |
-| 对象存储 | MinIO（S3 兼容，path-style-access） | minio-py ≥7.2 | B 原始文档文件（向量库可从 MinIO 重建） | B |
 | 缓存 | Redis | 7（镜像 `redis:7-alpine`） | A 子图缓存 / B 检索缓存 / E 查询缓存 | shared / A / B / E |
 | Redis 客户端 | redis-py（async） | 5.0+ | | shared |
 | 消息中间件 | Kafka + aiokafka | aiokafka 0.10+ | 领域事件消费（A 图投影 / B 重索引） | shared/kafka |
@@ -73,7 +72,7 @@
 
 > **默认 LLM provider（路线级，经 `llm_factory` 统一切换）**：A = DeepSeek，B = 通义千问（qwen-plus），E = DeepSeek。三者均 provider 无关、可插拔，任何模型降级须过 mes-eval `EvalGate`（成本优化横切归 agent-service，rag-service 仅 E 路由图按需引用）。
 >
-> **B 向量库选型说明**：ChromaDB 嵌入式 persistent client 跟随 rag-service 进程，**无需独立向量库 service**；原始文档留 MinIO，向量库可从 MinIO 重建（备份兜底）。详见 §1.2。
+> **B 向量库选型说明**：ChromaDB 嵌入式 persistent client 跟随 rag-service 进程，**无需独立向量库 service**；原始文档与向量库分离存储，向量库可重跑摄入管线重建（备份兜底）。详见 §1.2。
 
 ### 1.2 选型理由（关键项）
 
@@ -87,7 +86,7 @@
 - ChromaDB 里根本没有"批量翻转"这个操作，多记录事务弱点直接消失；这本身也符合 B 详细设计 §4.4"版本即不可变快照、旧版不删可回溯"的语义。
 
 代价（已知接受）：
-- HA / 备份弱（无 PITR）-> 用"**可重建**"兜底：原始文档留 MinIO，ChromaDB Parquet 文件定期备份，向量库可从 MinIO 原始文件 + chunk 策略重建；
+- HA / 备份弱（无 PITR）-> 用"**可重建**"兜底：ChromaDB Parquet 文件定期备份，向量库可从原始文件 + chunk 策略重建；
 - 无聚合查询（只有 count）-> 治理 / 审计聚合（`GROUP BY`）导出到 MySQL 做（幂等 / 位点 / 审计表本就在 MySQL）；
 - 规模上限 -> 文档少不触发；
 - 单写者并发 -> 重索引量小可接受。
@@ -98,7 +97,7 @@
 > 1. **强制带版本**：`DocumentRetrievalService` 入口校验版本锚点必填（工艺绑定型需 ROUTE 锚点 `version`+`version_kind="route"`），缺失拒绝，不退回"查最新 ACTIVE"--避开"在制品不切换工艺"语义陷阱（工单绑 v3，最新 ACTIVE 是 v4，退回查 v4 会答出不适用 SOP）。设备绑定型需 ASSET 锚点（`version_ref_id` 必填，`version` 可选），通用知识型可选（标准可带 STANDARD 锚点）。版本锚点统一为 `VersionAnchor(kind, ref_id, version)`，覆盖 route/bom/rule/asset/standard。
 > 2. **chunk 不可变**：升版 = 追加新版本 chunk，不改老 chunk。
 > 3. **单条软删可接受**：文档撤回 / 废弃是单条 upsert 改 `state=DEPRECATED`（ChromaDB 单条原子），区别于"批量翻转"（不行）。
-> 4. **备份兜底**：MinIO 留原始文件，ChromaDB 可重建。
+> 4. **备份兜底**：ChromaDB Parquet 定期备份，可重跑摄入管线重建。
 > 5. **聚合导出 MySQL**：治理 / 审计聚合在 MySQL 做。
 > 6. **重索引幂等**：`event_id` + `(doc_id, version_id, chunk_seq)` 去重，可重跑。
 
@@ -165,7 +164,6 @@ llama-index = ">=0.10"                                  # [A/B]
 # ── B 文档型 ──
 chromadb = ">=0.5"                                      # [B] 嵌入式向量库
 llama-index-vector-stores-chroma = ">=0.2"              # [B] LlamaIndex Chroma 适配
-minio = ">=7.2"                                         # [B] 原始文档对象存储
 unstructured = ">=0.14"                                 # [B] 文档解析
 pypdf = ">=4.0"                                         # [B]
 python-docx = ">=1.1"                                   # [B]
@@ -190,14 +188,13 @@ services:
       RAG_MYSQL__DSN: mysql+asyncmy://rag:rag@mysql:3306/rag
       RAG_REDIS__URL: redis://redis:6379/0
       RAG_KAFKA__BOOTSTRAP: kafka:9092
-      RAG_MINIO__ENDPOINT: minio:9000
       RAG_CHROMA__PERSIST_DIR: /data/chroma   # ChromaDB 嵌入式 Parquet 持久化
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # 路线级开关（灰度引入：先 B 再 A，E 收口）
       RAG_DOCUMENT__ENABLED: "true"
       RAG_TRACEABILITY__ENABLED: "false"
       RAG_AGENTIC__ENABLED: "false"
-    depends_on: [neo4j, mysql, redis, kafka, minio, bge-inference]
+    depends_on: [neo4j, mysql, redis, kafka, bge-inference]
     volumes: ["chromadata:/data/chroma"]
     ports: ["8000:8000"]
 
@@ -208,7 +205,6 @@ services:
   neo4j:        { image: "neo4j:5.20", environment: { NEO4J_AUTH: neo4j/rag } }
   mysql:        { image: "mysql:8.0", environment: { MYSQL_ROOT_PASSWORD: rag, MYSQL_DATABASE: rag } }
   redis:        { image: "redis:7-alpine" }
-  minio:        { image: "minio/minio", command: "server /data --console-address ':9001'" }
 
 volumes:
   chromadata:
@@ -627,7 +623,7 @@ class ChromaCollectionInitializer:
 
 **各路线独有、不上移**（保留在 `routes/<route>/infrastructure/`）：
 - A：`neo4j/`（driver/schema/retriever/projections）、`rag/graph_index.py`
-- B：`chromadb/`（client/schema/retriever/document_repo）、`minio_/object_store.py`、`rag/index.py`
+- B：`chromadb/`（client/schema/retriever/document_repo）、`rag/index.py`
 - E：`ai/route_graph_builder.py`（LangGraph 路由图）
 
 ### 6.3 路线文档同步修订清单
@@ -669,9 +665,9 @@ class ChromaCollectionInitializer:
 
 ### 7.2 阶段一：共享内核 + 单服务骨架 + B 文档型
 
-- **交付物**：`shared/`（ai/embedding/obs/config/kafka/acl/persistence/tenant/web/events）骨架 + `main.py`/lifespan/健康检查/DI 容器；B 路线投影到 `routes/document/`（含 ChromaDB 嵌入式 collection、chunk 不可变、强制带版本、决策 #3 联动 PUBLISHED、决策 #2 双轨字段）；Alembic 管 `rag_shared`/`rag_doc`（MySQL）；`/rag/docs/{query,search,ingest}` 端点；`ReadOnlyIngestionGate` + `ReadOnlyAclGate` 启动断言；MinIO 原始文件 + ChromaDB Parquet 备份。
-- **依赖**：MinIO、MySQL、Redis、Kafka、bge-inference 就绪；B 实现方案 §11 阶段一交付物。
-- **退出标准**：B 评测集（`mes_eval/infrastructure/targets/doc_rag.py`）通过；版本锚点过滤（`version`+`version_kind` 强制带）金标准用例全绿；`/ready` 报 ChromaDB/MySQL/Redis/Kafka 全通；只读断言在启动期生效；ChromaDB 从 MinIO 重建演练通过。
+- **交付物**：`shared/`（ai/embedding/obs/config/kafka/acl/persistence/tenant/web/events）骨架 + `main.py`/lifespan/健康检查/DI 容器；B 路线投影到 `routes/document/`（含 ChromaDB 嵌入式 collection、chunk 不可变、强制带版本、决策 #3 联动 PUBLISHED、决策 #2 双轨字段）；Alembic 管 `rag_shared`/`rag_doc`（MySQL）；`/rag/docs/{query,search,ingest}` 端点；`ReadOnlyIngestionGate` + `ReadOnlyAclGate` 启动断言；ChromaDB Parquet 备份。
+- **依赖**：MySQL、Redis、Kafka、bge-inference 就绪；B 实现方案 §11 阶段一交付物。
+- **退出标准**：B 评测集（`mes_eval/infrastructure/targets/doc_rag.py`）通过；版本锚点过滤（`version`+`version_kind` 强制带）金标准用例全绿；`/ready` 报 ChromaDB/MySQL/Redis/Kafka 全通；只读断言在启动期生效；ChromaDB 重建演练通过。
 
 ### 7.3 阶段二：A 追溯型
 
@@ -763,7 +759,7 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 ### 9.3 兜底
 
 - **存储故障域隔离**：Neo4j/ChromaDB/MySQL/Redis 任一不可用，对应路线降级（返回 503），不拖垮其他路线（§3.3）。
-- **ChromaDB 重建兜底**：ChromaDB 数据丢失/损坏时，从 MinIO 原始文件 + chunk 策略 + 事件回放重建向量库（chunk 不可变使重建幂等）。
+- **ChromaDB 重建兜底**：ChromaDB 数据丢失/损坏时，从原始文件 + chunk 策略 + 事件回放重建向量库（chunk 不可变使重建幂等）。
 - **低置信转人工**：与 MES 防错理念一致--宁可拦下让人判，不可错放。LLM 综合低置信度时返回"建议转人工/转规则引擎"，不硬答。
 - **版本失效保护**：检索强制带版本锚点（`version`+`version_kind`） 过滤（入口校验），物理杜绝失效工艺泄漏（安全红线，评测 CI 硬门禁）。
 
@@ -783,7 +779,7 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 - **Port/Adapter InProcess**：A -> B（`DocRagPort`）+ E -> A/B 全链路单服务内调用。
 - **Kafka 投影幂等**：重复投递同一 `event_id`，断言图/索引不重复写入（A 实现方案 §12.1）。
 - **多 DB 就绪**：lifespan 启动期就绪探测 + 按路线降级（拔 Neo4j，断言 A 返回 503、B 正常；拔 ChromaDB，断言 B 返回 503、A 正常）。
-- **ChromaDB 重建**：删 ChromaDB 持久化目录，从 MinIO 重建，断言检索结果一致。
+- **ChromaDB 重建**：删 ChromaDB 持久化目录，重跑摄入管线重建，断言检索结果一致。
 - **版本一致性**：工艺升版后图快照边更新 + `rag.reindex.request` 触发 B 重索引（A 实现方案 §12.2）；B 侧老 chunk 不变、新版本 chunk 追加、查询带版本隔离。
 
 ### 10.3 契约测试
@@ -816,7 +812,7 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 | 6 | 可拆性退化（路线间偷偷直 import） | 未来拆服务需大改 | 阶段四可拆性演练（换 Http Adapter 跑通）+ CI 禁止直 import | §7.5 / §8.1 |
 | 7 | 图投影滞后导致追溯不准 | 5M1E 召回不全 | `rag_projection_lag_ms` 指标告警 + MES 只读 REST 降级补齐 | §8.3 / §9.1 |
 | 8 | 决策 #3 联动 PUBLISHED 误发未审文档 | 未审 SOP 随工艺生效 | 责任归工艺 owner（工艺 owner 即文档 owner）；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED | 决策 #3 |
-| 9 | **ChromaDB 数据丢失/损坏（无 PITR）** | B 检索不可用 | MinIO 原始文件 + chunk 策略 + 事件回放重建（chunk 不可变使重建幂等）；Parquet 定期备份 | §1.2 / §9.3 |
+| 9 | **ChromaDB 数据丢失/损坏（无 PITR）** | B 检索不可用 | 原始文件 + chunk 策略 + 事件回放重建（chunk 不可变使重建幂等）；Parquet 定期备份 | §1.2 / §9.3 |
 | 10 | **ChromaDB 单写者并发（重索引阻塞查询）** | 重索引期间 B 检索超时 | 文档量小、重索引量小可接受；重索引走异步 consumer + 查询侧超时降级 | §1.2 |
 | 11 | **强制带版本被绕过（调用方不带版本锚点退回查最新）** | 答出不适用工艺 SOP | 入口校验拒绝 + 契约测试 + 评测安全红线 | §1.2 / §10.3 |
 
@@ -837,7 +833,7 @@ rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版�
 - [ ] 路线级开关 `rag.<route>.enabled` 控制 router/consumer 启停，灰度顺序 B -> A -> E
 - [ ] 多 DB 故障域隔离：任一 DB 不可用只降级对应路线，不拖垮其他
 - [ ] **B 向量库 ChromaDB：chunk 不可变 + 强制带版本锚点（`version`+`version_kind`）（入口校验）+ 检索 `where` pre-filter**
-- [ ] **B 备份兜底：MinIO 留原始文件，ChromaDB 可重建（重建演练通过）+ Parquet 定期备份**
+- [ ] **B 备份兜底：ChromaDB 可重建（重建演练通过）+ Parquet 定期备份**
 - [ ] traceparent 全链路：E -> L1 -> A/B/MES 同源 `trace_id` 在 Tempo 可见（决策 #1）
 - [ ] 版本一致性三段传递链：图快照边 -> L1 evidence -> L2 Draft -> MES 校验 ACTIVE
 - [ ] B 审核流联动 PUBLISHED 落地，去掉 SUBMITTED/PENDING_REBIND 中间态（决策 #3）
@@ -861,13 +857,13 @@ A：不靠自觉，靠启动断言兜底。统一的 `ReadOnly*Gate` 体系在 l
 A：不会。每条存储链路在 `shared/persistence/` 与各路线 `infrastructure/` 间用 Port 隔离，lifespan 启动期做就绪探测，任一不可用按路线降级--Neo4j 崩只让 A 返回 503，ChromaDB 崩只让 B 返回 503，其他路线照常。故障域不扩散是硬约束，不是运维自觉。
 
 **Q：B 文档型为什么选 ChromaDB 而不是 PGVector / Milvus？**
-A：三个前提：车间 ToB 文档量小（数千文档/数十万 chunk 以内）、工艺路线查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB 的 `where` 能做且 pre-filter）、求开发简（嵌入式零额外服务、LlamaIndex 集成最成熟、少装一套 PG+pgvector+asyncpg）。核心是 chunk 不可变--写入后不改，工艺升版追加新版本 chunk 而非翻转老 chunk，查询带版本锚点天然隔离，直接绕开 ChromaDB 多记录翻转无事务的弱点。代价是 HA/备份弱，用 MinIO 原始文件可重建兜底。PGVector 的 SQL 过滤/同库事务优势在"等值版本过滤 + chunk 不可变"场景下不再决定性，ChromaDB 的简大于其弱。
+A：三个前提：车间 ToB 文档量小（数千文档/数十万 chunk 以内）、工艺路线查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB 的 `where` 能做且 pre-filter）、求开发简（嵌入式零额外服务、LlamaIndex 集成最成熟、少装一套 PG+pgvector+asyncpg）。核心是 chunk 不可变--写入后不改，工艺升版追加新版本 chunk 而非翻转老 chunk，查询带版本锚点天然隔离，直接绕开 ChromaDB 多记录翻转无事务的弱点。代价是 HA/备份弱，用原始文件可重建兜底。PGVector 的 SQL 过滤/同库事务优势在"等值版本过滤 + chunk 不可变"场景下不再决定性，ChromaDB 的简大于其弱。
 
 **Q：ChromaDB 没有事务，工艺升版时老 SOP 状态翻转怎么办？**
 A：不翻转。chunk 不可变--老版本 chunk 的版本锚点（`version`+`version_kind`）一直是 v3/route，写入后不改；工艺升版到 v4 时追加 v4 的新 chunk，查询带 `version_kind="route"`+`version=v3` 天然只召回 v3、带 v4 只召回 v4。ChromaDB 里根本没有"批量翻转"这个操作，多记录事务弱点直接消失。文档撤回是单条 upsert 改 `state`（单条原子，ChromaDB 能做），区别于"批量翻转"（不做）。
 
 **Q：ChromaDB 数据丢了怎么办？没 PITR。**
-A：可重建兜底。原始文档文件一直在 MinIO，chunk 切分策略是确定性的，重索引事件幂等（`event_id` + `doc_id+version+chunk_seq` 去重）--从 MinIO 原始文件 + chunk 策略 + 事件回放就能重建整个向量库。chunk 不可变让重建幂等（不会产生重复 chunk）。再加 Parquet 定期备份。车间文档量小，重建成本可接受。
+A：可重建兜底。原始文档文件一直在对象存储，chunk 切分策略是确定性的，重索引事件幂等（`event_id` + `doc_id+version+chunk_seq` 去重）--从原始文件 + chunk 策略 + 事件回放就能重建整个向量库。chunk 不可变让重建幂等（不会产生重复 chunk）。再加 Parquet 定期备份。车间文档量小，重建成本可接受。
 
 **Q：迁移期怎么不破坏既有路线文档？**
 A：三路线实现方案现在写成独立服务包结构，是"被取代的旧视角"。我按整体结构设计 §11 的迁移映射逐路线投影（B -> A -> E），每条路线投影后跑该路线评测集回归确认行为不变，并同步修订路线文档（补"投影到 §2/§11"、LangGraph 版本统一、决策 #3 联动 PUBLISHED、B 向量库 ChromaDB 改造）。决策 #3 与 ChromaDB 改造解耦--决策 #3 改 version 层状态机，ChromaDB 改存储层 chunk 不可变，两者独立可并行。
@@ -879,4 +875,4 @@ A：工艺绑定型文档（SOP/检验标准）的生效边界应与工艺路线
 
 ## 14. 一句话定位
 
-"rag-service 用单服务 + 共享内核承载 A/B/E 三路线，技术选型收敛到一张表解决三路线版本漂移；B 向量库选 ChromaDB（车间文档少 + 强制带版本锚点（`version`+`version_kind`） + chunk 不可变绕开多记录事务弱点 + MinIO 重建兜底），落地按'共享内核先建 -> B -> A -> E 收口'灰度推进；只读红线靠 `ReadOnly*Gate` 启动断言兜底，多 DB 按 Port 隔离故障域，路线间走 Port/Adapter 保留零成本可拆性--把'现在单服务、将来可拆'从口号变成结构属性。"
+"rag-service 用单服务 + 共享内核承载 A/B/E 三路线，技术选型收敛到一张表解决三路线版本漂移；B 向量库选 ChromaDB（车间文档少 + 强制带版本锚点（`version`+`version_kind`） + chunk 不可变绕开多记录事务弱点），落地按'共享内核先建 -> B -> A -> E 收口'灰度推进；只读红线靠 `ReadOnly*Gate` 启动断言兜底，多 DB 按 Port 隔离故障域，路线间走 Port/Adapter 保留零成本可拆性--把'现在单服务、将来可拆'从口号变成结构属性。"

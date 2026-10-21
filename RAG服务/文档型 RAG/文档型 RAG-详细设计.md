@@ -71,7 +71,6 @@
 | HTTP 客户端 | **httpx**（异步） | 降级查询各上下文只读 REST（查文档与领域版本的绑定关系） |
 | 消息 | **aiokafka** | 订阅领域事件（`process.*` / `material.*` / `quality.*`）触发重索引，异步非阻塞 |
 | 元数据持久化 | **ChromaDB client**（向量+元数据）+ **MySQL**（幂等/位点/审计表） | ChromaDB 存向量 + chunk 元数据（`version_kind` / `version_ref_id` / `version` / `state` / `tenant_scope` / `doc_id` / `doc_type` / `chunk_seq` / `locator`）；MySQL 存储幂等表、位点表、审计表（治理/审计 GROUP BY 聚合在 MySQL 做，ChromaDB 无聚合查询） |
-| 对象存储 | **MinIO**（与既有 [MinIO配置说明.md](../../实现说明/基础设施/MinIO配置说明.md) 一致） | 原始文档文件（PDF / Word / 图片）存对象存储，向量库只存文本 chunk + 向量 + 定位 |
 | 缓存 | **redis-py (async)** | 检索结果短期缓存（同 query + 版本 + 租户命中即用） |
 | 可观测 | **OpenTelemetry Python** + `prometheus-client` | trace 串联、指标告警 |
 | 配置 | pydantic-settings | 环境变量 / 配置文件统一管理 |
@@ -94,11 +93,11 @@
 | 标量过滤 | `where={"state":"PUBLISHED","version_kind":"route","version":rv,"tenant_scope":{"$in":scopes}}` pre-filter，等值+IN 够用 | 完整 SQL，表达力最强 | 标量字段过滤，复杂组合表达力弱于 SQL |
 | 元数据与向量一致性 | 元数据与向量同 collection，ChromaDB 单条原子 upsert；chunk 不可变绕开多记录翻转无事务 | 同库同事务，原子提交 | 元数据与向量常分库，跨库一致性需额外保证 |
 | 检索吞吐 | 数十万 chunk + 等值 pre-filter 足够 | 数百万级 chunk 足够 | 千万级以上向量 + 高 QPS 时更优 |
-| HA / 备份 | **弱**：Parquet 持久化 + MinIO 原始文件重建兜底（§5.6） | PostgreSQL 原生 HA/备份成熟 | 各库自带 HA 方案 |
+| HA / 备份 | **弱**：Parquet 持久化（§5.6） | PostgreSQL 原生 HA/备份成熟 | 各库自带 HA 方案 |
 | 聚合查询 | **无**：治理/审计聚合导出 MySQL（幂等/位点/审计表本就在 MySQL） | SQL GROUP BY 同库完成 | 各库自带聚合能力 |
 | 规模上限 | 数十万 chunk 以内舒适，文档少不触发 | 数百万 chunk 可扩展 | 千万级以上 |
 
-代价：HA/备份弱（MinIO 重建兜底）、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。
+代价：HA/备份弱、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。
 
 对比结论：在文档少 + 强制带版本 + 求简的前提下，**ChromaDB 的简大于其弱**；PGVector 的 SQL 过滤 / 同库事务优势在本场景（等值版本过滤 + chunk 不可变）不再决定性。Milvus / Qdrant 保留为"未来甜区备选"（文档量或 QPS 上到专用向量库甜区时切换，LlamaIndex `VectorStoreIndex` 抽象保证切换成本可控）。
 
@@ -114,7 +113,7 @@
 ### 2.5 部署形态（车间网隔离）
 
 - 车间网络常与办公网隔离（[RAG服务引入路线.md](../RAG服务引入路线.md) §4 硬约束）。**建议**：向量库（ChromaDB）与 Embedding（bge-m3）/ Rerank（bge-reranker）本地化部署，LLM 视车间安全策略二选一--云端 API（质量高、需出网）或本地化模型（离线、质量折衷）。`BaseChatModel` 抽象保证两者切换零代码改动。
-- 原始文档文件（PDF / Word / 图片）存 MinIO（与既有对象存储一致），向量库只存文本 chunk + 向量 + 定位（页码 / 段落偏移），避免大文件进 ChromaDB。
+- 原始文档文件（PDF / Word / 图片）不入向量库，ChromaDB 只存文本 chunk + 向量 + 定位（页码 / 段落偏移），避免大文件进 ChromaDB。
 - 车间网若严格离线，LLM 走本地化模型（如 Qwen / DeepSeek 本地部署），bge-m3 / bge-reranker 本地 GPU 或 CPU 推理均可（文档型对延迟不敏感，CPU 推理可接受）。
 
 ---
@@ -137,11 +136,11 @@
 │  │ Service           │  │ (ChromaDB where     │  │ Synth    │ │
 │  │ 解析->切分->向量化 │  │  pre-filter)        │  └──────────┘ │
 │  └────────┬──────────┘  └──────────┬──────────┘              │
-│           │                        ▼                            │
-│  ┌────────▼────────┐        ┌──────────────────┐                │
-│  │ ReindexCoordinator│       │ MinIO            │                │
-│  │ 事件 -> 重索引/绑定 │       │ (原始文档文件)    │                │
-│  └────────┬────────┘        └──────────────────┘                │
+│           │                                                 │
+│  ┌────────▼────────┐                                        │
+│  │ ReindexCoordinator│                                       │
+│  │ 事件 -> 重索引/绑定 │                                       │
+│  └────────┬────────┘                                        │
 │           │                                                        │
 │  ┌────────▼──────────────────────────────────────┐               │
 │  │ ChromaDB（persistent client，Parquet 持久化）    │               │
@@ -172,7 +171,7 @@
 
 ### 3.1 关键设计决策
 
-- **文档库即 RAG 自有读模型**：`knowledge_document` / `document_version` / `document_chunk` 归 RAG 服务自有，是文档领域事件的投影。事实源是文档本身（MinIO 原始文件）+ 领域版本（MES 聚合根）；文档库崩溃不影响生产，重建即可（文档文件 + 事件回放）。
+- **文档库即 RAG 自有读模型**：`knowledge_document` / `document_version` / `document_chunk` 归 RAG 服务自有，是文档领域事件的投影。事实源是文档本身（原始文件）+ 领域版本（MES 聚合根）；文档库崩溃不影响生产，重建即可（文档文件 + 事件回放）。
 - **摄入与检索分离**：`DocumentIngestionService`（写：解析+切分+向量化+持久化）与 `VectorRetriever`（读：向量检索+过滤）解耦，摄入滞后不阻塞检索--检索带 `version` + `status=PUBLISHED` 过滤，未生效的新版本天然不召回。
 - **版本治理三道闸**：① 摄入闸（文档版本绑定领域版本，状态机管控生效）；② 重索引闸（领域事件驱动文档状态流转 / 重新绑定）；③ 检索闸（向量检索带 `version` + `status` 前置过滤）。不靠口头约束（§5.4 / §6.2）。
 - **元数据与向量同 collection**：ChromaDB 让文档版本 / 生效状态 / 租户 / 绑定关系与向量同存，组合过滤走 `where` pre-filter--这是版本治理能兜住的技术根基。chunk 不可变（写入后 metadata 固定），工艺升版追加新版本 chunk 而非翻转老 chunk，版本隔离靠查询过滤 `where version_kind`+`version`（§2.3 / §5.3）。
@@ -211,7 +210,7 @@ KnowledgeDocument（聚合根）
        ├─ version_no            版本号
        ├─ state                 版本状态（DRAFT/SUBMITTED/PUBLISHED/DEPRECATED/ARCHIVED）
        ├─ source                DocumentSource（值对象：上传 / 同步 / 来源系统）
-       ├─ file_ref              原始文件 MinIO URI
+       ├─ file_ref              原始文件 URI
        ├─ effective_at          生效时间
        ├─ deprecated_at         废弃时间
        ├─ DocumentBinding（值对象，绑定关系集合）
@@ -293,11 +292,11 @@ stateDiagram-v2
 ### 5.1 摄入管线
 
 ```text
-原始文档(PDF/Word/HTML/MD) ──▶ MinIO(file_ref)
+原始文档(PDF/Word/HTML/MD)
         │
         ▼
 DocumentIngestionService
-  ├─ 1. 加载：从 MinIO 拉原始文件
+  ├─ 1. 加载：读取原始文件
   ├─ 2. 解析：unstructured / pypdf / python-docx -> 结构化文本(带标题层级)
   ├─ 3. 切分：LlamaIndex NodeParser（按文档类型选策略，§5.2）
   ├─ 4. 向量化：bge-m3 批量 embed 每个 chunk（1024 维）
@@ -355,7 +354,6 @@ DocumentIngestionService
 - **单条软删可接受**：文档撤回/废弃时单条 upsert 改 chunk `state=DEPRECATED`（ChromaDB 单条原子），能做。区别于"批量翻转"（不行）。
 - **绑定字段冗余到 chunk metadata**：`version_kind` / `version_ref_id` / `version` 等从 `DocumentBinding` 冗余到 chunk metadata，ChromaDB `where` pre-filter 直接用，避免跨表查询。
 - **HNSW 索引**：ChromaDB 默认 HNSW（内部实现，不暴露 `m` / `ef_construction` 参数），cosine 距离，数十万 chunk 检索延迟可控。
-- **备份兜底（§5.6）**：原始文档留 MinIO，ChromaDB Parquet 文件定期备份；向量库可从 MinIO 原始文件 + chunk 策略重建。ChromaDB 不可用时从 MinIO 重建，不影响 MES 生产。
 
 ### 5.4 版本治理与重索引（事件驱动）
 
@@ -396,9 +394,9 @@ DocumentIngestionService
 
 ### 5.6 备份与重建
 
-- **原始文件兜底**：原始文档（PDF/Word/图片）存 MinIO，是文档内容的事实源。
-- **ChromaDB Parquet 定期备份**：ChromaDB persistent client 数据以 Parquet 格式持久化，定期备份到 MinIO 或 NAS。
-- **向量库重建**：ChromaDB 不可用时，可从 MinIO 原始文件 + chunk 策略重建整库（`DocumentIngestionService` 重跑摄入管线）。重建过程不依赖 PG 备份。
+- **原始文件兜底**：原始文档（PDF/Word/图片）是文档内容的事实源。
+- **ChromaDB Parquet 定期备份**：ChromaDB persistent client 数据以 Parquet 格式持久化，定期备份到 NAS。
+- **向量库重建**：ChromaDB 不可用时，可从原始文件 + chunk 策略重建整库（`DocumentIngestionService` 重跑摄入管线）。重建过程不依赖 PG 备份。
 - **MySQL 备份**：幂等表、位点表、审计表在 MySQL，按既有 MySQL 备份策略覆盖。
 - **聚合导出 MySQL**：治理/审计类聚合查询（GROUP BY chunk 数、按 doc_type 统计等）在 MySQL 审计表做，ChromaDB 无聚合查询能力。
 
@@ -513,7 +511,7 @@ class DocAnswer(BaseModel):
 
 检索的 chunks 与答案都是**结构化 DTO**（Pydantic 强约束），既给 LLM 综合做上下文，也给 UI 直接渲染引用卡片：
 
-- 每个 citation 带 `locator`（页码 / 偏移 / 标题路径），工程师点击能跳到原文档（MinIO 拉取 + 定位）具体位置。
+- 每个 citation 带 `locator`（页码 / 偏移 / 标题路径），工程师点击能跳到原文档（文件拉取 + 定位）具体位置。
 - `version`+`version_kind` 记录本次检索的版本锚点，答案可溯源"是基于哪个工艺版本的 SOP 答的"。
 
 ### 6.6 与追溯型 RAG、L1 Agent 的协同
@@ -570,7 +568,7 @@ class DocAnswer(BaseModel):
 - **置信度兜底**：`confidence < 0.6` 或无引用 -> `needs_human_review`，不展示给操作工，只推工程师；与 MES 防错理念一致，宁可拦下让人判。
 - **LLM 输出兜底**：`DocAnswer` 经 Pydantic 校验，不符合 schema（无引用 / 字段缺失）判失败重试；重试仍失败转人工，不硬答。
 - **DEPRECATED 泄漏兜底**：`rag_doc_deprecated_leak_total` 应为 0--检索 `where` 强制 `state='PUBLISHED'`，若结果误含 DEPRECATED 文档即告警，说明过滤逻辑有漏洞。
-- **向量库故障兜底**：ChromaDB 不可用时，`/rag/docs/query` 返回 503 + 降级提示，不阻塞 MES 生产；文档库可从 MinIO 原始文件 + chunk 策略重建（ChromaDB Parquet 文件定期备份，原始文件是事实源）。
+- **向量库故障兜底**：ChromaDB 不可用时，`/rag/docs/query` 返回 503 + 降级提示，不阻塞 MES 生产；文档库可从原始文件 + chunk 策略重建（ChromaDB Parquet 文件定期备份，原始文件是事实源）。
 
 ---
 
@@ -631,7 +629,7 @@ class DocAnswer(BaseModel):
 - [ ] 检索结果 `DocAnswer` 结构化，citations 强制引用 `chunk_id` + `locator`，无引用判失败重试。
 - [ ] LLM 输出经 Pydantic `DocAnswer` 校验，失败重试。
 - [ ] `confidence < 0.6` 或无引用 -> `needs_human_review`，不展示给操作工。
-- [ ] 向量库故障返回 503 不阻塞 MES 生产；文档库可从 MinIO 原始文件 + chunk 策略重建（ChromaDB Parquet 定期备份，原始文件是事实源）。
+- [ ] 向量库故障返回 503 不阻塞 MES 生产；文档库可从原始文件 + chunk 策略重建（ChromaDB Parquet 定期备份，原始文件是事实源）。
 - [ ] 所有答案带 disclaimer：来自文档型 RAG，处置需按现行 SOP 确认。
 
 ---
@@ -642,7 +640,7 @@ class DocAnswer(BaseModel):
 A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的工艺路线有版本生命周期（[领域总览.md](../../领域模型/领域总览.md) §5.1），SOP / 作业指导书绑定版本锚点（`version_kind`+`version`+`version_ref_id`）。如果 RAG 检索到一条已失效工艺对应的 SOP 给操作工，会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED）；② 订阅 `ProcessRouteActivated` 等事件触发重索引 / 重新绑定；③ 检索时 ChromaDB 强制 `state="PUBLISHED"` + `version_kind`+`version` 过滤前置。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](../RAG服务引入路线.md) §5 Q&A）。
 
 **Q：为什么选 ChromaDB 而不是 PGVector / Milvus / Qdrant？**
-A：车间 ToB 文档量小（数千文档、数十万 chunk 以内），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成单字段等值），加上 chunk 不可变（写入后不翻转，工艺升版追加新版本 chunk），绕开了 ChromaDB 多记录翻转无事务的弱点。开发极简：嵌入式 persistent client 跟随 rag-service 进程，零额外 DB service，不用装 PG+pgvector+asyncpg+Alembic PG 方言。LlamaIndex `ChromaVectorStore` 是最成熟的向量库集成之一。PGVector 的 SQL 过滤 / 同库事务优势在本场景（等值版本过滤 + chunk 不可变）不再决定性。代价：HA/备份弱（MinIO 重建兜底，原始文件 + chunk 策略可重建整库）、无聚合（治理/审计 GROUP BY 导出 MySQL）、规模上限（文档少不触发）。Milvus/Qdrant 保留为未来甜区备选。一句话：在文档少 + 强制带版本 + 求简的前提下，ChromaDB 的简大于其弱（§2.3）。
+A：车间 ToB 文档量小（数千文档、数十万 chunk 以内），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成单字段等值），加上 chunk 不可变（写入后不翻转，工艺升版追加新版本 chunk），绕开了 ChromaDB 多记录翻转无事务的弱点。开发极简：嵌入式 persistent client 跟随 rag-service 进程，零额外 DB service，不用装 PG+pgvector+asyncpg+Alembic PG 方言。LlamaIndex `ChromaVectorStore` 是最成熟的向量库集成之一。PGVector 的 SQL 过滤 / 同库事务优势在本场景（等值版本过滤 + chunk 不可变）不再决定性。代价：HA/备份弱（原始文件 + chunk 策略可重建整库）、无聚合（治理/审计 GROUP BY 导出 MySQL）、规模上限（文档少不触发）。Milvus/Qdrant 保留为未来甜区备选。一句话：在文档少 + 强制带版本 + 求简的前提下，ChromaDB 的简大于其弱（§2.3）。
 
 **Q：工艺升版了，SOP 怎么跟着变？**
 A：订阅 `ProcessRouteActivated` 事件，关联文档进入 `PENDING_REBIND` 待确认状态，由文档 owner 人工判断：SOP 内容若需变则发新版本绑定新版本锚点（`version`+`version_kind`+`version_ref_id`）；若内容不变则继承绑定（`inherited=true`）。**不自动 PUBLISHED**--因为文档有独立审核流，且"SOP 是否需变"不能靠机器假设，宁可让人确认（§4.4）。旧版本文档 DEPRECATED 不删，历史答案引用仍可点开回溯。这是和通用 RAG 最大的区别：通用 RAG 覆盖更新就丢了历史，本文版本即不可变快照。
@@ -663,7 +661,7 @@ A：文档元数据带 `tenant_scope`（workshop/line），向量检索 ChromaDB
 A：两道防线。一是系统提示词约束"只能基于提供的 chunks 回答，无相关文档则回答'未找到'"；二是 `DocAnswer` 强制引用 `chunk_id`，无引用的答案 Pydantic 校验失败、判失败重试（§6.4）。每个引用带 `locator`（页码/偏移），工程师能点开原文核对。低置信度转人工，不硬答。
 
 **Q：文档库错了或漏了怎么办？**
-A：文档库归 RAG 自有，错了不影响 MES 生产--事实源是 MinIO 原始文件 + 领域版本，向量库崩溃返回 503 不阻塞过点。重建靠 MinIO 原始文件 + 事件回放，无需 MES 配合。所有答案带引用 + 置信度，低置信度转人工，与 MES 防错理念一致。
+A：文档库归 RAG 自有，错了不影响 MES 生产--事实源是原始文件 + 领域版本，向量库崩溃返回 503 不阻塞过点。重建靠原始文件 + 事件回放，无需 MES 配合。所有答案带引用 + 置信度，低置信度转人工，与 MES 防错理念一致。
 
 **Q：上线了吗？**
 A：这是设计阶段的引入规划，不是已落地。重点是版本治理对齐工艺生命周期、ChromaDB 选型用 where pre-filter + chunk 不可变兜版本+权限、重索引由领域事件驱动这三条架构判断。落地按"先 B 后 A"推进（[RAG服务引入路线.md](../RAG服务引入路线.md) §3）--文档型 2–4 周可出 demo，先验证车间可用性。诚实 + 体现架构判断力，比硬吹"已上线文档 RAG"得分高。

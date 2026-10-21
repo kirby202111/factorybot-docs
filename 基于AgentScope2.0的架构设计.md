@@ -141,7 +141,6 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 | **MySQL** | ① 业务可观测表（`tool_call_trace`/`llm_call_log`/`diagnosis_session`/`l3_session` 等）；② 评测表族（`mes_eval` schema）；③ `AgentState` 归档/审计（可选） | **不再需要 LangGraph SqlSaver 三表**；MySQL 退回"业务证据链 + 评测 + 审计" |
 | **Neo4j** | 追溯图投影（属性图 + Cypher），`GraphProjector` 订阅 Kafka 构建 | 不变 |
 | **向量库** | 文档型 RAG 向量检索（路线 B），经 AgentScope **RAG/Embedding** 模块接入 | 检索接入层改由 AgentScope RAG 模块承载 |
-| **MinIO** | 对象存储（基础设施） | 不变 |
 | **SQLAlchemy 2.0 (async) + asyncmy** | MySQL ORM（业务表/评测表） | 不变 |
 
 ### 2.7 消息 / 事件

@@ -70,7 +70,6 @@
 | 数据校验 | **Pydantic** | v2 | 请求 / 文档视图 / 答案 DTO 的 schema 即类型 |
 | HTTP 客户端 | **httpx** | 0.27+（异步） | 降级查询各上下文只读 REST |
 | 消息 | **aiokafka** | 0.10+ | 订阅领域事件触发重索引 |
-| 对象存储 | **MinIO**（`minio` Python SDK） | - | 原始文档文件存储 |
 | 缓存 | **redis-py (async)** | 5.0+ | 检索结果短期缓存 |
 | 可观测 | **OpenTelemetry Python** + `prometheus-client` | - | trace 串联、指标告警 |
 | 配置 | pydantic-settings | 2.0+ | 环境变量统一管理 |
@@ -88,13 +87,13 @@
 - **嵌入式零运维**：ChromaDB persistent client 以 Parquet 持久化，跟随 rag-service 进程，无需独立 DB service。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service。
 - **chunk 不可变**：chunk 写入 ChromaDB 后不再修改（metadata 固定带 `version_kind` / `version_ref_id` / `version` / `state` / `tenant_scope` / `doc_type` / `chunk_seq` / `locator`）。工艺升版时不翻转老 chunk，而是追加新版本 chunk。版本隔离靠查询过滤 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`，老 chunk 保留 PUBLISHED + 老版本锚点，靠 version_kind+version 隔离。
 - **强制带版本**：`DocumentRetrievalService.query` 入口校验 版本锚点必填（`version`+`version_kind`）（工艺绑定型），缺失拒绝，不退回"查最新 ACTIVE"。理由：避开"在制品不切换工艺"语义陷阱。
-- **代价可接受**：HA/备份弱（MinIO 重建兜底）、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。
+- **代价可接受**：HA/备份弱、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。
 
 ### 2.4 部署形态（车间网隔离）
 
 - 向量库（ChromaDB embedded）+ Embedding（bge-m3）+ Rerank（bge-reranker）本地化部署；LLM 视车间安全策略云端 API 或本地化模型二选一，`BaseChatModel` 抽象零代码切换。
-- 原始文档文件存 MinIO（与既有对象存储一致），ChromaDB 只存向量 + metadata，MySQL 存幂等 / 位点。
-- MVP 用 `docker-compose` 本地起 ChromaDB（嵌入式，Parquet 挂卷）+ MinIO + Redis + MySQL + rag-doc-service（§9.9）。
+- 原始文档文件不入向量库，ChromaDB 只存向量 + metadata，MySQL 存幂等 / 位点。
+- MVP 用 `docker-compose` 本地起 ChromaDB（嵌入式，Parquet 挂卷）+ Redis + MySQL + rag-doc-service（§9.9）。
 
 ### 2.5 依赖清单（pyproject.toml 片段）
 
@@ -118,7 +117,6 @@ dependencies = [
   "httpx>=0.27",
   "aiokafka>=0.10",
   "redis>=5.0",
-  "minio>=7.2",
   "opentelemetry-api>=1.24",
   "opentelemetry-instrumentation-fastapi>=0.45b",
   "prometheus-client>=0.20",
@@ -152,11 +150,11 @@ dependencies = [
 │  │ Service           │  │ (ChromaDB where)   │  │ bge-rer  │ │
 │  │ 解析->切分->向量化 │  └──────────┬──────────┘  └──────────┘ │
 │  └────────┬──────────┘             │                          │
-│           │                        ▼                            │
-│  ┌────────▼────────┐        ┌──────────────────┐                │
-│  │ ReindexCoordinator│       │ MinIO            │                │
-│  │ 事件->状态流转/重绑 │       │ (原始文档文件)    │                │
-│  └────────┬────────┘        └──────────────────┘                │
+│           │                                                 │
+│  ┌────────▼────────┐                                        │
+│  │ ReindexCoordinator│                                       │
+│  │ 事件->状态流转/重绑 │                                       │
+│  └────────┬────────┘                                        │
 │           │                                                        │
 │  ┌────────▼──────────────────────────────────────┐               │
 │  │ ChromaDB（嵌入式，Parquet 持久化）                │               │
@@ -253,7 +251,7 @@ CREATE TABLE IF NOT EXISTS document_version (
   version_no         VARCHAR(32)  NOT NULL,
   state              VARCHAR(32)  NOT NULL,  -- DRAFT/SUBMITTED/PUBLISHED/DEPRECATED/ARCHIVED/PENDING_REBIND
   source_type        VARCHAR(32)  NOT NULL,  -- UPLOAD / SYNC
-  file_ref           VARCHAR(512) NOT NULL,  -- MinIO URI
+  file_ref           VARCHAR(512) NOT NULL,  -- 原始文件 URI
   file_content_hash  VARCHAR(64)  NOT NULL,  -- 摄入幂等
   bindings           JSON         NOT NULL,  -- DocumentBinding 集合
   effective_at       DATETIME(3),
@@ -315,12 +313,12 @@ stateDiagram-v2
 ### 5.1 摄入管线
 
 ```text
-原始文档(PDF/Word/MD) ──▶ MinIO(file_ref)
+原始文档(PDF/Word/MD)
         │
         ▼
 DocumentIngestionService.ingest()
   ├─ 1. 计算 file_content_hash，查重（幂等）
-  ├─ 2. 加载：从 MinIO 拉文件
+  ├─ 2. 加载：读取文件
   ├─ 3. 解析：unstructured/pypdf/python-docx -> 结构化文本(标题层级)
   ├─ 4. 切分：按 doc_type 选 NodeParser（§5.2）
   ├─ 5. 向量化：bge-m3 批量 embed（1024 维）
@@ -652,8 +650,6 @@ rag_doc_service/
       acl/                     # 降级查询各上下文只读 REST
         process_management.py
         checkpoint.py
-      minio_/                  # 原始文档文件存储
-        object_store.py
       kafka/                   # aiokafka 消费者（重索引事件）
         consumer_group.py
         listeners.py
@@ -699,7 +695,7 @@ class DocumentIngestionService:
         self._doc_repo = doc_repo; self._idem = idem_repo
 
     async def ingest(self, cmd: IngestCommand, tenant: TenantContext) -> str:
-        # 1. 上传 MinIO + 计算 hash
+        # 1. 上传原始文件 + 计算 hash
         file_ref = await self._store.put(cmd.filename, cmd.content)
         content_hash = sha256(cmd.content)
         # 2. 幂等：同文件不重复摄入
@@ -924,11 +920,6 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "./chroma_data"
     # MySQL（治理/审计聚合，幂等/位点/文档元数据）
     mysql_dsn: str = "mysql+aiomysql://rag:rag@mysql:3306/rag_shared"
-    # MinIO
-    minio_endpoint: str = "minio:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
-    minio_bucket: str = "rag-docs"
     # Redis
     redis_url: str = "redis://redis:6379/0"
     # Kafka
@@ -962,34 +953,23 @@ services:
     ports: ["3306:3306"]
     volumes: ["mysqldata:/var/lib/mysql"]
 
-  minio:
-    image: minio/minio
-    command: server /data
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports: ["9000:9000"]
-    volumes: ["miniodata:/data"]
-
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
 
   rag-doc-service:
     build: .
-    depends_on: [mysql, minio, redis]
+    depends_on: [mysql, redis]
     environment:
       RAG_DOC_CHROMA_PERSIST_DIR: /data/chroma
       RAG_DOC_MYSQL_DSN: mysql+aiomysql://rag:rag@mysql:3306/rag_shared
       RAG_DOC_KAFKA_BOOTSTRAP: kafka:9092
-      RAG_DOC_MINIO_ENDPOINT: minio:9000
       RAG_DOC_REDIS_URL: redis://redis:6379/0
     ports: ["8081:8080"]
     volumes: ["chromadata:/data/chroma"]
 
 volumes:
   mysqldata:
-  miniodata:
   chromadata:
 ```
 
@@ -1026,7 +1006,7 @@ volumes:
 - **置信度兜底**：`confidence < 0.6` 或无引用 -> `needs_human_review`，不展示给操作工。
 - **LLM 输出兜底**：`DocAnswer` 经 Pydantic 校验，无引用 / 字段缺失判失败重试；重试仍失败转人工。
 - **DEPRECATED 泄漏兜底**：`rag_doc_deprecated_leak_total` 应为 0，泄漏即告警（§9.7）。
-- **向量库故障兜底**：ChromaDB 不可用时返回 503，不阻塞 MES 生产；向量库可从 MinIO 原始文件 + 事件回放重建（ChromaDB Parquet 定期备份兜底）。
+- **向量库故障兜底**：ChromaDB 不可用时返回 503，不阻塞 MES 生产；向量库可从原始文件 + 事件回放重建（ChromaDB Parquet 定期备份兜底）。
 
 ---
 
@@ -1091,7 +1071,7 @@ volumes:
 - [ ] 检索结果 `DocAnswer` 结构化，citations 强制引用 `chunk_id` + `locator`，无引用判失败重试。
 - [ ] LLM 输出经 Pydantic `DocAnswer` 校验，失败重试。
 - [ ] `confidence < 0.6` 或无引用 -> `needs_human_review`，不展示给操作工。
-- [ ] 向量库故障返回 503 不阻塞 MES 生产；向量库可从 MinIO 原始文件 + 事件回放重建（ChromaDB Parquet 定期备份兜底）。
+- [ ] 向量库故障返回 503 不阻塞 MES 生产；向量库可从原始文件 + 事件回放重建（ChromaDB Parquet 定期备份兜底）。
 - [ ] 所有答案带 disclaimer：来自文档型 RAG，处置需按现行 SOP 确认。
 - [ ] `ReadOnlyIngestionGate` / `assert_no_raw_data_topic` 启动断言生效（§9.6）。
 
@@ -1103,7 +1083,7 @@ volumes:
 A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的 SOP / 作业指导书绑定版本锚点（`version_kind`+`version`+`version_ref_id`），工艺有版本生命周期（[领域总览.md](../../领域模型/领域总览.md) §5.1）。检索到已失效 SOP 会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED/PENDING_REBIND）；② 订阅 `ProcessRouteActivated` 触发重索引 / 重新绑定；③ 检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 强制过滤 + chunk 不可变。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](../RAG服务引入路线.md) §5 Q&A）。
 
 **Q：为什么选 ChromaDB 而不是 PGVector / Milvus / Qdrant？**
-A：车间 ToB 文档量小（数千文档 / 数十万 chunk），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter），开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点：工艺升版时不翻转老 chunk，而是追加新版本 chunk，版本隔离靠查询 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`。代价：HA/备份弱（MinIO 重建兜底）、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service（§2.3）。
+A：车间 ToB 文档量小（数千文档 / 数十万 chunk），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter），开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点：工艺升版时不翻转老 chunk，而是追加新版本 chunk，版本隔离靠查询 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`。代价：HA/备份弱、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service（§2.3）。
 
 **Q：工艺升版了，SOP 怎么跟着变？**
 A：订阅 `ProcessRouteActivated`，关联文档进入 `PENDING_REBIND` 待确认状态（仅更新 `document_version`，chunk 不可变，检索靠 `version_kind`+`version` 过滤自动隔离），由文档 owner 人工判断：内容需变则发新版本绑定新版本锚点；内容不变则继承绑定（`inherited=true`）。**不自动 PUBLISHED**--"SOP 是否需变"不能靠机器假设，宁可让人确认。旧版本 DEPRECATED 不删，历史答案引用仍可点开（§9.2）。
@@ -1121,7 +1101,7 @@ A：两道防线。一是系统提示词约束"只能基于提供的 chunks 回�
 A：三道闸兜住。① 摄入闸：文档版本有状态机，PUBLISHED 才可检索；② 重索引闸：`ProcessRouteDeprecated` 触发 `document_version` -> DEPRECATED，chunk 不可变但靠 `version_kind`+`version` 过滤隔离；③ 检索闸：ChromaDB `where={"state":"PUBLISHED"}` 强制过滤，DEPRECATED / PENDING_REBIND 不进候选。还有 `rag_doc_deprecated_leak_total` 指标应为 0，泄漏即告警，双保险（§9.7）。
 
 **Q：文档库错了或漏了怎么办？**
-A：文档库归 RAG 自有，错了不影响 MES 生产--事实源是 MinIO 原始文件 + 领域版本，ChromaDB 不可用返回 503 不阻塞过点。重建靠 MinIO 原始文件 + 事件回放（ChromaDB Parquet 定期备份兜底），无需 MES 配合。所有答案带引用 + 置信度，低置信度转人工，与 MES 防错理念一致。
+A：文档库归 RAG 自有，错了不影响 MES 生产--事实源是原始文件 + 领域版本，ChromaDB 不可用返回 503 不阻塞过点。重建靠原始文件 + 事件回放（ChromaDB Parquet 定期备份兜底），无需 MES 配合。所有答案带引用 + 置信度，低置信度转人工，与 MES 防错理念一致。
 
 **Q：上线了吗？**
 A：这是设计阶段的引入规划，不是已落地。重点是版本治理对齐工艺生命周期、ChromaDB 选型用 chunk 不可变 + where pre-filter 兜版本+权限、重索引由领域事件驱动这三条架构判断。落地按"先 B 后 A"推进--文档型 2–4 周可出 demo，先验证车间可用性（[RAG服务引入路线.md](../RAG服务引入路线.md) §3）。诚实 + 体现架构判断力，比硬吹"已上线文档 RAG"得分高。

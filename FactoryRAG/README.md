@@ -19,7 +19,7 @@
 
 | 路线 | 类型 | 入口 | 主存储 | 默认 |
 |------|------|------|--------|------|
-| B | 文档型 | `POST /rag/docs/{query,search,ingest}` | ChromaDB（嵌入式）+ MinIO + MySQL | ✅ 开 |
+| B | 文档型 | `POST /rag/docs/{query,search,ingest}` | ChromaDB（嵌入式）+ MySQL | ✅ 开 |
 | A | 追溯型 | `POST /rag/trace/{query,expand}` | Neo4j（5M1E 图）+ MySQL | ⏸ 灰度 |
 | E | Agentic | `POST /agent/chat` `GET /agent/explain/{id}` | Redis（缓存/审计）+ MySQL | ⏸ 灰度 |
 
@@ -57,7 +57,7 @@ FactoryRAG/
 │   ├── config.py                  # load_settings()
 │   ├── api/                       # 路由层：deps / middleware / errors / register / v1/{trace,doc,chat}_router
 │   ├── routes/                    # 三路线（各自 domain/application/infrastructure）
-│   │   ├── document/              # B 文档型（chromadb/minio/parser/handlers）
+│   │   ├── document/              # B 文档型（chromadb/parser/handlers）
 │   │   ├── traceability/          # A 追溯型（neo4j schema/retriever/projections/rag）
 │   │   └── agentic/               # E Agentic（ai/route_graph_builder + acl/l1,l2 + persistence）
 │   └── shared/                    # 共享内核（10 子包）
@@ -76,7 +76,7 @@ FactoryRAG/
 ├── tests/                         # 单元测试（锁住红线不变式）
 ├── pyproject.toml
 ├── Dockerfile                     # python:3.11-slim + gunicorn uvicorn worker
-├── docker-compose.yml             # rag-service + neo4j/mysql/redis/minio/kafka/bge-inference
+├── docker-compose.yml             # rag-service + neo4j/mysql/redis/kafka/bge-inference
 ├── .env.example                   # 前缀 RAG_、嵌套 __、路线级开关
 └── PROGRESS.md                    # 实现进度
 ```
@@ -97,10 +97,10 @@ Python 由 `.python-version` 锁定为 3.12，uv 复用本地已装解释器，�
 # 1) 安装依赖（建 .venv + 生成 uv.lock + 装 dev 组）
 uv sync
 
-# 2) 准备配置（按需改 MySQL/Redis/Neo4j/MinIO/Kafka 连接 + 路线开关）
+# 2) 准备配置（按需改 MySQL/Redis/Neo4j/Kafka 连接 + 路线开关）
 cp .env.example .env
 
-# 3) 起基础设施：mysql/redis/neo4j/minio/kafka/bge-inference
+# 3) 起基础设施：mysql/redis/neo4j/kafka/bge-inference
 docker-compose up -d
 
 # 4) 首次：跑 MySQL 迁移（DB URL 取自 RAG_MYSQL__DSN，覆盖 alembic.ini 占位）
@@ -117,7 +117,7 @@ uv run pytest                            # 跑测试（单元红线不变式，�
 ```
 
 > 默认仅 **B（document）** 开；A/E 经 `RAG_TRACEABILITY__ENABLED` / `RAG_AGENTIC__ENABLED` 灰度打开，见 §3.2、§7。
-> 重依赖（chromadb / neo4j / langgraph / minio / aiokafka / langchain）均懒导入，模块导入不触发；
+> 重依赖（chromadb / neo4j / langgraph / aiokafka / langchain）均懒导入，模块导入不触发；
 > 运行时按启用的路线需要对应依赖就绪。下文 §3.1–§3.3 为各步详细说明。
 
 ### 3.1 依赖（uv 管理）
@@ -139,7 +139,7 @@ uv sync                # 建 .venv、解析依赖、生成 uv.lock、装 dev 组
 | 在 venv 内跑命令 | `uv run <cmd>`（如 `uv run pytest`、`uv run uvicorn ...`） |
 | 升级锁文件 | `uv lock --upgrade` |
 
-重依赖（chromadb / neo4j / langgraph / minio / aiokafka / langchain）均在函数内懒导入，
+重依赖（chromadb / neo4j / langgraph / aiokafka / langchain）均在函数内懒导入，
 模块导入不触发；运行时按启用的路线需要对应依赖就绪。`uv.lock` 提交进库以锁定可复现环境。
 
 ### 3.2 配置
@@ -158,7 +158,7 @@ RAG_AGENTIC__ENABLED=false       # E 收口（依赖 A/B 就绪）
 ### 3.3 基础设施 + 服务
 
 ```bash
-docker-compose up -d              # mysql/redis/neo4j/minio/kafka/bge-inference
+docker-compose up -d              # mysql/redis/neo4j/kafka/bge-inference
 ```
 
 首次启动前跑 MySQL 迁移（见 §4）。随后本地起服务：
@@ -232,7 +232,7 @@ uv run pytest tests/ -v   # 单元测试（红线不变式，不触重依赖）
 
 ## 7. 灰度顺序
 
-1. **B（document）先行**：`RAG_DOCUMENT__ENABLED=true`，ChromaDB + MinIO + MySQL 就绪。
+1. **B（document）先行**：`RAG_DOCUMENT__ENABLED=true`，ChromaDB + MySQL 就绪。
 2. **A（traceability）灰度**：`RAG_TRACEABILITY__ENABLED=true`，Neo4j + Kafka 投影就绪；
    A 升版发 `rag.reindex.request` 通知 B 重索引。
 3. **E（agentic）收口**：`RAG_AGENTIC__ENABLED=true`，依赖 A/B Port 就绪 + agent-service L1/L2。

@@ -73,7 +73,6 @@ rag-service 内部划分为 **4 个模块上下文**：3 个路线业务上下�
 | MES 14 限界上下文（Java） | 只读消费者 | Kafka 领域事件（投影/重索引）+ 只读 REST（降级补齐） |
 | agent-service（L1/L2/L3） | 被调用方（A/B 被 L1/L2 调）+ 调用方（E 委托 L1/L2） | httpx REST，W3C `traceparent` 透传 |
 | mes-eval | 被测对象 | EvalTarget 适配器（见 §10） |
-| MinIO（基础设施） | 对象存储客户端 | B 的原始文档文件存储 |
 
 ---
 
@@ -266,10 +265,10 @@ rag_service/
 |----|---------|------------|
 | domain | `KnowledgeDocument`(聚合根)/`DocumentVersion`/`DocumentChunk`/`DocumentBinding`/`ChunkLocator`、`DocAnswer`/`DocCitation`、`ReindexHandler`/`ReadOnlyIngestionGate` | tenant |
 | application | `DocumentIngestionService`、`DocumentRetrievalService`、`ReindexCoordinator`、`ChunkStrategySelector` | ai、embedding、obs |
-| infrastructure | `chromadb/`(client/schema/retriever/document_repo)、`minio_/`(object_store)、`acl/` | kafka、persistence、acl、obs |
+| infrastructure | `chromadb/`(client/schema/retriever/document_repo)、`acl/` | kafka、persistence、acl、obs |
 
 **对外端点**：`POST /rag/docs/query`（检索+综合）、`POST /rag/docs/search`（只检索 chunks）、`POST /rag/docs/ingest`（文档摄入）。
-**存储**：ChromaDB（chunk 向量 + metadata，chunk 不可变 + 版本隔离靠查询过滤）、MinIO（原始文件）、MySQL（幂等/位点/审计）、Redis（检索缓存）。
+**存储**：ChromaDB（chunk 向量 + metadata，chunk 不可变 + 版本隔离靠查询过滤）、MySQL（幂等/位点/审计）、Redis（检索缓存）。
 **重索引触发**：订阅 `process.route.lifecycle` + A 发布的 `rag.reindex.request` 内部事件。
 **审核流**：工艺绑定型文档（SOP/检验标准）随 `ProcessRouteActivated` **联动 PUBLISHED**（工艺生效即文档生效，责任归工艺 owner，决策 #3）；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED。
 **版本绑定**：MVP 工艺绑定型按 ROUTE 锚点（`version_kind="route"`），`VersionAnchor` 统一覆盖 route/bom/rule/asset/standard，评测后可切 RULE 锚点（决策 #2）。

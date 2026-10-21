@@ -68,14 +68,14 @@
 **A**：
 
 - 五类：A 设备遥测流（秒级小 KV）、B 工艺参数采样（每板/每测试项小 KV）、C 单件离散事件（每板/每枪/每件，中体积可能带 URI）、D 周期监控（分钟级，老化房）、E 高密度波形/大文件（KB~MB）（依据：§1.3 表）。
-- A/B/D 是"窄而快"结构化流走 Kafka 主流；E 是"大而慢"附件走 MinIO，Kafka 只承载 `object_uri` + `sha256`（依据：§1.3）。
+- A/B/D 是"窄而快"结构化流走 Kafka 主流；E 是"大而慢"附件走对象存储，Kafka 只承载 `object_uri` + `sha256`（依据：§1.3）。
 - 这个分流是**吞吐与成本的核心折衷**：Kafka 单消息默认 1MB 上限，全量曲线进主流既打爆 broker 也撑爆存储；分流由领域模型 `PayloadKind`（STRUCTURED / OBJECT_STORAGE）固化（依据：§1.3、§5.4、领域建模 §2.12）。
 
 ### Q8. 同构平移②③④⑦具体复用①的什么、不新建什么？
 
 **A**：
 
-- 复用：边缘缓冲 + 断点续传机制、Kafka 直连管道、平台 `msg_id` 去重与乱序矫正、消费端幂等模型、同一 Kafka/MinIO 中间件、§3–§10 的全部设计（依据：§1.2 同构平移）。
+- 复用：边缘缓冲 + 断点续传机制、Kafka 直连管道、平台 `msg_id` 去重与乱序矫正、消费端幂等模型、同一 Kafka 中间件、§3–§10 的全部设计（依据：§1.2 同构平移）。
 - 不新建：不新建中间件、不新建可靠性模型；仅 topic 命名空间不同（如 `env.process.sample.raw` / `logistics.event.raw`），保留策略与配额按各类节奏差异化（依据：§1.2、§5.1）。
 - 被追问"为什么敢平移"--因为四类数据的并发特征与①同构（秒级持续流 + 单条价值低 + 靠聚合），同一套可靠性模型适用（依据：§1.1、§1.2）。
 
@@ -87,7 +87,7 @@
 
 **A**：
 
-- 五件事：协议接入（握手/长连接/心跳）、协议解码（`DecodingStrategy` 结构化）、封装打标（`msg_id` + 时间戳三元组 + 质量标 INV-04）、大载荷卸载（预签名 PUT 直传 MinIO，INV-15）、边缘缓冲与断点续传（INV-05）（依据：§4.1）。
+- 五件事：协议接入（握手/长连接/心跳）、协议解码（`DecodingStrategy` 结构化）、封装打标（`msg_id` + 时间戳三元组 + 质量标 INV-04）、大载荷卸载（预签名 PUT 直传对象存储，INV-15）、边缘缓冲与断点续传（INV-05）（依据：§4.1）。
 - 不做三件事：不做业务判定（PASS/FAIL 归质量上下文）、不做资产停用（归台账上下文）、不推进过站（归过点执行上下文）（依据：§4.1）。
 - 越界是腐败源：网关一旦掺合业务语义，就破坏了"采集只搬运不解释"（INV-CX-01）与限界上下文边界，后续演进会缠死（依据：§4.1、事件风暴 §0）。
 
@@ -161,14 +161,13 @@
 - 断点续传的重复是**故障恢复**层面：网关重发同一 `msg_id` 是应用层主动行为，Producer 幂等管不到（依据：§4.4、§5.3）。
 - 故仍需平台 `msg_id` 去重（BIZ-02）+ 消费端 `msg_id` 幂等两层兜底（依据：§5.3、§9.2）。这与 Outbox"幂等 Producer 消除不了 Outbox 故障恢复重复"同理（依据：[Outbox设计方案](../业务事件/Outbox设计方案.md) §7.8）。
 
-### Q18. 大载荷直传 MinIO 的"对象先于引用存在"怎么保证？为什么不能反过来？
+### Q18. 大载荷直传对象存储的"对象先于引用存在"怎么保证？为什么不能反过来？
 
 **A**：
 
-- 网关侧顺序：解析大载荷 -> 算 sha256 -> 请求预签名 PUT URL（或 STS 临时凭证）-> 直传 MinIO（大文件 multipart 分片续传）-> **上传成功 + sha256 校验通过后**才 `DataPacket.seal(object_uri, sha256)` -> 主流只带 URI 不发字节（依据：§5.4）。
+- 网关侧顺序：解析大载荷 -> 算 sha256 -> 请求预签名 PUT URL（或 STS 临时凭证）-> 直传对象存储（大文件 multipart 分片续传）-> **上传成功 + sha256 校验通过后**才 `DataPacket.seal(object_uri, sha256)` -> 主流只带 URI 不发字节（依据：§5.4）。
 - 反过来（先 seal 引用再传对象）会出现"引用指向空对象"--消费方按 URI 拉取 404，追溯链断裂（依据：§5.4 关键约束）。
-- 消费侧需曲线/图像时按 `object_uri` 预签名 GET 拉取，浏览器直连 MinIO，流量不经业务服务器（依据：§5.4）。
-- bucket 规划、前缀保留期、CORS 等见 [MinIO配置说明](../基础设施/MinIO配置说明.md)，本文不重复（依据：§5.4）。
+- 消费侧需曲线/图像时按 `object_uri` 预签名 GET 拉取，浏览器直连对象存储，流量不经业务服务器（依据：§5.4）。
 
 ### Q19. `partition_key` 为什么用 `equipment_id`？为什么禁止用随机 UUID？
 
@@ -312,7 +311,7 @@
 
 - 必备指标：`dc_ingest_rate_total`/`_per_equipment`、`dc_backlog_pending`（边缘缓冲待补传）、`dc_backfill_total`/`_bytes`、`dc_duplicate_discarded_total`、`dc_late_arrival_total`、`dc_deadletter_total`、`dc_quality_flag_ratio{quality}`（质量健康度）、`dc_persist_latency_seconds`、`dc_storage_write_rate`、`dc_object_storage_put_total`/`_failure_total`、`dc_consumer_lag{topic}`、`dc_gateway_health`（依据：§10.1）。
 - `dc_duplicate_discarded_total` 异常高（中）：疑似大量重传，查网关/网络--可能是网关频繁断连重发、或 `backfilled_cursor` 推进异常导致重复投递（依据：§10.2）。
-- 高优告警：`EquipmentOffline` 持续未恢复（断采）、边缘缓冲水位持续增长（补传跟不上）、MinIO 上传失败率升高（大载荷丢失风险）（依据：§10.2）。
+- 高优告警：`EquipmentOffline` 持续未恢复（断采）、边缘缓冲水位持续增长（补传跟不上）、对象存储上传失败率升高（大载荷丢失风险）（依据：§10.2）。
 
 ---
 

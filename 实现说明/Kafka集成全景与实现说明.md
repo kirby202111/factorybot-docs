@@ -258,7 +258,7 @@
 
 **典型业务节点**
 
-设备 -> 边缘网关（协议适配 `DecodingStrategy` + 打质量标 + 边缘缓冲 + 断点续传 + 大载荷卸载 MinIO）-> Kafka `dc.*` 直连（不经 Outbox、不开 DB 事务）-> 平台接入（`msg_id` 去重 + 乱序矫正）-> 落库 + 分发到下游 `dc.*` 主题。
+设备 -> 边缘网关（协议适配 `DecodingStrategy` + 打质量标 + 边缘缓冲 + 断点续传 + 大载荷卸载至对象存储）-> Kafka `dc.*` 直连（不经 Outbox、不开 DB 事务）-> 平台接入（`msg_id` 去重 + 乱序矫正）-> 落库 + 分发到下游 `dc.*` 主题。
 
 - `dc.process.sample.raw`：工艺参数原始采样（印刷 / 波峰焊 / 老化环境），A/B/D 类窄流
 - `dc.station.event.raw`：工位会话级事件 + 工装计数（过板 / 拧紧 / 烧录 / AOI / 测试），C 类单件事件
@@ -292,32 +292,32 @@
 
 ---
 
-### 模式 F：大载荷卸载到对象存储（MinIO + URI 引用）
+### 模式 F：大载荷卸载到对象存储（URI 引用）
 
 **典型业务节点**
 
-E 类大载荷（扭矩曲线数百点/枪、AOI 图像、烧录日志、振动频谱、固件文件）**不进 Kafka**（单消息默认 1MB 上限），走 MinIO 直传，主流 `DataPacket` 只承载 `object_uri + sha256`：
+E 类大载荷（扭矩曲线数百点/枪、AOI 图像、烧录日志、振动频谱、固件文件）**不进 Kafka**（单消息默认 1MB 上限），走对象存储直传，主流 `DataPacket` 只承载 `object_uri + sha256`：
 
-- 智能电批扭矩曲线 -> MinIO，`dc.station.event.raw` 主流只带峰值/最终值 + `curve_uri`
-- AOI 图像 -> MinIO，主流带 `image_uri + sha256 + retain_until`
-- 烧录日志 / 固件文件 -> MinIO，主流带 `log_uri` / 固件指纹校验
+- 智能电批扭矩曲线 -> 对象存储，`dc.station.event.raw` 主流只带峰值/最终值 + `curve_uri`
+- AOI 图像 -> 对象存储，主流带 `image_uri + sha256 + retain_until`
+- 烧录日志 / 固件文件 -> 对象存储，主流带 `log_uri` / 固件指纹校验
 
 **Kafka 核心使用方式与作用**
 
-Kafka 只承载"窄而快"的结构化流与大载荷的**引用**，"大而慢"的附件进对象存储。这是吞吐与成本的核心折衷，由领域模型 `PayloadKind`（STRUCTURED / OBJECT_STORAGE）固化。Kafka 在此承担"引用通知"角色，字节流走 MinIO。
+Kafka 只承载"窄而快"的结构化流与大载荷的**引用**，"大而慢"的附件进对象存储。这是吞吐与成本的核心折衷，由领域模型 `PayloadKind`（STRUCTURED / OBJECT_STORAGE）固化。Kafka 在此承担"引用通知"角色，字节流走对象存储。
 
 **架构闪光点**
 
-1. **对象先于引用存在**：网关侧先上传 MinIO + sha256 校验通过后才 `DataPacket.seal(object_uri, sha256)`，否则会出现"引用指向空对象"。上传失败不 seal，主流不发引用。
-2. **浏览器 / 消费侧直连 MinIO**：预签名 GET URL 让浏览器直连 MinIO 拉取图像 / 曲线，流量不经过业务服务器，卸载带宽。
-3. **预签名 PUT 直传 + multipart 续传**：网关向平台请求预签名 PUT URL（或 STS 临时凭证）直传 MinIO，大文件走 multipart 分片续传，断点可续。
-4. **`PayloadKind` 固化分流**：分流规则不在事件载荷里"提前判断"，而是由领域模型 `PayloadKind` 枚举固化——结构化进 Kafka，对象存储进 MinIO，是 schema 级约定。
+1. **对象先于引用存在**：网关侧先上传对象 + sha256 校验通过后才 `DataPacket.seal(object_uri, sha256)`，否则会出现"引用指向空对象"。上传失败不 seal，主流不发引用。
+2. **浏览器 / 消费侧直连对象存储**：预签名 GET URL 让浏览器直连对象存储拉取图像 / 曲线，流量不经过业务服务器，卸载带宽。
+3. **预签名 PUT 直传 + multipart 续传**：网关向平台请求预签名 PUT URL（或 STS 临时凭证）直传对象存储，大文件走 multipart 分片续传，断点可续。
+4. **`PayloadKind` 固化分流**：分流规则不在事件载荷里"提前判断"，而是由领域模型 `PayloadKind` 枚举固化——结构化进 Kafka，大载荷进对象存储，是 schema 级约定。
 
 **实施重难点与技术挑战**
 
-1. **引用一致性（空引用）**：若 MinIO 上传成功但 seal 前网关宕机，或上传失败但误 seal，会出现"主流有引用、MinIO 无对象"。靠"上传成功 + 校验通过才 seal"的严格时序 + 死信兜底。
+1. **引用一致性（空引用）**：若上传成功但 seal 前网关宕机，或上传失败但误 seal，会出现"主流有引用、对象存储无对象"。靠"上传成功 + 校验通过才 seal"的严格时序 + 死信兜底。
 2. **预签名 URL 生命周期**：预签名 URL 有有效期，过期后消费侧拉不到对象。需 URL 有效期 ≥ 消费侧最长处理延迟，或消费侧按需重新申请预签名 GET。
-3. **MinIO bucket 规划与保留期**：`dc/{kind}/{equipment_id}/{yyyy-MM-dd}/{msg_id}.{ext}` 前缀规划，`curve/aoi-image/log/deadletter/` 分类保留期 🔴。大载荷保留期与 Kafka retention 解耦——Kafka 短期缓冲，MinIO 按审计要求长期保留。
+3. **对象存储前缀规划与保留期**：`dc/{kind}/{equipment_id}/{yyyy-MM-dd}/{msg_id}.{ext}` 前缀规划，`curve/aoi-image/log/deadletter/` 分类保留期 🔴。大载荷保留期与 Kafka retention 解耦——Kafka 短期缓冲，对象存储按审计要求长期保留。
 4. **sha256 校验开销**：大文件计算 sha256 有 CPU 开销，网关侧需异步计算不阻塞采集主链路。校验失败需重传 + 告警。
 
 ---
@@ -579,7 +579,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | **P2 配置缓存投影** | 模式 A 的 5 大缓存（工艺 / 设备 / 质量门 / 齐套 / 工单）+ 降级 REST；通 `process.*`/`eam.asset.availability`/`quality.gate.lifecycle`/`wo.kit.status` | 过点 ≤200ms 的硬要求依赖此 |
 | **P3 物料齐套闭环** | 模式 C 的 KitStatus 重算链（`material.*`->`wo.kit.status`）+ 排产齐套预占链（`schedule.*`↔`material.*`） | 验证多源重算与双向可逆状态机 |
 | **P4 设备可用性聚合** | 模式 D 的 `eam.asset.availability` 聚合 + 同服务本地事务 vs 跨服务事件切分；通 `pm.*`/`calibration.*`/`repair.*`->台账 | 过点准入硬门禁，强防错边界落地 |
-| **P5 高频采集管道** | 模式 E 的 dc.* 直连 + 边缘网关 + 断点续传 + 去重 + 乱序矫正；模式 F 的 MinIO 大载荷卸载 | 与业务事件独立可并行，但依赖车间设备实测 |
+| **P5 高频采集管道** | 模式 E 的 dc.* 直连 + 边缘网关 + 断点续传 + 去重 + 乱序矫正；模式 F 的大载荷卸载 | 与业务事件独立可并行，但依赖车间设备实测 |
 | **P6 Python 旁路** | 模式 G 的 GraphProjector（先 MVP 4 上下文）+ 模式 H 的 Agent 主动触发 + 模式 I 的动作卡双通道 | 依赖业务事件契约稳定后接入 |
 | **P7 可观测与治理** | 全链路 trace 串联 + DLT 告警 + 限流可观测 + schema 演进规范 + 重放机制验证 | 贯穿各阶段，P7 集中补齐 |
 
@@ -595,7 +595,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 6. **版本快照不可变**（`routeVersion` / `SNAPSHOT_OF_ROUTE`），历史追溯免疫后续变更。
 7. **强防错本地事务 vs 跨服务异步事件精细切分**：同服务 + 强防错 -> 本地事务；跨服务或非强防错 -> 事件。
 8. **采集只搬运不解释**（INV-CX-01），网关 / 平台不做业务判定，协议适配器免疫工艺变更。
-9. **大载荷走 MinIO，主流只传 URI + sha256**，对象先于引用存在。
+9. **大载荷走对象存储，主流只传 URI + sha256**，对象先于引用存在。
 10. **跨语言 Python 旁路复用既有 Kafka 契约**，物理边界强制只读，零新管道。
 11. **限流是速率维度，顺序是分区维度，两者正交**——限流四层 + 自适应背压不破坏分区内顺序。
 12. **幂等保证"不重复执行"，重放想"重复执行"必须主动绕过幂等**（新 consumer_group）。
@@ -610,7 +610,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | 乱序矫正窗口启用范围 | 哪些 dc.* topic 启用 | 仅需严格时序的聚合类（SPC / 运行时长）启用 | 模式 E |
 | 边缘网关 HA 部署形态 | 单网关+缓冲 / 主备 / 集群 | 关键线体主备；切换 RTO 按可用性预算定 | 模式 E |
 | 平台 `msg_id` 去重存储方案 | DB 唯一（v1 起步）/ Redis 布隆+DB（预案）/ Redis SET+异步 | v1 主推 DB 唯一 + 消费端幂等；布隆为 DB 扛不住时预案 | 模式 E |
-| MinIO 大载荷保留期 | 按 kind 分类 | `curve/aoi-image/log/deadletter/` 分类，按审计要求 | 模式 F |
+| 大载荷保留期 | 按 kind 分类 | `curve/aoi-image/log/deadletter/` 分类，按审计要求 | 模式 F |
 | 图投影降级阈值 | 图覆盖度低于多少触发降级 REST | 🔴 待 L1 诊断实测定 | 模式 G |
 | `CONSUMED_BATCH` 边事件契约 | 物料消耗明细事件是否定义 | MVP 用降级 REST，待物料上下文明确定义后改投影 | 模式 G |
 | Agent 触发规则归属 | 触发条件配置在 Agent 侧还是 MES 事件契约 | 🔴 待定 | 模式 H |
@@ -630,7 +630,6 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | 业务事件可靠投递（Outbox 表 / Publisher / 限流 / 幂等 / DLT / 重放） | [实现说明/业务事件/Outbox设计方案.md](业务事件/Outbox设计方案.md) |
 | 高频采集管道（边缘网关 / 协议适配 / 断点续传 / 去重 / 乱序矫正 / 存储分层） | [实现说明/高频数据/MES高频数据方案.md](高频数据/MES高频数据方案.md) |
 | Kafka 集群 / Spring Kafka 基础配置 | [实现说明/基础设施/Kafka配置说明.md](基础设施/Kafka配置说明.md) |
-| MinIO 对象存储配置 | [实现说明/基础设施/MinIO配置说明.md](基础设施/MinIO配置说明.md) |
 | 领域模型 / 事件风暴 / 不变式 | `领域模型/` 下各限界上下文文档 |
 | 跨服务协作模型 / 事务边界 | [领域模型/领域总览.md](../领域模型/领域总览.md) §4/§5 |
 | Python 旁路服务（Agent / RAG）技术选型 | [整体技术选型与模块划分.md](../整体技术选型与模块划分.md) |

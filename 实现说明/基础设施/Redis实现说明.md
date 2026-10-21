@@ -6,7 +6,7 @@
 > - 领域契约（聚合根 / 事件 / 不变式编号）的权威源是各上下文的领域建模文档，本文**不重复定义**，只引用其不变式编号（INV-CX-04、BIZ-02、BIZ-07、INV-CX-05 等）。
 > - [MES高频数据方案](../高频数据/MES高频数据方案.md) 已在 §6.1（msg_id 去重）与 §7.1（热层实时快照）明确使用 Redis，本文是其**场景展开与重难点深挖**，不重复管道设计。
 > - 与 [Outbox设计方案](../业务事件/Outbox设计方案.md) 是**分工关系**：Outbox 管低频业务契约事件的可靠投递（MySQL 事务 + Kafka），Redis 不承担 MQ 角色；本文管 Redis 作为缓存 / 热层 / 去重 / 协调的职责。
-> - 与 [MySQL配置说明](./MySQL配置说明.md)（`cache-enabled: false`，显式关闭 MyBatis 二级缓存）、[Kafka配置说明](./Kafka配置说明.md)、[MinIO配置说明](./MinIO配置说明.md) 并列，补齐中间件配置族。
+> - 与 [MySQL配置说明](./MySQL配置说明.md)（`cache-enabled: false`，显式关闭 MyBatis 二级缓存）、[Kafka配置说明](./Kafka配置说明.md) 并列，补齐中间件配置族。
 >
 > **适用边界**：覆盖 MES 主体三大服务（制造资源 / 设备管理 / 生产执行）的业务建模场景。**Agent / RAG 服务**（Python 侧）的 Redis 使用（ConfirmationStore / 工具结果缓存 / 租户限流信号量）见 [整体技术选型与模块划分](../../整体技术选型与模块划分.md) §2.5，**不在本文范围**。
 >
