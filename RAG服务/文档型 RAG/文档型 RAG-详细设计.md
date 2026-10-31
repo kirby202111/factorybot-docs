@@ -30,7 +30,7 @@
 | **可观测兜底** | 所有答案带来源引用 + 置信度，低置信度转人工 / 转规则引擎 | 检索结果结构化（chunk_id + 文档版本 + 页码/定位）+ 置信度阈值；与 MES 防错理念一致：宁可拦下让人判 |
 | **部署形态** | 车间网络常与办公网隔离，需本地化向量库 / Embedding / 模型 | ChromaDB + bge-m3 本地化部署；LLM 视安全策略云端 API 或本地化模型二选一（§2.5） |
 
-### 1.3 与追溯型 RAG、L1 Agent 的关系
+### 1.3 与追溯型 RAG、诊断能力 Agent 的关系
 
 文档型 RAG（路线 B）与追溯型 RAG（路线 A，[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md)）不是替代，是**互补分工**，二者共享同一套版本治理契约：
 
@@ -42,7 +42,7 @@
 | 版本一致性 | `SNAPSHOT_OF_ROUTE` 快照边锁当时版本 | 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`） + 重索引 |
 | 协同点 | `TraceAnswer.suggested_action` 调本文 `search_docs(query, version_anchor)` | 本文接收追溯型发布的 `rag.reindex.request` 事件触发重索引 |
 
-- **L1 诊断型 Agent**（[AGENT服务引入路线.md](../../AGENT服务/AGENT服务引入路线.md) §2.2）把本文 `POST /rag/docs/query` 封装成 `search_docs` 工具，作为其多步推理的"处置知识"工具之一；与 `query_traceability_graph`（追溯型）并列。
+- **诊断能力**（[AGENT服务引入路线.md](../../AGENT服务/AGENT服务引入路线.md) §2.2）把本文 `POST /rag/docs/query` 封装成 `search_docs` 工具，作为其多步推理的"处置知识"工具之一；与 `query_traceability_graph`（追溯型）并列。
 - **落地顺序**：先 B 后 A（[RAG服务引入路线.md](../RAG服务引入路线.md) §3）。文档型 2–4 周可出 demo，先验证"车间到底有没有人用 RAG"；追溯型建立在领域事件和过点记录上，是护城河但建模重。
 
 ### 1.4 与 Java 技术栈的关系
@@ -59,12 +59,12 @@
 
 | 层次 | 选型 | 选型理由 |
 |------|------|---------|
-| 语言 | Python 3.11+ | 类型提示 + Pydantic 校验，AI 生态最成熟，与追溯型 RAG / L1 Agent 同栈复用 LLM 抽象 |
+| 语言 | Python 3.11+ | 类型提示 + Pydantic 校验，AI 生态最成熟，与追溯型 RAG / 诊断能力 Agent 同栈复用 LLM 抽象 |
 | Web 框架 | **FastAPI** | 异步、原生 OpenAPI，与追溯型一致，适合做检索 HTTP 入口 |
 | 向量存储 | **ChromaDB** 0.5+（嵌入式 persistent client，Parquet 持久化） | 跟随 rag-service 进程，零额外 DB service；LlamaIndex `llama-index-vector-stores-chroma` 的 `ChromaVectorStore`；distance=cosine（bge-m3 1024 维）；chunk 不可变 + 强制带版本绕开写事务弱点，见 §2.3 |
 | 向量存储（未来甜区备选） | Milvus / Qdrant | 文档量或 QPS 上到专用向量库甜区时切换，LlamaIndex `VectorStoreIndex` 抽象兜底，见 §2.3 |
 | 检索编排 | **LlamaIndex** `VectorStoreIndex` | 文档摄入 / 切分 / 向量检索 / Rerank 的上层抽象，文档型 RAG 的主场 |
-| LLM 抽象 | `langchain-core` 的 `BaseChatModel` | 模型可插拔，配置切换 Claude / 通义千问 / DeepSeek / 本地化模型，与追溯型 / L1 一致 |
+| LLM 抽象 | `langchain-core` 的 `BaseChatModel` | 模型可插拔，配置切换 Claude / 通义千问 / DeepSeek / 本地化模型，与追溯型 / 诊断能力一致 |
 | Embedding | **bge-m3**（多语种，可本地化，1024 维） | SOP / 手册 / 问题的语义向量化，覆盖中英文，与追溯型同模型同维度 |
 | Rerank | **bge-reranker-v2-m3**（可本地化） | 向量召回后精排，提升 top-k 相关性，中英文兼顾 |
 | 数据校验 | **Pydantic v2** | 检索请求 / 文档视图 / 答案 DTO 的 schema 即类型 |
@@ -421,7 +421,7 @@ DocumentRetrievalService
   └─ 6. 置信度判断：低置信度转人工
 ```
 
-- **领域上下文注入**：调用方（工位屏幕 / 工程师 UI / L1 Agent）可带版本锚点（`version`+`version_kind`+`version_ref_id`）等上下文，检索时前置过滤--如过点拦截辅助场景带当前版本锚点（`version`+`version_kind`），保证召回的 SOP 与生产执行侧工艺版本一致。
+- **领域上下文注入**：调用方（工位屏幕 / 工程师 UI / 诊断能力 Agent）可带版本锚点（`version`+`version_kind`+`version_ref_id`）等上下文，检索时前置过滤--如过点拦截辅助场景带当前版本锚点（`version`+`version_kind`），保证召回的 SOP 与生产执行侧工艺版本一致。
 - **强制带版本（工艺绑定型）**：`DocumentRetrievalService` 入口校验 版本锚点必填（`version`+`version_kind`）（工艺绑定型查询），缺失直接拒绝，不退回"查最新 ACTIVE"。理由：避开"在制品不切换工艺"语义陷阱（W1 绑 v3，最新 ACTIVE 是 v4，退回查 v4 会答出不适用 SOP）。设备绑定型按 `asset_id` 过滤，通用知识型不带版本。
 - **query 改写可选**：术语补全（"SPI" -> "Solder Paste Inspection"）提升召回，但增加延迟；MVP 可先不做，按评测决定。
 
@@ -514,11 +514,11 @@ class DocAnswer(BaseModel):
 - 每个 citation 带 `locator`（页码 / 偏移 / 标题路径），工程师点击能跳到原文档（文件拉取 + 定位）具体位置。
 - `version`+`version_kind` 记录本次检索的版本锚点，答案可溯源"是基于哪个工艺版本的 SOP 答的"。
 
-### 6.6 与追溯型 RAG、L1 Agent 的协同
+### 6.6 与追溯型 RAG、诊断能力 Agent 的协同
 
 - **与追溯型 RAG 协同**：追溯型 `TraceAnswer.suggested_action` 可调本文 `search_docs(query, version_anchor)` 补 SOP 片段（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §6.5）--追溯型给"哪批锡膏、哪台设备"（事实链），本文给"SPI 报警怎么处置"（处置知识），两者版本过滤都对齐 `ProcessRouteActivated`。
-- **与 L1 Agent 协同**：L1 的 `search_docs` 工具封装本文 `POST /rag/docs/query`（[L1诊断型Agent-实现方案.md](../../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)）；L1 在追溯型图检索基础上，按需要调本文补充处置知识。
-- **不互相替代**：追溯型答"是什么、为什么"（事实链），本文答"怎么办"（处置知识）。简单处置用本文够了，复杂根因诊断用追溯型 + L1。
+- **与 诊断能力 Agent 协同**：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（[FactoryAgent-诊断能力.md](../../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）；诊断能力在追溯型图检索基础上，按需要调本文补充处置知识。
+- **不互相替代**：追溯型答"是什么、为什么"（事实链），本文答"怎么办"（处置知识）。简单处置用本文够了，复杂根因诊断用追溯型 + 诊断能力。
 
 ---
 
@@ -602,7 +602,7 @@ class DocAnswer(BaseModel):
 15. 接 ACL 降级查询各上下文只读 REST（查文档绑定关系，§7 实现方案）。
 16. 沉淀评测集（典型 SOP / 手册问答 + 预期引用），回归模型 / 提示词 / 切分变更。
 17. 对接追溯型 RAG：`TraceAnswer.suggested_action` 调 `search_docs(query, version_anchor)`。
-18. 对接 L1 Agent：`search_docs` 工具封装 `/rag/docs/query`。
+18. 对接 诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
 19. 灰度一条产线（设备维修手册 + SOP + 检验标准），收集工程师 / 操作工反馈。
 
 ### 阶段五：扩展（按需）

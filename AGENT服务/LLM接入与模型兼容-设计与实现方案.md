@@ -2,7 +2,7 @@
 
 > 面向场景：factorybot 的 LLM 抽象层如何接入真实 DeepSeek，以及**思考模型（reasoning model）的兼容要点**。
 > **核心纪律**：LLM 可插拔（`ChatModel` Protocol），provider 无关；真实模型经 `ObservableChatModel` 统一埋观测（token/延迟/模型/prompt_version）。mock 模式离线可跑，real 模式按 provider 切换，二者消息协议完全一致。
-> **关联实现**：`app/infrastructure/ai/`（抽象层 + 工厂）、`app/config.py`（配置）、`app/application/l3_orchestrator.py`（多 interrupt resume）。
+> **关联实现**：`app/infrastructure/ai/`（抽象层 + 工厂）、`app/config.py`（配置）、`app/application/orchestration_service.py`（多 interrupt resume）。
 
 ---
 
@@ -31,7 +31,7 @@ ChatModel (Protocol)
 ```
 
 - `ainvoke(messages, tools)`：ReAct 主循环。`tools` 为 OpenAI function schema，模型返回 `ModelResponse(content, tool_calls, finish_reason)`。
-- `ainvoke_structured(messages, schema)`：产出 Pydantic 实例（L2 草稿）。底层 `with_structured_output(schema)`。
+- `ainvoke_structured(messages, schema)`：产出 Pydantic 实例（草稿）。底层 `with_structured_output(schema)`。
 - 消息助手：`sys_msg` / `user_msg` / `assistant_msg(content, tool_calls)` / `tool_msg(name, content, tool_call_id)`。
 
 ---
@@ -89,7 +89,7 @@ if s.llm_provider == "mock" or not s.llm_api_key:   # 去掉 s.is_mock
 | 不支持 `tool_choice`（强制） | `400: Thinking mode does not support this tool_choice` | 工具调用用 `bind_tools`（`tool_choice=auto`） |
 | `json_object` 模式要求 prompt 含 "json" | `400: Prompt must contain the word 'json'` | 注入含 "JSON" 的 schema 描述 |
 
-### 4.1 结构化输出（L2 草稿）
+### 4.1 结构化输出（草稿）
 
 `with_structured_output` 在新版 `langchain-openai` 默认用 `json_schema`，DeepSeek 思考模型不支持。`ainvoke_structured` 对 ChatOpenAI 系改用 `json_mode` + 注入 schema 提示：
 
@@ -106,9 +106,9 @@ structured = self._lc.with_structured_output(schema, **kwargs)
 - `GateManager` 已兼容 resume value 的 dict 形态（`isinstance(confirmation, dict)` 分支），dict 便于 checkpointer 序列化。
 - 仅 ChatOpenAI 系（openai/deepseek）走 json_mode；Anthropic 等保留默认 method。
 
-### 4.2 工具调用（L1 ReAct）
+### 4.2 工具调用（诊断能力 ReAct）
 
-ReAct 用 `bind_tools(tools)`（`tool_choice` 默认 `auto`，模型自主决定是否调工具），思考模型支持。L1 诊断多步 ReAct 验证通过：DeepSeek 主动调 `query_traceability_graph` -> `query_pass_records` -> 输出报告。
+ReAct 用 `bind_tools(tools)`（`tool_choice` 默认 `auto`，模型自主决定是否调工具），思考模型支持。诊断多步 ReAct 验证通过：DeepSeek 主动调 `query_traceability_graph` -> `query_pass_records` -> 输出报告。
 
 ---
 
@@ -134,7 +134,7 @@ ModelResponse.tool_calls[i].id  (模型返回)
 
 ---
 
-## 6. L1 输出 schema 对齐
+## 6. 诊断能力输出 schema 对齐
 
 **问题**：DeepSeek 自由发挥字段名（`m1e_dimension` 代替 `category`、`confidence` 用中文"高"），`json.loads` 解析后 `DiagnosisReport` 校验失败。
 
@@ -148,11 +148,11 @@ ModelResponse.tool_calls[i].id  (模型返回)
 
 ---
 
-## 7. L3 多 interrupt resume（并行 gate）
+## 7. 编排能力多 interrupt resume（并行 gate）
 
 **问题**：`fault_response` 图 `gate_repair ‖ gate_isolation` **并行**，两个 gate 都 `interrupt(value=card)` -> 2 个 pending interrupt。且两 gate 的 `step`（REPAIR/ISOLATION）与 `writes_via` 不同，单 token 的 `action` 无法同时匹配。`Command(resume=token)` 报 `must specify the interrupt id when resuming`。
 
-**修复**（[l3_orchestrator.py](../factorybot/app/application/l3_orchestrator.py)）：
+**修复**（[orchestration_service.py](../factorybot/app/application/orchestration_service.py)）：
 
 ```python
 # 提取所有 pending interrupt 的 (id, card)
@@ -191,7 +191,7 @@ RUN_MODE=mock                    # ACL/存储/Kafka 走 mock；LLM 由 provider 
 - 启动：`python main.py`（默认 8000 端口）。
 - 复测：`http://127.0.0.1:8000/docs` Swagger UI，或 curl（请求体见 `factorybot/req*.json`）。
 
-**测试隔离**：`tests/conftest.py` 顶部强制 `LLM_PROVIDER=mock`（env var 优先 `.env`），避免 `.env` 配真实 provider 污染测试（否则 `test_l1_diagnosis` 期望 mock 固定输出却走真实模型，既失败又烧 token）。
+**测试隔离**：`tests/conftest.py` 顶部强制 `LLM_PROVIDER=mock`（env var 优先 `.env`），避免 `.env` 配真实 provider 污染测试（否则 `test_diagnosis_diagnosis` 期望 mock 固定输出却走真实模型，既失败又烧 token）。
 
 ---
 
@@ -199,20 +199,20 @@ RUN_MODE=mock                    # ACL/存储/Kafka 走 mock；LLM 由 provider 
 
 | # | 现象 | 根因 | 修复 |
 |---|------|------|------|
-| 1 | L1 返回 `LLM 输出非合法 JSON` | DeepSeek 输出 markdown fence / 带解释文本 | `_extract_json` 容错 + 强化 prompt |
-| 2 | L1 返回 `DiagnosisReport 校验失败` | DeepSeek 自创字段名（`m1e_dimension`）、`confidence` 用中文 | prompt 明确字段 + 枚举 + 示例 |
-| 3 | L2 `500: response_format type unavailable` | 思考模型不支持 `json_schema` | `ainvoke_structured` 改 `json_mode` |
-| 4 | L2 `500: Thinking mode does not support tool_choice` | 思考模型不支持强制 `tool_choice`（function_calling） | json_mode 不涉及 tool_choice |
-| 5 | L2 `500: Prompt must contain the word 'json'` | `json_object` 模式要求 prompt 含 "json" | 注入含 "JSON" 的 schema 描述 |
-| 6 | L1 多步 ReAct 第二轮 API 400 | `_to_lc` 丢弃 `tool_calls` / `tool_call_id` | id 贯穿全链路（§5） |
-| 7 | L3 resume `must specify interrupt id` | 并行 gate 多 interrupt，单 token 不匹配 | `_extract_pending_interrupts` + `{iid: token}`（§7） |
+| 1 | 诊断能力返回 `LLM 输出非合法 JSON` | DeepSeek 输出 markdown fence / 带解释文本 | `_extract_json` 容错 + 强化 prompt |
+| 2 | 诊断能力返回 `DiagnosisReport 校验失败` | DeepSeek 自创字段名（`m1e_dimension`）、`confidence` 用中文 | prompt 明确字段 + 枚举 + 示例 |
+| 3 | 草稿能力 `500: response_format type unavailable` | 思考模型不支持 `json_schema` | `ainvoke_structured` 改 `json_mode` |
+| 4 | 草稿能力 `500: Thinking mode does not support tool_choice` | 思考模型不支持强制 `tool_choice`（function_calling） | json_mode 不涉及 tool_choice |
+| 5 | 草稿能力 `500: Prompt must contain the word 'json'` | `json_object` 模式要求 prompt 含 "json" | 注入含 "JSON" 的 schema 描述 |
+| 6 | 诊断能力多步 ReAct 第二轮 API 400 | `_to_lc` 丢弃 `tool_calls` / `tool_call_id` | id 贯穿全链路（§5） |
+| 7 | 编排能力 resume `must specify interrupt id` | 并行 gate 多 interrupt，单 token 不匹配 | `_extract_pending_interrupts` + `{iid: token}`（§7） |
 | 8 | 测试失败 + 烧 token | `.env` 真实 provider 污染测试 | conftest 强制 mock（§8） |
 
 ---
 
 ## 10. 演进方向
 
-- **结构化输出统一**：L1 完成步可改 `ainvoke_structured(DiagnosisReport)`，用 function calling/json_mode 强 schema，替代 prompt + `_extract_json`。
+- **结构化输出统一**：诊断能力完成步可改 `ainvoke_structured(DiagnosisReport)`，用 function calling/json_mode 强 schema，替代 prompt + `_extract_json`。
 - **cascading 降级**：`ModelRouter` 已留 `fallback: deepseek` 路由，主模型失败可降级。
 - **EvalGate 门禁**：真实模型上线前须过评测门禁（`ModelRouter.validate_on_startup` 当前 mock 模式豁免，生产需取消注释 raise）。
 - **思考模型分离**：若思考模型（v4-flash）用于推理、通用模型（deepseek-chat）用于结构化输出，可按 capability 路由不同模型（`ModelRouter` 已支持）。

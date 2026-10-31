@@ -1,878 +1,709 @@
 # rag-service 技术选型和实现方案
 
-> 本文是 rag-service（单一 Python 微服务）的**技术选型与实现方案**，位于 [`rag-service-整体结构设计.md`](rag-service-整体结构设计.md) 之下、各路线实现方案之上的一层：
-> - 把整体结构设计引用但**未集中**的技术选型（版本 / 库 / 模型）收敛为一张表，并解决三路线文档之间的版本漂移（如 LangGraph 版本、默认 LLM provider）；
-> - 把整体结构设计 §11 列为"待办"的**迁移与落地**变成可执行计划：共享内核构建顺序、三路线文档从"独立服务包结构"投影到"单服务模块"的迁移、决策 #3 联动 PUBLISHED 的修订落地；
-> - 给出共享内核关键抽象的**代码骨架**、**分阶段交付**、**风险与对策**、**测试与验收**。
+> 本文承接 [`rag-service-整体结构设计.md`](rag-service-整体结构设计.md)，给出**一个统一 RAG 服务**的技术选型、关键接口、数据模型、检索链路和验收方案。
 >
-> **与整体结构设计的关系**：结构设计定"怎么切模块 / 怎么隔离 / 怎么可拆"；本文定"选什么版本 / 按什么顺序建 / 怎么从现状迁过去 / 怎么验收"。
-> **与各路线实现方案的关系**：各路线实现方案定"路线内部细节（Cypher / 向量检索 / 意图路由）"；本文定"共享内核 + 单服务骨架 + 跨路线迁移"，路线内部技术细节仍以各路线文档为准。
+> 文档检索、制造追溯和 Agentic 是同一应用内的三项能力：前两者实现为只读检索 Port，Agentic 实现为受限的应用层编排。本文不再维护路线级依赖、路线级开关、路线间 Adapter 或多套答案契约。
 >
-> 口径纪律：RAG 在本项目是**设计阶段的引入规划**，不是线上已落地能力（同 [`RAG服务引入路线.md`](RAG服务引入路线.md) §6）。本文讲"规划 / 选型 / 落地路径"，不讲"已上线"。
+> 制造追溯不使用图检索，不引入 Neo4j、Cypher 或图投影。实现基础是 **MySQL 关系型追溯读模型 + 固定关联查询计划 + MES 只读 REST 补数**。
 >
-> **范围说明**：C 数据型、D 防错即时辅助两条路线暂不建设（descoped），不在本文档范围内。
+> 口径纪律：RAG 在本项目中是设计阶段的引入规划，本文描述目标方案与落地路径，不代表能力已经上线。
 
 ---
 
-## 0. 设计取舍回顾
+## 0. 实现原则
 
-承接 [整体结构设计 §0](rag-service-整体结构设计.md#0-设计取舍)，本文在此基础上补两条**选型层**的取舍：
-
-| # | 取舍 | 理由 |
-|---|------|------|
-| 1 | 模块化单体 + 共享内核（Shared Kernel） | 三路线基础设施 90% 同构，合并单服务消除重复基类 |
-| 2 | 可拆性是硬约束 | 路线间调用走 `shared/acl/` Port/Adapter，拆服务只换 Adapter 绑定 |
-| 3 | 多存储共存于单进程 | Neo4j/ChromaDB/MySQL/Redis 共存，Port 隔离故障域，按路线降级 |
-| 4 | 只读红线靠启动断言兜底 | 统一 `ReadOnly*Gate` 在 lifespan 启动期扫描，发现写动作即拒绝启动 |
-| 5 | **选型收敛到一张表，解决三路线版本漂移** | 三路线文档各自钉死版本且存在不一致（LangGraph 0.1+ vs ≥0.2）；本文以共享内核为权威收敛口径，路线文档以本文为准回填 |
-| 6 | **B 向量库选 ChromaDB（而非 PGVector/专用向量库）** | 车间 ToB 文档量小 + 查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值）+ 求开发简；chunk 不可变绕开多记录事务弱点。详见 §1.2 |
-
-> 不选多服务的理由见整体结构设计 §0 末。选型层同样遵循"先收敛、再灰度引入（B -> A -> E）"。
+| # | 原则 | 落地方式 |
+|---|------|---------|
+| 1 | 一个服务、一个入口 | `POST /rag/query` 接收问题，内部按证据需求组合工具 |
+| 2 | 统一证据契约 | 文档 chunk 和制造记录都转换为 `Evidence`，答案只引用证据 |
+| 3 | 非图追溯 | 业务主键与关联字段查询，白名单查询计划限制展开范围 |
+| 4 | 简单链路优先 | 单次检索足够时不启动多步 Agentic；复杂问题才使用 LangGraph |
+| 5 | 权限与版本前置 | 在 Port 入参和存储查询中强制执行，不能依赖 prompt 约束 |
+| 6 | 只读与有界 | MES ACL 只读，工具有步数、时间、记录数和 token 预算 |
+| 7 | 可降级、可重建 | 向量索引和追溯读模型都不是权威数据源，可从原始数据重建 |
 
 ---
 
-## 1. 技术选型总览
+## 1. 技术选型
 
 ### 1.1 选型总表
 
-> **收敛原则**：被 ≥2 路线复用的依赖归 `shared/`（版本由本文钉死）；仅单路线使用的依赖留该路线 `infrastructure/`（版本以路线文档为准，本文列出供对齐）。冲突项在 §1.2 给出统一口径。
+| 层次 | 选型 | 建议版本 | 用途 |
+|------|------|---------|------|
+| 语言 | Python | 3.11+ | 服务主体 |
+| Web | FastAPI + Pydantic v2 | FastAPI 0.110+ / Pydantic 2.6+ | 统一 API、请求与结构化输出校验 |
+| ASGI | uvicorn + gunicorn | 0.29+ / 21.2+ | 服务运行与 worker 管理 |
+| LLM 抽象 | langchain-core `BaseChatModel` | 0.2+ | provider 无关的模型适配与观测包装 |
+| Agentic 编排 | LangGraph | 0.2+ | 有限状态机、工具调用和停止条件 |
+| 文档检索 | LlamaIndex + ChromaDB 适配 | 0.10+ / 0.2+ | 向量索引与检索适配 |
+| 向量库 | ChromaDB | 0.5+ | chunk 向量与元数据过滤 |
+| Embedding | bge-m3 | 1024 维 cosine | 文档向量化，可本地化部署 |
+| Reranker | bge-reranker-v2-m3 | - | 文档候选精排 |
+| 推理组件 | sentence-transformers + FlagEmbedding | 3.0+ / 1.2+ | 本地或 sidecar 推理 |
+| 关系数据库 | MySQL | 8.0 | 文档元数据、追溯读模型、幂等位点、审计 |
+| ORM / 驱动 | SQLAlchemy 2.0 async + asyncmy | 2.0+ / 0.2.9+ | 参数化关系查询 |
+| 数据库迁移 | Alembic | 1.13+ | MySQL Schema 版本管理 |
+| 缓存 | Redis + redis-py async | 7 / 5.0+ | 检索缓存、限流与短期预算状态 |
+| 消息 | Kafka + aiokafka | aiokafka 0.10+ | 消费文档与制造领域事件 |
+| HTTP | httpx async | 0.27+ | MES 只读 API 与 agent-service 调用 |
+| 配置 | pydantic-settings | 2.2+ | 统一嵌套配置，前缀 `RAG_` |
+| Trace | OpenTelemetry | SDK 1.24+ | W3C `traceparent` 与工具 span |
+| Metrics | prometheus-client | 0.20+ | `rag_` 前缀指标 |
+| Logging | structlog | 24.1+ | JSON 日志与 trace context |
+| 文档解析 | unstructured + pypdf + python-docx | 0.14+ / 4.0+ / 1.1+ | PDF、Office 与半结构化文档解析 |
+| 基础镜像 | python:3.11-slim | - | 单服务镜像 |
 
-| 层次 | 选型 | 版本 | 用途 | 归属 |
-|------|------|------|------|------|
-| 语言 | Python | 3.11+ | 主体语言 | shared |
-| Web 框架 | FastAPI | 0.110+ | HTTP 入口，异步，原生 OpenAPI，与 Pydantic 无缝 | shared |
-| ASGI / 部署 | gunicorn + uvicorn worker | ≥21.2 / ≥0.29 | K8s 单服务，共享 worker 池 | shared |
-| LLM 抽象 | langchain-core `BaseChatModel` | 0.2+ | `LlmPort` 包装对象，provider 无关 | shared/ai |
-| LLM 工厂 | `llm_factory`（自研） | - | 按 config 创建 `ObservableChatModel`，适配 Claude / 通义千问 / DeepSeek / 本地模型 | shared/ai |
-| Agent 编排 | LangGraph | **≥0.2（统一）** | E 轻量路由图，`recursion_limit=6` | E |
-| 检索编排 | LlamaIndex | 0.10+ | A: `PropertyGraphIndex`；B: `VectorStoreIndex` + `ChromaVectorStore` | A / B |
-| Embedding 模型 | bge-m3 | 1.0+，1024 维 cosine | 向量化（A 缺陷语义入口 / B 文档主体 / A DefectCatalog） | shared/embedding |
-| Embedding 推理 | sentence-transformers + FlagEmbedding | ≥3.0 / ≥1.2 | 本地化推理（车间网隔离） | shared/embedding |
-| Reranker | bge-reranker-v2-m3（`FlagReranker use_fp16=True`） | - | B cross-encoder 精排 | shared/embedding |
-| 图存储 | Neo4j | 5.x（镜像 `neo4j:5.20`） | A 图主体 + DefectCatalog 原生向量索引（1024 维 cosine） | A |
-| 图驱动 | neo4j-python-driver（async） | ≥5.20 | A Cypher 异步执行 | A |
-| 向量库 | **ChromaDB** | 0.5+（嵌入式 Parquet 持久化） | B chunk 向量 + metadata，chunk 不可变 + 版本隔离靠查询过滤 | B |
-| 关系库 | MySQL | 8.0（镜像 `mysql:8.0`） | shared 幂等 / 位点 + A 审计 + E `answer_audit`/`route_trace` + B 治理聚合导出 | shared / A / E / B |
-| MySQL 驱动 | SQLAlchemy 2.0 async + asyncmy | 2.0+，asyncmy ≥0.2.9 | shared / A / E / B | shared |
-| ORM 基类 | SQLAlchemy 2.0 `DeclarativeBase` | 2.0+ | `shared/persistence/base.py`，MySQL | shared |
-| 迁移工具 | Alembic | 1.13+ | 统一管 MySQL 多 schema（Neo4j/ChromaDB 除外） | shared |
-| 缓存 | Redis | 7（镜像 `redis:7-alpine`） | A 子图缓存 / B 检索缓存 / E 查询缓存 | shared / A / B / E |
-| Redis 客户端 | redis-py（async） | 5.0+ | | shared |
-| 消息中间件 | Kafka + aiokafka | aiokafka 0.10+ | 领域事件消费（A 图投影 / B 重索引） | shared/kafka |
-| HTTP 客户端 | httpx（async） | 0.27+ | ACL 出站：MES 只读 REST / agent-service 委托 / 拆服务后的 Http Adapter | shared/acl |
-| 数据校验 | Pydantic v2 | ≥2.6 | 端点 schema / 结构化输出（`with_structured_output`） | shared |
-| 配置 | pydantic-settings | ≥2.2 | `BaseSettings` + `RagSettings`，环境变量前缀 `RAG_` | shared/config |
-| 可观测-trace | OpenTelemetry Python SDK | ≥1.24 | span / context 传播，W3C `traceparent` | shared/obs |
-| 可观测-metrics | prometheus-client | ≥0.20 | Counter/Histogram，统一前缀 `rag_` | shared/obs |
-| 可观测-log | structlog + JSONRenderer | - | 自动注入 `trace_id`/`span_id` | shared/obs |
-| trace 存储（火焰图） | Tempo / Jaeger | - | SRE 火焰图 | shared/obs |
-| trace 存储（证据链） | MySQL 平铺表 | - | 工程师 UI 证据链回溯，同源 `trace_id` 串联 agent-service 与 MES | shared/obs |
-| 文档解析 | unstructured + pypdf + python-docx | ≥0.14 / ≥4.0 / ≥1.1 | B 摄入期半结构化 / 非结构化解析 | B |
-| Docker 基础镜像 | python:3.11-slim | - | 单服务镜像 | shared |
+### 1.2 关键选型说明
 
-> **默认 LLM provider（路线级，经 `llm_factory` 统一切换）**：A = DeepSeek，B = 通义千问（qwen-plus），E = DeepSeek。三者均 provider 无关、可插拔，任何模型降级须过 mes-eval `EvalGate`（成本优化横切归 agent-service，rag-service 仅 E 路由图按需引用）。
->
-> **B 向量库选型说明**：ChromaDB 嵌入式 persistent client 跟随 rag-service 进程，**无需独立向量库 service**；原始文档与向量库分离存储，向量库可重跑摄入管线重建（备份兜底）。详见 §1.2。
+#### ChromaDB 只承担文档向量检索
 
-### 1.2 选型理由（关键项）
+车间文档规模预计为数千文档、数十万 chunk 以内，嵌入式 ChromaDB 可以减少独立基础设施。其使用前提是：
 
-**为什么 B 选 ChromaDB（而非 PGVector / Milvus / Qdrant）？**
+- chunk 不可变，文档升版追加新 chunk；
+- 元数据包含租户、文档状态、文档版本和 `VersionAnchor`；
+- 工艺绑定文档必须按显式或解析得到的版本过滤，历史问题不得退回“查最新”；
+- 原始文档、确定性切块策略和事件记录可重建向量索引；
+- 文档治理与聚合查询放 MySQL，不依赖 ChromaDB 做事务或报表。
 
-前提三条：① 车间 ToB 项目**文档量小**（数千文档 / 数十万 chunk 以内，远未到任何向量库瓶颈）；② 工艺路线类查询**强制带版本锚点（`version`+`version_kind`）**，版本过滤退化成单字段等值，ChromaDB 的 `where` 能做且能 pre-filter；③ **求开发简**--ChromaDB 嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 集成最成熟、少装一套 PG+pgvector+asyncpg+Alembic PG 方言。
+若数据规模、HA 或多写并发超过该前提，应通过 `DocumentIndexPort` 更换实现，而不是改变上层答案契约。
 
-核心设计**chunk 不可变**绕开 ChromaDB 最大弱点（多记录翻转无事务）：
-- chunk 写入后不再修改，metadata 固定带 `version_kind`/`version_ref_id`/`version`/`state`/`tenant_scope`/`doc_id`/`doc_type`/`chunk_seq`/`locator`；
-- 工艺升版时**不翻转老 chunk 状态**，而是追加新版本 chunk；查询带 `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 天然只召回对应版本；
-- ChromaDB 里根本没有"批量翻转"这个操作，多记录事务弱点直接消失；这本身也符合 B 详细设计 §4.4"版本即不可变快照、旧版不删可回溯"的语义。
+#### MySQL 读模型足以支撑制造追溯
 
-代价（已知接受）：
-- HA / 备份弱（无 PITR）-> 用"**可重建**"兜底：ChromaDB Parquet 文件定期备份，向量库可从原始文件 + chunk 策略重建；
-- 无聚合查询（只有 count）-> 治理 / 审计聚合（`GROUP BY`）导出到 MySQL 做（幂等 / 位点 / 审计表本就在 MySQL）；
-- 规模上限 -> 文档少不触发；
-- 单写者并发 -> 重索引量小可接受。
+追溯问题具有明确入口和业务关联：序列号、批次号、工单号、过点记录、物料批次、设备、人员、测试结果与工艺版本。使用带索引的 MySQL 表可以完成这些查询，并能直接表达时间、版本和租户条件。
 
-对比 PGVector / Milvus / Qdrant：在"文档少 + 强制带版本 + 求简"前提下，ChromaDB 的简大于其弱；PGVector 的 SQL 过滤 / 同库事务优势在本场景（等值版本过滤 + chunk 不可变）不再决定性。若未来文档量 / QPS 上到专用向量库甜区，LlamaIndex `VectorStoreIndex` 抽象兜住切换成本，但版本过滤逻辑要从 ChromaDB `where` 改写为各库标量过滤 API。
+该方案避免额外维护图存储、图 Schema 和图同步链路。代价是复杂关联必须提前设计查询计划，不能自由多跳探索；在制造问答场景中，这个限制同时是安全与性能优势。
 
-> **必须守的红线（用 ChromaDB 也守）**：
-> 1. **强制带版本**：`DocumentRetrievalService` 入口校验版本锚点必填（工艺绑定型需 ROUTE 锚点 `version`+`version_kind="route"`），缺失拒绝，不退回"查最新 ACTIVE"--避开"在制品不切换工艺"语义陷阱（工单绑 v3，最新 ACTIVE 是 v4，退回查 v4 会答出不适用 SOP）。设备绑定型需 ASSET 锚点（`version_ref_id` 必填，`version` 可选），通用知识型可选（标准可带 STANDARD 锚点）。版本锚点统一为 `VersionAnchor(kind, ref_id, version)`，覆盖 route/bom/rule/asset/standard。
-> 2. **chunk 不可变**：升版 = 追加新版本 chunk，不改老 chunk。
-> 3. **单条软删可接受**：文档撤回 / 废弃是单条 upsert 改 `state=DEPRECATED`（ChromaDB 单条原子），区别于"批量翻转"（不行）。
-> 4. **备份兜底**：ChromaDB Parquet 定期备份，可重跑摄入管线重建。
-> 5. **聚合导出 MySQL**：治理 / 审计聚合在 MySQL 做。
-> 6. **重索引幂等**：`event_id` + `(doc_id, version_id, chunk_seq)` 去重，可重跑。
+#### LangGraph 只用于需要追加检索的编排
 
-**为什么 LangGraph 仅 E 用、A/B 不用？**
-A 是"事件投影建图 + Cypher 检索 + LLM 单轮综合"，无开放规划；B 是"向量检索 + rerank + LLM 单轮综合"，步骤固定。两者用 async 函数编排 + 策略模式更简洁。E 是"意图路由 + 工具选择 + 轻量多步组合"，存在开放分支，用 LangGraph `StateGraph`，`recursion_limit=6` 作硬上限靠框架兜底。与 agent-service L1/L3 同构、L2 不用 LangGraph 的取舍一致（见 [整体技术选型与模块划分](../整体技术选型与模块划分.md) §2.2）。
+固定的一次文档检索或一次追溯查询使用普通 async application service。只有“追溯发现工艺版本后再查对应 SOP”“首轮证据不足需换种子补查”等多步场景才进入 LangGraph。`recursion_limit` 只是最后防线，应用层仍需独立计算工具次数、时长和证据预算。
 
-> **版本漂移统一口径**：E 实现方案写 LangGraph 0.1+、E 详细设计写 ≥0.2，不一致。本文以 **≥0.2** 为准（`Command(resume=…)` 语义依赖，与 agent-service 对齐），E 两份路线文档需回填统一。
-
-**为什么图（Neo4j）与向量（ChromaDB）分离，而非一库通吃？**
-A 的核心是**属性图 + Cypher 多跳**（5M1E 串联靠显式图边，`SNAPSHOT_OF_ROUTE` 快照边物理锁定版本），Neo4j 的原生向量索引只用于 DefectCatalog 缺陷描述语义入口这一个点；B 的核心是**大规模 chunk 向量检索 + 版本/权限过滤**，ChromaDB 嵌入式轻量、LlamaIndex 集成成熟。强行用 Neo4j 存 chunk 向量会在多跳查询与高维近邻检索之间互相拖累；强行让 ChromaDB 存图则丢失 Cypher 表达力。分离后故障域也独立（Neo4j 不可用只拖垮 A，ChromaDB 不可用只拖垮 B）。
-
-> **Neo4j 向量索引（A）**：原生向量索引，`vector.dimensions=1024, similarity=cosine`（A 实现方案 §4.5）。ChromaDB（B）用默认 HNSW + cosine，不暴露 `m`/`ef_construction` 参数（chunk 不可变 + 文档少，默认参数足够，评测后若需调优再评估切换）。
-
-**为什么 Alembic 统一管 MySQL 多 schema？**
-现状缺口：各路线用原始 SQL DDL，无迁移工具（整体结构设计 §9）。Alembic 把 MySQL（shared/A/E + B 的幂等/位点/审计）的 schema 演进纳入版本管理，CI 校验"模型与迁移一致"。Neo4j 与 ChromaDB 除外：图库 DDL 幂等即可（`SchemaInitializer`），ChromaDB collection 由代码初始化（chunk 不可变，无 schema 演进）。
-
-**LlamaIndex 与 langchain-core 如何共存？**
-边界清晰：`shared/ai/` 基于 langchain-core `BaseChatModel` 做 LLM 抽象（`LlmPort` + `ObservableChatModel`），所有路线的 LLM 调用走它；A/B 的**检索编排**（图索引构建、向量索引构建、retriever）用 LlamaIndex 0.10+（A `PropertyGraphIndex` / B `VectorStoreIndex` + `ChromaVectorStore`）。两者不重叠：LLM 抽象归 shared，检索编排归路线 `infrastructure/`。
-
-### 1.3 依赖清单（pyproject.toml 片段）
-
-> 合并三路线依赖、去重，按归属分组。仅单路线使用的依赖标 `[route]`。
+### 1.3 依赖清单
 
 ```toml
 [project]
 name = "rag-service"
 requires-python = ">=3.11"
-
-[project.dependencies]
-# ── shared：Web / 部署 / 校验 / 配置 ──
-fastapi = ">=0.110"
-uvicorn = {extras = ["standard"], version = ">=0.29"}
-gunicorn = ">=21.2"
-pydantic = ">=2.6"
-pydantic-settings = ">=2.2"
-
-# ── shared：LLM 抽象 ──
-langchain-core = ">=0.2"
-# provider 按需选装：langchain-anthropic / langchain-community(通义/DeepSeek) / 本地
-
-# ── shared：持久化 / 迁移（MySQL）──
-sqlalchemy = {extras = ["asyncio"], version = ">=2.0"}
-asyncmy = ">=0.2.9"        # MySQL async driver
-alembic = ">=1.13"
-redis = ">=5.0"
-
-# ── shared：消息 / HTTP / 可观测 ──
-aiokafka = ">=0.10"
-httpx = ">=0.27"
-opentelemetry-sdk = ">=1.24"
-opentelemetry-instrumentation-fastapi = ">=0.45b0"
-opentelemetry-instrumentation-httpx = ">=0.45b0"
-prometheus-client = ">=0.20"
-structlog = ">=24.1"
-
-# ── shared：embedding（bge 本地化推理）──
-sentence-transformers = ">=3.0"
-FlagEmbedding = ">=1.2"
-
-# ── A 追溯型 ──
-neo4j = {extras = ["async"], version = ">=5.20"}      # [A]
-llama-index = ">=0.10"                                  # [A/B]
-
-# ── B 文档型 ──
-chromadb = ">=0.5"                                      # [B] 嵌入式向量库
-llama-index-vector-stores-chroma = ">=0.2"              # [B] LlamaIndex Chroma 适配
-unstructured = ">=0.14"                                 # [B] 文档解析
-pypdf = ">=4.0"                                         # [B]
-python-docx = ">=1.1"                                   # [B]
-
-# ── E Agentic ──
-langgraph = ">=0.2"                                     # [E]
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "gunicorn>=21.2",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "langchain-core>=0.2",
+  "langgraph>=0.2",
+  "llama-index>=0.10",
+  "llama-index-vector-stores-chroma>=0.2",
+  "chromadb>=0.5",
+  "sentence-transformers>=3.0",
+  "FlagEmbedding>=1.2",
+  "sqlalchemy[asyncio]>=2.0",
+  "asyncmy>=0.2.9",
+  "alembic>=1.13",
+  "redis>=5.0",
+  "aiokafka>=0.10",
+  "httpx>=0.27",
+  "opentelemetry-sdk>=1.24",
+  "opentelemetry-instrumentation-fastapi>=0.45b0",
+  "opentelemetry-instrumentation-httpx>=0.45b0",
+  "prometheus-client>=0.20",
+  "structlog>=24.1",
+  "unstructured>=0.14",
+  "pypdf>=4.0",
+  "python-docx>=1.1",
+]
 ```
 
-### 1.4 部署形态（docker-compose 片段）
+具体模型 provider 依赖按部署环境选装。生产交付应在评审后锁定依赖版本，不只保留下限。
 
-> B 用 ChromaDB 嵌入式，无需独立向量库 service；Parquet 持久化挂卷。
+### 1.4 部署依赖
 
 ```yaml
 services:
   rag-service:
     build: .
-    image: rag-service:latest
     environment:
       RAG_LLM__PROVIDER: deepseek
       RAG_EMBEDDING__BASE_URL: http://bge-inference:8080
-      RAG_NEO4J__URI: bolt://neo4j:7687
       RAG_MYSQL__DSN: mysql+asyncmy://rag:rag@mysql:3306/rag
       RAG_REDIS__URL: redis://redis:6379/0
       RAG_KAFKA__BOOTSTRAP: kafka:9092
-      RAG_CHROMA__PERSIST_DIR: /data/chroma   # ChromaDB 嵌入式 Parquet 持久化
+      RAG_CHROMA__PERSIST_DIR: /data/chroma
+      RAG_ORCHESTRATION__MAX_STEPS: "6"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-      # 路线级开关（灰度引入：先 B 再 A，E 收口）
-      RAG_DOCUMENT__ENABLED: "true"
-      RAG_TRACEABILITY__ENABLED: "false"
-      RAG_AGENTIC__ENABLED: "false"
-    depends_on: [neo4j, mysql, redis, kafka, bge-inference]
-    volumes: ["chromadata:/data/chroma"]
-    ports: ["8000:8000"]
+    volumes:
+      - chromadata:/data/chroma
+    ports:
+      - "8000:8000"
 
-  bge-inference:                    # bge-m3 + reranker 本地化推理 sidecar
-    image: michaelfeil/infinity:latest   # 或 TEI；车间网隔离必备
-    ports: ["8080:8080"]
+  bge-inference:
+    image: michaelfeil/infinity:latest
+    ports:
+      - "8080:8080"
 
-  neo4j:        { image: "neo4j:5.20", environment: { NEO4J_AUTH: neo4j/rag } }
-  mysql:        { image: "mysql:8.0", environment: { MYSQL_ROOT_PASSWORD: rag, MYSQL_DATABASE: rag } }
-  redis:        { image: "redis:7-alpine" }
+  mysql:
+    image: mysql:8.0
+
+  redis:
+    image: redis:7-alpine
 
 volumes:
   chromadata:
 ```
 
+Kafka、MES、模型 provider 与 OTel Collector 可复用现有部署。配置项用于调整统一服务行为，不包含 `document.enabled`、`traceability.enabled`、`agentic.enabled` 一类路线开关。
+
 ---
 
-## 2. 共享内核（shared/）实现方案
+## 2. 统一契约与 Port
 
-> 共享内核只放被 ≥2 路线复用的抽象与实现（整体结构设计 §3）。本节给出关键抽象的代码骨架，路线内部实现仍以各路线文档为准。
-
-### 2.1 `shared/ai/` -- LLM 抽象
+### 2.1 检索上下文
 
 ```python
-# app/shared/ai/port.py
-from typing import Protocol
+# app/domain/query.py
+@dataclass(frozen=True)
+class RetrievalContext:
+    request_id: str
+    trace_id: str
+    tenant: TenantContext
+    version_anchor: VersionAnchor | None
+    time_range: TimeRange | None
+    budget: RetrievalBudget
 
-class LlmPort(Protocol):
-    """LLM 抽象接口（DIP）：业务层依赖它而非具体 provider。"""
-    async def achat(self, messages: list, **kwargs) -> "ChatResult": ...
+
+@dataclass(frozen=True)
+class RetrievalBudget:
+    max_steps: int = 6
+    max_tool_calls: int = 8
+    max_records: int = 200
+    timeout_seconds: int = 30
 ```
+
+`RetrievalContext` 由 `QueryService` 创建，工具不能自行放宽租户、版本、时间或预算。`TenantContext` 不信任模型生成的参数，只能来自认证上下文。
+
+### 2.2 证据与答案
 
 ```python
-# app/shared/ai/observable_chat_model.py
-class ObservableChatModel:
-    """包装任意 langchain-core BaseChatModel，统一埋 token/延迟/模型/prompt_version，provider 无关。"""
-    def __init__(self, inner, obs: "ObservabilityPort", model_name: str, prompt_version: str):
-        self._inner, self._obs = inner, obs
-        self.model_name, self.prompt_version = model_name, prompt_version
+# app/domain/evidence.py
+class EvidenceType(StrEnum):
+    DOCUMENT_CHUNK = "DOCUMENT_CHUNK"
+    TRACE_RECORD = "TRACE_RECORD"
 
-    async def achat(self, messages, **kwargs):
-        with self._obs.llm_span(model=self.model_name, prompt_version=self.prompt_version):
-            resp = await self._inner.ainvoke(messages, **kwargs)
-            self._obs.record_llm(model=self.model_name, tokens=resp.usage_total_tokens,
-                                 latency_ms=..., prompt_version=self.prompt_version)
-            return resp
+
+@dataclass(frozen=True)
+class Evidence:
+    evidence_id: str
+    evidence_type: EvidenceType
+    source: SourceRef
+    locator: EvidenceLocator
+    content: str | Mapping[str, object]
+    version_anchor: VersionAnchor | None
+    occurred_at: datetime | None
+    freshness: Freshness
 ```
+
+`RagAnswer` 包含 `summary`、`sections`、`citations`、`evidence_ids`、`version_anchors`、`missing_evidence`、`retrieval_steps` 和 `trace_id`。引用必须指向本次 `EvidenceSet` 中的 ID，生成后由 `CitationPolicy` 再校验一次。
+
+### 2.3 检索 Port
 
 ```python
-# app/shared/ai/llm_factory.py
-def llm_factory(settings: "LlmSettings", obs: "ObservabilityPort") -> LlmPort:
-    provider = settings.provider  # claude | qwen | deepseek | local
-    inner = _build_inner(provider, settings)   # langchain-{provider} BaseChatModel
-    return ObservableChatModel(inner, obs, settings.model_name, settings.prompt_version)
+# app/application/ports/document_search.py
+class DocumentSearchPort(Protocol):
+    async def search(
+        self,
+        query: str,
+        context: RetrievalContext,
+        *,
+        doc_types: set[str] | None = None,
+        top_k: int = 8,
+    ) -> list[Evidence]: ...
+
+
+# app/application/ports/trace_lookup.py
+class TraceLookupPort(Protocol):
+    async def lookup(
+        self,
+        seed: TraceSeed,
+        context: RetrievalContext,
+    ) -> TraceEvidenceResult: ...
+
+    async def expand(
+        self,
+        records: list[Evidence],
+        plan_name: str,
+        context: RetrievalContext,
+    ) -> TraceEvidenceResult: ...
 ```
 
-> 现状：A/B/E 三份实现方案各自定义 `llm_factory.py`。本节将其上移到 `shared/ai/`，各路线删本地副本、改 import（迁移映射见 §6.2）。
+`TraceEvidenceResult` 同时包含 `evidence`、`resolved_version_anchors` 和 `missing_evidence`。调用方必须处理缺失项，不能只读取证据列表。
 
-### 2.2 `shared/embedding/` -- Embedding 抽象
+### 2.4 统一应用入口
 
 ```python
-# app/shared/embedding/port.py
-class EmbeddingPort(Protocol):
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]: ...   # 1024 维
+# app/application/query_service.py
+class QueryService:
+    async def handle(self, query: RagQuery, tenant: TenantContext) -> RagAnswer:
+        context = self._context_factory.create(query, tenant)
+        plan = await self._planner.plan(query, context)
+
+        if plan.requires_multi_step:
+            result = await self._orchestrator.run(plan, context)
+        else:
+            result = await self._direct_retriever.execute(plan, context)
+
+        answer = await self._composer.compose(query, result.evidence, context)
+        await self._audit.record(query, result, answer, context)
+        return answer
 ```
 
-```python
-# app/shared/embedding/bge_client.py
-class BgeClient(EmbeddingPort):
-    """bge-m3 1024 维批量推理，A（缺陷语义入口）/ B（文档主体）共用。"""
-    DIM = 1024
-    async def embed_batch(self, texts): ...   # 走 bge-inference sidecar 或本地 sentence-transformers
+规划器输出的是“需要哪些证据和工具”，不是文档型、追溯型或 Agentic 的路线标签。
 
-class BgeReranker:
-    """bge-reranker-v2-m3 cross-encoder 精排（B 用）。FlagReranker(use_fp16=True)。"""
-    async def rerank(self, query: str, docs: list[str], top_k: int) -> list: ...
+---
+
+## 3. 文档检索实现
+
+### 3.1 摄入链路
+
+```text
+原始文档
+  -> 类型识别与解析
+  -> 清洗、章节与页码保留
+  -> 确定性切块
+  -> 文档版本 / 租户 / VersionAnchor 元数据绑定
+  -> bge-m3 向量化
+  -> ChromaDB 写入
+  -> MySQL 摄入状态与索引位点提交
 ```
 
-### 2.3 `shared/obs/` -- 可观测底座
+- 以 `(doc_id, document_version, chunk_seq, chunk_strategy_version)` 作为业务幂等键。
+- 原始文件和解析结果按文档版本保存，重跑切块与向量化不会覆盖其他版本。
+- 文档撤回或权限变化需要立即更新 MySQL 元数据，并使相关缓存失效；索引中的状态同步完成前，检索必须叠加权威状态校验或停止该文档的召回。
 
-对齐 agent-service 五层可观测模型与 trace 双存储（[整体技术选型与模块划分](../整体技术选型与模块划分.md) §3.5.2）。rag-service 复用同一套，仅指标前缀为 `rag_`。
+### 3.2 chunk 元数据
 
-| 组件 | 职责 |
+| 字段 | 用途 |
 |------|------|
-| `ObservabilityContext` | 不可变 dataclass，随会话流动（`session_id`/`trace_id`/`tenant`/`route`/`prompt_version`/`step_no`） |
-| `ObservabilityPort` | 抽象接口，业务节点依赖它而非 OTel/prometheus 具体实现（DIP） |
-| `Tracing` | OTel span 封装（`session_span`/`retrieval_span`/`projection_span`/`llm_span`） |
-| `MetricsCollector` | Counter/Histogram 集中定义，统一前缀 `rag_` |
-| `LoggingContext` | structlog + JSONRenderer，自动注入 `trace_id`/`span_id` |
-| `Redactor` | 脱敏纯函数（序列号保留前 4 后 2、物料批次白名单、PII 不采集） |
+| `tenant_id`、`workshop_scope`、`line_scope` | 检索前权限过滤 |
+| `doc_id`、`document_version`、`doc_type` | 来源与类型过滤 |
+| `state` | `PUBLISHED` 等状态过滤 |
+| `version_kind`、`version_ref_id`、`version` | 工艺/BOM/规则等版本过滤 |
+| `effective_from`、`effective_to` | 当前指导与历史查询的时间语义 |
+| `chunk_seq`、`chunk_strategy_version` | 幂等与重建 |
+| `page`、`section`、`source_locator` | 精确引用 |
 
-> 指标清单见 §9.1。观测是只读旁路：失败不反噬业务（图库崩返回 503，不影响 MES 过点）。
+### 3.3 查询链路
 
-### 2.4 `shared/config/` -- 统一配置
+1. 根据 `RetrievalContext` 构造强制过滤条件；
+2. 向量召回候选，候选数大于最终 `top_k`，为重排保留空间；
+3. bge-reranker 精排；
+4. 去除重复章节和低相关片段；
+5. 转换为 `Evidence`，保留原始 locator 与版本；
+6. 记录召回数、过滤后数量、重排耗时与索引 freshness。
+
+工艺绑定文档如果没有显式版本，应先由 `version_resolve` 根据目标工单或过点记录解析。解析失败时返回澄清或证据不足，不自动使用当前 ACTIVE 版本回答历史问题。
+
+---
+
+## 4. 非图制造追溯实现
+
+### 4.1 读模型
+
+读模型围绕实际查询建立，不复制 MES 全量数据。首版可采用以下表：
+
+| 表 | 关键字段 | 主要索引 |
+|----|---------|---------|
+| `trace_work_order` | `work_order_id`、产品、工单状态、计划/实际时间 | `(tenant_id, work_order_id)` |
+| `trace_unit_operation` | `operation_record_id`、`serial_no`、`work_order_id`、站点、设备、人员、工艺版本、过点时间 | `(tenant_id, serial_no, occurred_at)`、`(tenant_id, work_order_id, occurred_at)` |
+| `trace_material_usage` | 过点记录、物料批次、用量、上料时间 | `(tenant_id, operation_record_id)`、`(tenant_id, material_lot_id, used_at)` |
+| `trace_test_result` | 过点记录、测试项、结果、缺陷代码、测试时间 | `(tenant_id, operation_record_id)`、`(tenant_id, defect_code, tested_at)` |
+| `trace_route_binding` | 工单/过点记录、工艺 `ref_id` 与版本、生效区间 | `(tenant_id, work_order_id)`、`(tenant_id, route_ref_id, route_version)` |
+| `trace_equipment_context` | 过点记录、设备、经评审的参数摘要、采集时间 | `(tenant_id, operation_record_id, captured_at)` |
+| `trace_sync_checkpoint` | 来源主题、分区、位点、最近事件时间 | 消费者组与分区唯一键 |
+
+每张业务表都包含 `tenant_id`、必要的 workshop/line scope、来源上下文、来源记录 ID、来源更新时间和数据版本。设备参数只保存回答目标问题所需的摘要，不全量复制高频原始采集数据。
+
+### 4.2 固定查询计划
 
 ```python
-# app/shared/config/base.py
-class BaseSettings(pydantic_settings.BaseSettings):
-    """公共配置项，环境变量前缀 RAG_。"""
-    model_config = SettingsConfigDict(env_prefix="RAG_", env_nested_delimiter="__")
+# app/infrastructure/trace/query_plans.py
+QUERY_PLANS = {
+    "unit_overview": ("unit_operation", "test_result", "route_binding"),
+    "unit_5m1e": (
+        "unit_operation",
+        "material_usage",
+        "test_result",
+        "route_binding",
+        "equipment_context",
+    ),
+    "lot_units": ("material_usage", "unit_operation", "test_result"),
+    "work_order_history": ("work_order", "unit_operation", "test_result"),
+}
+```
+
+计划名由服务端规划器选择，客户端不能直接提交表名、字段名或 SQL。每个计划定义：
+
+- 允许读取的 repository 方法；
+- 必需的种子字段；
+- 最大记录数与时间窗口；
+- 可继续展开的计划名；
+- 必须返回的版本字段；
+- 数据权限与 freshness 检查。
+
+### 4.3 查询算法
+
+```text
+TraceSeed(serial_no | material_lot_id | work_order_id | defect + time_range)
+   │
+   ▼
+解析种子并校验租户、时间范围
+   │
+   ▼
+读取主记录（过点 / 工单 / 批次使用记录）
+   │
+   ▼
+按固定计划使用业务关联字段批量查询
+   │
+   ├── 过点 -> 测试结果
+   ├── 过点 -> 物料使用
+   ├── 过点 -> 工艺版本绑定
+   └── 过点 -> 设备与人员上下文
+   │
+   ▼
+版本对齐、去重、权限复核、记录数裁剪
+   │
+   ▼
+Trace Evidence + Resolved Versions + Missing Evidence
+```
+
+实现时使用 SQLAlchemy 参数化查询和批量 `IN` 条件，避免逐条记录发起查询。任何追加展开都消耗同一 `RetrievalBudget`，不能递归创建新预算。
+
+### 4.4 MES 只读补数
+
+满足以下条件时可通过 ACL 补数：
+
+- 读模型缺少种子记录；
+- 读模型位点超过查询允许的新鲜度阈值；
+- 目标问题需要未进入读模型、但已列入白名单的权威字段；
+- 读模型与事件版本冲突，需要权威记录确认。
+
+补数仍须转换为统一 `Evidence`，来源标记为 MES 上下文与资源 ID，并记录读取时间。REST 超时或部分失败时返回 `MissingEvidence`，不能用文档片段或模型常识代替制造记录。
+
+### 4.5 5M1E 与根因表达
+
+| 分类 | 证据来源示例 |
+|------|-------------|
+| 人 Man | 过点人员、资质或班次记录（按权限脱敏） |
+| 机 Machine | 设备、工站、经评审的参数摘要 |
+| 料 Material | 物料批次、上料与使用记录 |
+| 法 Method | 当时工艺版本、对应版本 SOP 与检验标准 |
+| 测 Measurement | 测试结果、缺陷代码、检测记录 |
+| 环 Environment | 已纳入读模型的环境记录；未接入时明确缺失 |
+
+5M1E 是证据归类，不是自动根因结论。答案可以说明“哪些记录存在异常或与问题相关”，但最终根因需要足够证据或人工确认。
+
+---
+
+## 5. Agentic 编排实现
+
+### 5.1 状态定义
+
+```python
+# app/application/orchestrator.py
+class RagState(TypedDict):
+    query: str
+    plan: RetrievalPlan
+    evidence: list[Evidence]
+    missing: list[MissingEvidence]
+    steps: list[RetrievalStep]
+    tool_calls: int
+    started_at: float
+    stop_reason: str | None
+```
+
+状态节点为 `analyze -> plan -> act -> observe -> compose`。`observe` 后根据以下条件决定追加检索或停止：
+
+- 仍存在可补救的证据缺口；
+- 存在合法且未尝试过的工具动作；
+- 当前步数、工具次数、记录数和总时长均未超限；
+- 上一轮产生了新证据或解析出了新版本锚点。
+
+### 5.2 工具白名单
+
+| 工具 | 实现 Port | 典型用途 |
+|------|----------|---------|
+| `document_search` | `DocumentSearchPort` | SOP、手册、标准、历史 8D 检索 |
+| `trace_lookup` | `TraceLookupPort.lookup` | 根据单件、批次或工单建立证据集 |
+| `record_expand` | `TraceLookupPort.expand` | 按固定计划追加物料、测试、设备等记录 |
+| `version_resolve` | `VersionResolverPort` | 从历史制造记录解析版本锚点 |
+
+所有工具接收服务端保存的 `context_id`，由服务端还原 `RetrievalContext`；模型不能伪造或替换租户上下文。
+
+### 5.3 典型组合
+
+```text
+问题：批次 LOT-01 焊接不良怎么处理？
+
+1. trace_lookup(lot=LOT-01)
+2. 从目标过点记录解析 route VersionAnchor
+3. record_expand(plan_name="lot_units")
+4. document_search(query="焊接不良 处置", version_anchor=已解析版本)
+5. 对齐测试记录与对应版本 SOP
+6. 输出制造事实、文档建议、候选解释和缺失证据
+```
+
+这里只发生了一次统一 RAG 请求。多次工具调用是多步检索过程，不是跨路线调用。
+
+### 5.4 停止与降级
+
+| 情况 | 行为 |
+|------|------|
+| 单次检索证据充分 | 直接生成，不进入多步循环 |
+| 缺少关键种子或时间范围 | 返回澄清问题 |
+| 工具无新增证据 | 停止并说明缺口 |
+| 达到步数/时间/token 上限 | 基于已有证据部分回答或返回预算耗尽 |
+| 权限或版本冲突 | 停止相关检索，不尝试换路径绕过 |
+| LLM 生成失败 | `RETRIEVAL_ONLY` 可返回证据；普通请求返回可重试错误 |
+
+---
+
+## 6. 配置、启动与依赖注入
+
+### 6.1 配置模型
+
+```python
+class RagSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="RAG_",
+        env_nested_delimiter="__",
+    )
+
     llm: LlmSettings
     embedding: EmbeddingSettings
     mysql: MysqlSettings
     redis: RedisSettings
     kafka: KafkaSettings
-    otel: OtelSettings
-
-# app/shared/config/rag_settings.py
-class RagSettings(BaseSettings):
-    """聚合各路线子配置 + 路线级开关。"""
-    traceability: TraceSettings      # rag.traceability.enabled
-    document: DocSettings            # rag.document.enabled（含 chroma_persist_dir）
-    agentic: AgenticSettings         # rag.agentic.enabled
+    chroma: ChromaSettings
+    document: DocumentSettings
+    trace: TraceSettings
+    orchestration: OrchestrationSettings
+    security: SecuritySettings
 ```
 
-> 路线级开关控制 router 注册与 consumer 启停（§4.2），支持灰度引入：先 B 再 A，E 收口。
+`document`、`trace` 和 `orchestration` 配置分别保存 top-k、查询窗口、最大步数等参数，不代表独立产品或独立部署单元。
 
-### 2.5 `shared/kafka/` -- 事件消费基类
-
-| 组件 | 职责 |
-|------|------|
-| `DomainEvent` | 领域事件 envelope 公共定义（`event_id`/`event_type`/`event_version`/`occurred_at`/`source_service`/`trace_id`/`partition_key`），对齐 [消息处理实现说明](../实现说明/业务事件/消息处理实现说明.md) §4.3 |
-| `ConsumerGroup` | aiokafka 消费者基类：手动 ack + 位点落 MySQL + 消费者组按主题前缀分组 |
-| `IdempotencyRepo` | `event_id` 幂等表操作基类（A/B 共用，落 MySQL） |
-| `OffsetRepo` | 消费者位点表操作基类（落 MySQL） |
-| `ProjectionHandler`（Protocol） | 事件 -> 投影 handler 协议（ISP），A 图投影 / B 重索引都实现它 |
-
-> 现状：A/B 各自实现 `consumer_group.py`/`listeners.py`/`idempotency_repo.py`/`offset_repo.py`，逻辑高度同构。本节上移基类（幂等/位点表落 MySQL），各路线只保留自己的 `handlers/`（事件 -> 投影动作映射）。
-
-### 2.6 `shared/acl/` -- ACL 基类 + 路线间 Port/Adapter（可拆性核心）
-
-**(a) 对 MES 只读 REST 的 ACL（出站）**
+### 6.2 启动流程
 
 ```python
-# app/shared/acl/base_client.py
-class BaseReadonlyAclClient:
-    """httpx 异步基类：自动注入 traceparent / 超时重试 / 租户 header / 只读断言。"""
-    _WRITE_VERBS = {"create", "update", "delete", "post", "put", "patch", "remove", "save"}
-    def __init__(self, client: httpx.AsyncClient, base_url: str, tenant_propagator): ...
-    # 方法名禁止写动词--由 ReadOnlyAclGate 在启动期扫描（§3.2）
-```
-
-**(b) 路线间调用的 Port/Adapter（可拆性关键）**
-
-```python
-# app/shared/acl/ports.py
-class TraceRagPort(Protocol):
-    async def query(self, req: "TraceQuery") -> "TraceAnswer": ...
-    async def expand(self, req: "ExpandRequest") -> "TraceSubgraph": ...
-
-class DocRagPort(Protocol):
-    async def query(self, req: "DocQuery") -> "DocAnswer": ...
-    async def search(self, req: "DocSearch") -> list: ...
-```
-
-```python
-# app/shared/acl/adapters.py
-class InProcessTraceRagAdapter(TraceRagPort):
-    """单服务内：直调 A 的 TraceRetrievalService（决策 #4）。"""
-    def __init__(self, svc: "TraceRetrievalService"): self._svc = svc
-    async def query(self, req): return await self._svc.retrieve_and_synthesize(req)
-
-class HttpTraceRagAdapter(TraceRagPort):
-    """拆服务后：httpx -> rag-service A，业务代码零改动。"""
-    def __init__(self, client: httpx.AsyncClient, base_url: str): ...
-```
-
-> 规则：路线间**禁止直接 import 对方的 application/domain**，一律依赖 `shared/acl/` 的 Port。单服务模式下 DI 容器注入 InProcess Adapter；未来拆服务只需把绑定换成 Http Adapter。这把"现在单服务、将来可拆"从口号变成结构属性。
-
-### 2.7 `shared/persistence/` -- 多存储 Engine 工厂 + 迁移
-
-```python
-# app/shared/persistence/db.py
-class DbEngines:
-    """按 config 懒初始化，连接池分别配额。"""
-    async def mysql(self) -> AsyncEngine: ...   # asyncmy，shared/A/E/B(幂等/位点/审计)
-    async def neo4j(self) -> AsyncDriver: ...    # A
-    async def chroma(self) -> "chromadb.api.Client": ...  # B 嵌入式 persistent client
-    async def redis(self) -> Redis: ...          # shared/A/B/E
-```
-
-> 多 DB 注意：单进程同时持有 Neo4j driver + ChromaDB client + MySQL asyncmy + Redis client，连接池分别配额，lifespan 启动期做就绪探测，任一不可用按路线降级（§3.3）。ChromaDB 嵌入式跟随进程，Parquet 持久化到挂卷，无独立 service。Alembic 多库配置见 §5（仅 MySQL）。
-
-### 2.8 `shared/tenant/` -- 租户上下文 + 跨服务传递
-
-| 组件 | 职责 |
-|------|------|
-| `TenantContext` | 租户上下文（`tenant_id`/`scopes`: workshop/line 列表） |
-| `dependency` | FastAPI 依赖：`tenant_from_token`（JWT）/ `tenant_from_header`（`X-Tenant-Scope`） |
-| `propagation` | 跨服务传递协议：出站 httpx 自动注入 `X-Tenant-Scope`；Kafka 消费时从事件 envelope metadata 还原 |
-
-> 现状缺口：各路线各自定义 `TenantContext` 与过滤逻辑（A 用 Cypher `WHERE`、B 用 ChromaDB `where`），但**未定义跨服务传递协议**。本文统一：A/B/E 共用一个 `TenantContext`，传递协议在 `shared/tenant/propagation.py` 一处定义。
-
-### 2.9 `shared/web/` -- FastAPI 公共底座
-
-```python
-# app/shared/web/lifespan.py
 @asynccontextmanager
-async def lifespan(app: FastAPI, settings: RagSettings, container: "Container"):
-    # 1. 启动断言（只读红线，§3）
+async def lifespan(app: FastAPI):
+    settings = load_settings()
+    container = build_container(settings)
     await run_startup_assertions(settings, container)
-    # 2. 存储就绪探测（按路线降级，§3.3）
-    await probe_storages(settings, container)
-    # 3. 按路线开关启停 consumer / router
-    await start_consumers(settings, container)
+    await container.initialize()
+    await container.start_consumers()
+    app.state.container = container
     yield
-    await shutdown(container)
+    await container.close()
 ```
+
+启动断言覆盖只读 ACL、工具白名单、查询计划、Kafka topic 和必要索引；`/ready` 再反映 MySQL、ChromaDB、Redis、Kafka 和关键 MES 只读依赖状态。
+
+### 6.3 路由注册
 
 ```python
-# app/shared/web/container.py
-class Container:
-    """DI 容器：注册 LLM/Embedding/各 Port 的 Adapter 绑定。"""
-    def __init__(self, settings: RagSettings):
-        self.obs = ObservabilityContext(...)
-        self.llm = llm_factory(settings.llm, self.obs)
-        self.embedding = BgeClient(settings.embedding)
-        # Port -> InProcess Adapter 绑定（拆服务时换 Http Adapter）
-        self.trace_rag: TraceRagPort = InProcessTraceRagAdapter(self.trace_svc)
-        self.doc_rag: DocRagPort = InProcessDocRagAdapter(self.doc_svc)
+def register_routers(app: FastAPI) -> None:
+    app.include_router(query_router)      # /rag/query, /rag/answers/{id}/evidence
+    app.include_router(document_router)   # /rag/documents/*
+    app.include_router(health_router)     # /health, /ready, /metrics
 ```
 
-> `deps.py` 从容器取实例，FastAPI 路由用 `Depends(get_trace_service)` 注入。
+`QueryService` 通过 DI 获得规划器、两个检索 Port、编排器、答案生成器和审计 Port。基础设施替换不影响 API 契约。
 
-### 2.10 `shared/events/` -- 版本契约
+---
 
-| 组件 | 职责 |
+## 7. 事件、版本与一致性
+
+### 7.1 事件消费
+
+- 文档生命周期事件驱动解析、发布状态同步和重索引。
+- 制造领域事件更新关系型追溯读模型。
+- `event_id` 用于幂等，Kafka 位点和来源事件时间用于 freshness。
+- 读模型更新失败进入重试或死信流程，不提交未完成位点。
+- 禁止订阅未经评审的高频原始采集主题。
+
+### 7.2 版本解析
+
+| 场景 | 版本策略 |
+|------|---------|
+| 当前 SOP 查询 | 使用当前有效且已发布版本，并记录解析依据 |
+| 历史单件/批次问题 | 从目标过点或工单绑定解析当时版本 |
+| 用户显式指定版本 | 严格使用指定版本，冲突时提示，不静默切换 |
+| 通用设备手册 | 按设备型号与适用版本过滤，无版本语义时可不绑工艺版本 |
+| 无法解析工艺版本 | 不输出确定性的版本相关作业指导，返回澄清或缺口 |
+
+### 7.3 缓存
+
+缓存 key 至少包含租户与数据范围摘要、规范化问题、版本锚点、时间范围、工具参数、索引版本和 prompt/模型版本。不得只按 query 文本缓存，否则可能产生越权或历史版本串用。
+
+---
+
+## 8. 数据库与迁移
+
+| Schema | 内容 | 迁移方式 |
+|--------|------|---------|
+| `rag_knowledge` | 文档、版本、绑定、摄入任务、索引状态 | Alembic |
+| `rag_trace` | 关系型追溯读模型、同步检查点 | Alembic |
+| `rag_runtime` | 事件幂等与位点、答案审计、检索步骤 | Alembic |
+| ChromaDB | 文档向量与过滤元数据 | collection 初始化、备份与重建 |
+| Redis | 缓存、限流、短期预算 | 不作为唯一事实来源 |
+
+迁移脚本必须包含 `upgrade()` 与 `downgrade()`；新增读模型字段优先采用“加字段 -> 回放/双写 -> 切读 -> 清理”的兼容流程。追溯读模型重建期间通过 generation 或别名切换，避免半张表对外提供查询。
+
+ChromaDB collection 使用 cosine 空间，启动时幂等创建。备份不能替代重建能力，至少定期验证一次从原始文档和确定性管线完整重建。
+
+---
+
+## 9. 安全与只读实现
+
+### 9.1 启动期检查
+
+| 检查 | 内容 |
 |------|------|
-| `version_contract` | `VersionAnchor(kind, ref_id, version)` 统一版本锚点（route/bom/rule/asset/standard）定义；`ProcessRouteActivated` 驱动的版本失效事件 -> A 重投图 / B 重索引的统一入口 |
+| `ReadOnlyAclGate` | MES 客户端只能注册白名单只读方法 |
+| `ReadOnlyToolGate` | Agentic 工具必须声明只读且属于白名单 |
+| `QueryPlanGate` | 查询计划只能引用已注册 repository 与允许关联 |
+| `RawDataTopicGate` | 禁止订阅未评审原始数据主题 |
+| `IndexGate` | 必需 MySQL 索引和 ChromaDB collection 已就绪 |
 
-> 版本一致性三段传递链（核心安全契约）：图 `SNAPSHOT_OF_{kind}{version}`（MVP 锁 route）-> L1 `evidence.version_anchor` -> L2 `Draft.version_anchor` -> MES 应用服务校验 ACTIVE。rag-service 侧负责第一段（图用快照边物理锁定版本）+ 发布 `rag.reindex.request` 内部事件通知 B（§8.1）。B 侧 chunk 不可变，版本隔离靠查询带版本锚点过滤。
+### 9.2 运行时检查
 
----
+- 每次文档与追溯调用都校验 `TenantContext`；
+- 每次追溯展开都校验时间窗口、记录数和计划权限；
+- 版本相关回答执行 `VersionPolicy`；
+- 生成后执行 `CitationPolicy`，检查关键事实是否有证据；
+- MES 只读 ACL 使用低权限独立凭据，从网络与账号层限制写权限；
+- 文档管理接口与问答接口分别授权，普通问答用户不能摄入或修改文档。
 
-## 3. 只读红线：ReadOnly\*Gate 启动断言实现
-
-### 3.1 Gate 体系总览
-
-承接 [整体结构设计 §7](rag-service-整体结构设计.md#7-启动断言与只读红线)。统一的 `ReadOnly*Gate` 体系在 `shared/web/lifespan` 启动期扫描，任一失败即拒绝启动（fail-fast）。
-
-| Gate | 归属 | 断言内容 | 实现方式 |
-|------|------|---------|---------|
-| `ReadOnlyProjectionGate` | A | 图投影 handler 禁止 `DELETE`/`REMOVE`/历史覆盖性 `SET` | AST 扫描 Cypher 语句构造点 |
-| `RawDataTopicGate` | A | 消费者组禁止订阅 `dc.*` 原始数据流（高频采集不全量入图） | 订阅拓扑配置扫描 |
-| `ReadOnlyIngestionGate` | B | 摄入/重索引 handler 禁止任何写 MES 调用 | handler 依赖的 ACL client 方法名扫描 |
-| `ReadOnlyToolGate` | E | `ToolRegistry` 拒绝注册 `read_only=False` 的工具 | 注册期断言 |
-| `ReadOnlyAclGate` | shared | 所有 ACL client 方法名禁止写动词 | `BaseReadonlyAclClient` 子类方法名扫描 |
-
-### 3.2 实现骨架
-
-```python
-# app/shared/acl/gates.py
-class StartupAssertionError(RuntimeError): ...   # 拒绝启动
-
-class ReadOnlyAclGate:
-    """扫描所有 BaseReadonlyAclClient 子类，方法名禁止写动词。"""
-    VERBS = {"create", "update", "delete", "post", "put", "patch", "remove", "save", "insert"}
-    def assert_readonly(self, clients: list) -> None:
-        for c in clients:
-            for name in dir(type(c)):
-                if any(name.startswith(v) or f"_{v}" in name for v in self.VERBS):
-                    raise StartupAssertionError(f"写动词方法名 {name} 出现在只读 ACL {type(c).__name__}")
-```
-
-```python
-# app/routes/traceability/domain/gates.py
-class RawDataTopicGate:
-    FORBIDDEN_PREFIX = "dc."        # 原始数据流
-    def assert_no_raw_topic(self, subscriptions: list[str]) -> None:
-        for t in subscriptions:
-            if t.startswith(self.FORBIDDEN_PREFIX):
-                raise StartupAssertionError(f"禁止订阅原始数据流 {t}（高频采集不全量入图）")
-```
-
-### 3.3 启动期就绪探测与按路线降级
-
-```python
-async def probe_storages(settings, container):
-    """逐存储探测，不可用的路线标记降级，不拖垮其他路线。"""
-    deps = {}
-    if settings.traceability.enabled:
-        deps["neo4j"] = await container.engines.neo4j().verify_connectivity()
-    if settings.document.enabled:
-        deps["chroma"] = container.engines.chroma().heartbeat()   # 嵌入式本地，基本不会失败
-    deps["mysql"] = await container.engines.mysql().connect()
-    deps["redis"] = await container.engines.redis().ping()
-    # 不可用项落 /ready，对应路线降级（返回 503）
-```
-
-> 启动断言是把"只读旁路"从约定变成结构属性：最坏情况是"没检索出来"，不会产生写副作用。
+启动扫描只能发现已知结构问题，不能替代运行时鉴权、数据库权限和测试。
 
 ---
 
-## 4. 单服务骨架与启动编排
+## 10. 可观测与故障处理
 
-### 4.1 `main.py` + lifespan 编排
+### 10.1 指标
 
-```python
-# app/main.py
-def create_app(settings: RagSettings) -> FastAPI:
-    container = Container(settings)
-    app = FastAPI(lifespan=lambda a: lifespan(a, settings, container))
-    app.add_middleware(TenantMiddleware, propagator=container.tenant_propagator)
-    app.add_middleware(RequestLogMiddleware, obs=container.obs)
-    register_routers(app, settings, container)         # §4.2
-    register_exception_handlers(app)                   # shared/api/errors.py
-    return app
-```
-
-### 4.2 `register_routers` + 路线级开关
-
-```python
-# app/api/__init__.py
-def register_routers(app, settings, container):
-    if settings.document.enabled:      app.include_router(doc_router(container))
-    if settings.traceability.enabled:  app.include_router(trace_router(container))
-    if settings.agentic.enabled:       app.include_router(chat_router(container))
-    app.include_router(health_router(container))       # /health /ready /metrics 始终注册
-```
-
-> 灰度引入顺序：`document.enabled=true` 先行，`traceability`/`agentic` 灰度打开（§7）。
-
-### 4.3 健康检查
-
-| 端点 | 内容 |
+| 指标 | 用途 |
 |------|------|
-| `GET /health` | 进程存活（K8s liveness） |
-| `GET /ready` | Neo4j/ChromaDB/MySQL/Redis/Kafka 连通性 + 各 consumer 组位点滞后度（K8s readiness） |
-| `GET /metrics` | prometheus 指标（`rag_` 前缀） |
+| `rag_query_duration_seconds`、`rag_query_total` | 统一请求 SLO |
+| `rag_document_retrieval_duration_seconds`、`rag_document_hits` | 文档检索质量与性能 |
+| `rag_trace_lookup_duration_seconds`、`rag_trace_records` | 追溯查询性能与证据规模 |
+| `rag_trace_read_model_freshness_seconds` | 读模型滞后 |
+| `rag_orchestrator_steps`、`rag_tool_calls_total` | Agentic 步数与工具成本 |
+| `rag_answer_citation_failures_total` | 引用校验失败 |
+| `rag_insufficient_evidence_total` | 证据不足与拒答情况 |
+| `rag_llm_tokens_total`、`rag_llm_call_duration_seconds` | 模型成本与延迟 |
+| `rag_dependency_health` | MySQL、ChromaDB、Redis、Kafka、MES 只读依赖状态 |
 
-> 现状缺口：三路线均无健康检查端点。本文一次性补齐。
+### 10.2 Trace 与审计
 
-### 4.4 DI 容器绑定
+OTel span 链为 `rag.query -> plan -> document.search/trace.lookup -> llm.compose`。跨服务调用透传 `traceparent`，与 agent-service 和 MES 使用同一个 `trace_id`。
 
-DI 容器（§2.9）集中注册 Port -> Adapter 绑定。单服务内全部为 InProcess Adapter；拆服务时仅改容器绑定，业务代码零改动（§8.1）。
+审计保存请求摘要、工具步骤、证据 ID/来源/版本、读模型 freshness、模型与 prompt 版本、停止原因和最终状态。序列号、人员和物料信息按治理规则脱敏，不将完整敏感上下文写入日志。
 
----
+### 10.3 降级矩阵
 
-## 5. 数据库迁移与 Schema 管理（Alembic）
-
-### 5.1 多 schema 分配
-
-| schema | 归属 | 库 | 内容 |
-|--------|------|----|----|
-| `rag_shared` | shared | MySQL | `DomainEvent` 幂等/位点基表（A/B 共用） |
-| `rag_trace` | A | MySQL | `index_idempotency`/`index_offset`/`subgraph_audit` |
-| `rag_doc` | B | MySQL | B 的幂等/位点归 `rag_shared`；治理/审计聚合导出表（chunk 向量在 ChromaDB，不在 MySQL） |
-| `rag_agentic` | E | MySQL | `answer_audit`/`route_trace` |
-
-> B 的向量与 chunk metadata 在 ChromaDB collection（非 Alembic，代码初始化）；B 的幂等/位点/审计在 MySQL `rag_shared`，治理聚合导出表在 `rag_doc`（MySQL）。
-
-### 5.2 Alembic 配置（仅 MySQL）
-
-```python
-# alembic/env.py 关键：单 mysql_engine 覆盖 rag_shared/rag_trace/rag_doc/rag_agentic
-mysql_engine = create_async_engine(settings.mysql.dsn, module=asyncmy)   # asyncmy 方言
-
-def run_migrations_online():
-    # 所有 schema 走 mysql_engine；Neo4j 用 SchemaInitializer，ChromaDB 用 collection 代码初始化
-```
-
-> Alembic 迁移脚本按 `rag_<schema>/` 前缀分目录，CI 校验"模型与迁移一致 + 迁移可回滚"。
-
-### 5.3 Neo4j 与 ChromaDB（非 Alembic）
-
-```python
-# app/routes/traceability/infrastructure/neo4j/schema_initializer.py
-class SchemaInitializer:
-    """启动时幂等执行约束/索引/向量索引 DDL（非 Alembic，图库 DDL 幂等即可）。"""
-    async def ensure(self, driver): ...   # CONSTRAINT FOR (n:Unit) REQUIRE n.serial IS UNIQUE
-                                          # CREATE VECTOR INDEX defect_catalog_vec ...
-
-# app/routes/document/infrastructure/chromadb/schema.py
-class ChromaCollectionInitializer:
-    """启动时幂等创建/获取 collection（非 Alembic，chunk 不可变无 schema 演进）。"""
-    def ensure(self, client) -> Collection:
-        return client.get_or_create_collection(
-            name="doc_chunks",
-            metadata={"hnsw:space": "cosine"},
-            # metadata 字段：version_kind/version_ref_id/version/state/tenant_scope/doc_id/doc_type/chunk_seq/locator
-        )
-```
-
-### 5.4 迁移脚本规约
-
-- 命名：`<schema>_<yyyymmdd>_<seq>_<slug>.py`（如 `rag_doc_20260801_001_audit_export.py`）。
-- 每个脚本须含 `upgrade()` + `downgrade()`，CI 校验 downgrade 可执行。
-- 破坏性变更（删列/改类型）须两阶段：先加新列 -> 双写 -> 切读 -> 删旧列。
+| 故障 | 行为 |
+|------|------|
+| ChromaDB 不可用 | 可返回追溯事实，明确文档建议缺失 |
+| 追溯读模型不可用 | 尝试白名单 MES 只读补数；仍失败则只回答有证据的文档内容 |
+| MES 只读接口超时 | 使用符合 freshness 要求的读模型，否则返回缺口 |
+| Redis 不可用 | 绕过缓存并收紧限流，不影响权限与版本判断 |
+| LLM 不可用 | 检索模式返回证据；生成模式返回可重试错误 |
+| Kafka 消费滞后 | 展示 freshness，超过阈值时转只读补数或拒绝强一致回答 |
 
 ---
 
-## 6. 从"三独立服务文档"到"单服务模块"的迁移
+## 11. 测试与评测
 
-> 整体结构设计 §11 把此项列为"待办"。本节给出可执行迁移映射与同步修订清单。
+### 11.1 单元测试
 
-### 6.1 迁移映射表
+- 版本解析：当前指导、历史过点、显式版本、冲突和无法解析；
+- 文档过滤：租户、发布状态、版本和生效时间；
+- 追溯计划：非法计划、缺少种子、超时间窗、超记录数均拒绝；
+- 权限：每次展开保持相同数据范围；
+- 编排停止：无新增证据、达到预算、权限冲突和依赖超时；
+- 引用校验：不存在证据 ID、证据与版本不匹配时失败；
+- 脱敏与缓存 key：不同租户和版本不会共享结果。
 
-| 各路线文档原位置 | 本文档新位置 | 动作 |
-|----------------|------------|------|
-| `rag_service/app/api/trace_router.py` 等 | `app/api/v1/trace_router.py` | 路由层上移到统一 `api/v1/` |
-| 各路线 `app/application/` `app/domain/` | `app/routes/<route>/application/` `domain/` | 原样下沉到路线模块 |
-| 各路线 `infrastructure/ai/llm_factory.py` | `app/shared/ai/llm_factory.py` | **上移合并**，删本地副本 |
-| 各路线 `infrastructure/embedding/bge_client.py` | `app/shared/embedding/bge_client.py` | **上移合并** |
-| 各路线 `infrastructure/obs/` | `app/shared/obs/` | **上移合并** |
-| 各路线 `config.py` | `app/shared/config/`（公共）+ 路线子配置 | **拆分合并** |
-| 各路线 `infrastructure/kafka/consumer_group.py`/`idempotency_repo.py`/`offset_repo.py` | `app/shared/kafka/` | **上移基类**，各路线只留 `handlers/` |
-| 各路线 `infrastructure/acl/`（对 MES） | `app/routes/<route>/infrastructure/acl/`（路线专属）+ `app/shared/acl/MesClients`（公共） | 公共部分上移 |
-| 路线间互调的 httpx 客户端 | `app/shared/acl/` Port + InProcess/Http Adapter | **重构为 Port/Adapter** |
-| B 的 `infrastructure/pgvector/` | `app/routes/document/infrastructure/chromadb/` | **PGVector -> ChromaDB**（client/schema/retriever/document_repo） |
-| 各路线 `main.py` | `app/main.py`（统一）+ `app/shared/web/lifespan` | **合并**，加健康检查/DI/router 注册 |
+### 11.2 集成测试
 
-### 6.2 上移合并清单（from -> to）
+- 文档摄入重跑幂等，升版后旧 chunk 不变、新 chunk 可检索；
+- 重复制造事件不会生成重复读模型记录；
+- 序列号、批次和工单三种种子均能按固定计划取证；
+- MES 补数超时能返回部分证据与缺失项；
+- 追溯解析出版本后，文档检索使用该版本；
+- ChromaDB 或追溯依赖故障时符合降级矩阵；
+- `traceparent` 在 rag-service、agent-service 和 MES 间连续传播。
 
-| 组件 | A 当前 | B 当前 | E 当前 | 上移到 |
-|------|--------|--------|--------|--------|
-| `llm_factory.py` | `infrastructure/ai/` | `infrastructure/ai/` | `infrastructure/ai/` | `shared/ai/` |
-| `bge_client.py` | `infrastructure/embedding/` | `infrastructure/embedding/` | （无） | `shared/embedding/` |
-| `reranker.py` | （无） | `infrastructure/ai/` | （无） | `shared/embedding/` |
-| `obs/`（tracing/metrics/logging/redactor） | `infrastructure/obs/` | `infrastructure/obs/` | `infrastructure/obs/` | `shared/obs/` |
-| `config.py`（Settings） | `app/config.py` | `app/config.py` | `app/config.py` | `shared/config/`（公共）+ 路线子配置 |
-| `consumer_group.py` | `infrastructure/kafka/` | `infrastructure/kafka/` | （无） | `shared/kafka/` |
-| `idempotency_repo.py`/`offset_repo.py` | `infrastructure/persistence/` | `infrastructure/persistence/` | （无） | `shared/kafka/`（落 MySQL） |
-| `TenantContext` | `domain/tenant.py` | `domain/tenant.py` | `domain/tenant.py` | `shared/tenant/` |
-| `models.py`（幂等/位点基表） | `infrastructure/persistence/` | `infrastructure/persistence/` | `infrastructure/persistence/` | `shared/persistence/base.py`（MySQL） |
-| 对 MES 只读 ACL（公共部分） | `infrastructure/acl/` | `infrastructure/acl/` | （无） | `shared/acl/MesClients` |
+### 11.3 契约测试
 
-**各路线独有、不上移**（保留在 `routes/<route>/infrastructure/`）：
-- A：`neo4j/`（driver/schema/retriever/projections）、`rag/graph_index.py`
-- B：`chromadb/`（client/schema/retriever/document_repo）、`rag/index.py`
-- E：`ai/route_graph_builder.py`（LangGraph 路由图）
+- `/rag/query` 同时覆盖 `AUTO` 与 `RETRIEVAL_ONLY`；
+- 文档与追溯证据均符合统一 `Evidence` Schema；
+- 响应中的每个 citation 都能通过证据查询接口定位；
+- agent-service 不传租户上下文或伪造扩大数据范围时被拒绝；
+- 历史请求缺少版本且无法解析时不得自动查最新工艺。
 
-### 6.3 路线文档同步修订清单
+### 11.4 评测集
 
-> 这是整体结构设计 §11 列为"待办"的具体化。每项需在对应路线文档落地，否则文档间矛盾。
-
-| # | 路线文档 | 修订内容 | 关联决策 |
-|---|---------|---------|---------|
-| 1 | A/B/E 三份实现方案 §8（包结构） | 包结构从"独立服务根"（`rag_service/`/`rag_doc_service/`/`agent_gateway_service/`）投影到 `app/routes/<route>/`；补一句"包结构投影到 rag-service 整体结构设计 §2/§11，`llm_factory`/`embedding`/`obs`/`config`/`kafka` 基类见 §3" | 整体结构设计 §11 |
-| 2 | E 实现方案 §2.1 + E 详细设计 §2 | LangGraph 版本统一回填为 **≥0.2**（解决 0.1+ vs ≥0.2 漂移） | 本文 §1.2 |
-| 3 | **B 详细设计 §4.3 + B 实现方案 §4.3/§5.4/§9.2** | 工艺绑定型文档（SOP/检验标准）审核流从"独立人工审核（DRAFT->SUBMITTED->PUBLISHED + PENDING_REBIND）"改为"**联动 PUBLISHED**"：`ProcessRouteActivated` 直接置 PUBLISHED，去掉 SUBMITTED 人工确认中间态与 PENDING_REBIND；责任归工艺 owner | 决策 #3 |
-| 4 | B 实现方案（`DocumentBinding` schema） | `VersionAnchor` 统一覆盖 route/bom/rule/asset/standard，MVP 工艺绑定型按 ROUTE 锚点，评测后可切 RULE 锚点 | 决策 #2 |
-| 5 | E 实现方案 §4.3 / §10.2 | E 委托 L1 的 `traceparent` 透传：注明 L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求 | 决策 #1 |
-| 6 | E 实现方案 §6/§7（Port 调用） | E 调 A/B 走 InProcess Adapter（直调 application service），不走本机 REST | 决策 #4 |
-| 7 | **B 详细设计 §2.3/§4.2/§5.3/§6.2 + B 实现方案 §2.3/§2.5/§4.2/§5.3/§5.4/§6.2/§9.9** | 向量库 PGVector -> **ChromaDB**：chunk 不可变 + 强制带版本 + 删除 sync_chunk_state 批量翻转 + 检索改 ChromaDB `where` + 依赖/DDL/compose 改 ChromaDB（详见 B 文档已由专项修订完成） | 本文 §1.2 |
-
-### 6.4 迁移顺序与回归点
-
-1. **先建 shared 骨架**（§2 + §4），三路线文档暂不动。
-2. **逐路线投影**：B -> A -> E。每条路线投影后跑该路线评测集回归（mes-eval `EvalTarget`），确认行为不变。
-3. **每条路线投影完成即补 §6.3 对应修订项**，避免文档与现实脱节。
-4. **决策 #3 修订**（B 审核流）作为 B 路线投影的**子任务**，与代码同步落地，不延后。
-5. **B 向量库 ChromaDB 改造**（§6.3 #7）作为 B 路线投影的**子任务**，chunk 不可变设计与决策 #3 解耦（决策 #3 改 version 层状态机，ChromaDB 改存储层 chunk 不可变，两者独立可并行）。
+| 维度 | 核心断言 |
+|------|---------|
+| 文档检索 | Recall@k、引用定位、版本过滤、越权过滤 |
+| 制造追溯 | 种子解析、关键记录召回、错误关联、版本对齐、缺失识别 |
+| Agentic | 工具选择、追加检索收益、步数与预算、无新证据停止 |
+| 综合答案 | 忠实度、引用完整、事实/建议/推断区分、冲突表达 |
+| 安全红线 | 写操作、跨租户、失效版本、无证据制造事实任一出现即阻断 |
+| 性能成本 | 延迟、工具次数、模型 token、缓存命中与降级表现 |
 
 ---
 
-## 7. 分阶段交付计划
+## 12. 分阶段交付
 
-> 引入顺序承接 [整体结构设计 §8](rag-service-整体结构设计.md#8-部署与运行时) 与 [RAG服务引入路线](RAG服务引入路线.md) §3：**先 B 后 A，E 收口**。每阶段含交付物 / 依赖 / 退出标准 / 周数估算（规划值）。
+阶段是同一服务的增量建设，不对应不同 RAG 路线。
 
-### 7.1 阶段总览
-
-| 阶段 | 内容 | 路线开关 | 周数（估） |
-|------|------|---------|-----------|
-| 一 | 共享内核 + 单服务骨架 + B 文档型 | `document.enabled=true` | 4-6 |
-| 二 | A 追溯型（GraphProjector + 4 上下文 MVP） | + `traceability.enabled=true` | 6-8 |
-| 三 | E Agentic 收口 | + `agentic.enabled=true` | 3-4 |
-| 四 | 可观测 / 评测 / 运维收口 | 全开 | 2-3 |
-
-### 7.2 阶段一：共享内核 + 单服务骨架 + B 文档型
-
-- **交付物**：`shared/`（ai/embedding/obs/config/kafka/acl/persistence/tenant/web/events）骨架 + `main.py`/lifespan/健康检查/DI 容器；B 路线投影到 `routes/document/`（含 ChromaDB 嵌入式 collection、chunk 不可变、强制带版本、决策 #3 联动 PUBLISHED、决策 #2 双轨字段）；Alembic 管 `rag_shared`/`rag_doc`（MySQL）；`/rag/docs/{query,search,ingest}` 端点；`ReadOnlyIngestionGate` + `ReadOnlyAclGate` 启动断言；ChromaDB Parquet 备份。
-- **依赖**：MySQL、Redis、Kafka、bge-inference 就绪；B 实现方案 §11 阶段一交付物。
-- **退出标准**：B 评测集（`mes_eval/infrastructure/targets/doc_rag.py`）通过；版本锚点过滤（`version`+`version_kind` 强制带）金标准用例全绿；`/ready` 报 ChromaDB/MySQL/Redis/Kafka 全通；只读断言在启动期生效；ChromaDB 重建演练通过。
-
-### 7.3 阶段二：A 追溯型
-
-- **交付物**：A 路线投影到 `routes/traceability/`（含 `neo4j/`/`projections/`/`acl/`）；`GraphProjector` 订阅 MVP 4 上下文事件（`mes.checkpoint.lifecycle`/`mes.testresult.structured`/`mes.routing.progress`/`process.route.lifecycle`/`material.*`/`quality.*`）；`/rag/trace/{query,expand}` 端点；`ReadOnlyProjectionGate` + `RawDataTopicGate`；`rag.reindex.request` 内部事件发布给 B。
-- **依赖**：阶段一的 shared 内核；Neo4j 5.20；A 实现方案 §13 阶段一-三交付物。
-- **退出标准**：A 评测集（`traceability_rag.py`）5M1E 召回 + 证据回溯 + 版本锚点全绿；图投影幂等测试通过；Neo4j 不可用时 A 降级 503、不拖垮 B。
-
-### 7.4 阶段三：E Agentic 收口
-
-- **交付物**：E 路线投影到 `routes/agentic/`；LangGraph 轻量路由图（`recursion_limit=6`，3 意图路由）；`/agent/chat` + `/agent/explain/{id}`；`TraceRagPort`/`DocRagPort` InProcess Adapter 绑定；L1/L2 委托 httpx（透传 `traceparent`，决策 #1）；`ReadOnlyToolGate`。
-- **依赖**：阶段一/二的 A/B 成型；agent-service L1/L2 可用。
-- **退出标准**：E 评测集（`agentic_rag.py`）路由准确率 + 工具链正确性达标；traceparent 全链路（E -> L1 -> A/B/MES）在 Tempo 可见同一 `trace_id`。
-
-### 7.5 阶段四：可观测 / 评测 / 运维收口
-
-- **交付物**：`rag_` 指标全量埋点 + Grafana 看板；trace 双存储（Tempo + MySQL 平铺表）；三 `EvalTarget` 接入 CI 门禁（安全红线硬门禁 + 质量软门禁）；HPA（A/B/E 合一指标）；ChromaDB 定期备份 + 重建演练纳入运维 SOP。
-- **退出标准**：SLO 看板上线；CI 评测门禁对三路线生效；可拆性演练（把 `DocRagPort` 绑定换 `HttpDocRagAdapter`，业务代码零改动跑通）。
+| 阶段 | 主要交付 | 验收重点 |
+|------|---------|---------|
+| 一：统一底座与文档检索 | 统一契约、权限/版本策略、摄入管线、`/rag/query` 基础链路 | 文档引用、版本过滤、只读和租户测试通过 |
+| 二：关系型追溯 | 读模型、事件同步、固定查询计划、MES 补数、统一证据融合 | 三类种子、5M1E 召回、错误关联和 freshness 测试通过 |
+| 三：Agentic 编排 | LangGraph 状态机、工具预算、追加检索、审计与证据页面 | 复杂问题有实际收益，预算和停止条件可靠 |
+| 四：生产治理 | 压测、备份重建、故障演练、评测门禁与运维看板 | SLO、安全红线、恢复与重建全部通过 |
 
 ---
 
-## 8. 关键集成点实现
+## 13. 风险与对策
 
-### 8.1 路线间调用（进程内 Port/Adapter）
-
-| 调用方 -> 被调方 | Port | 单服务内路径 | 说明 |
-|-----------------|------|------------|------|
-| A -> B | `DocRagPort` | `TraceRetrievalService` -> `InProcessDocRagAdapter` -> `DocumentRetrievalService` | A 的 `suggested_action` 拉 SOP 片段，带 `version_anchor` |
-| A -> B（事件） | `rag.reindex.request` | A 发布 -> B 的 `ReindexCoordinator` 消费 | 工艺升版触发 B 重索引 |
-| E -> A/B | `TraceRagPort`/`DocRagPort` | `GatewayService` -> InProcess Adapter -> 各路线 service | E 不自己多步推理，`recursion_limit=6` |
-
-> 拆服务时：把 DI 容器里 Port -> InProcess Adapter 的绑定换成 Port -> Http Adapter，业务代码零改动。**可拆性演练**列入阶段四退出标准。
-
-### 8.2 与 agent-service 的集成（traceparent 全链路，决策 #1）
-
-| 集成点 | 方向 | 契约 |
-|--------|------|------|
-| L1 调图 | Agent -> rag-service (A) | `query_traceability_graph` 工具封装 `POST /rag/trace/query`，注册在 L1 ToolRegistry 首位 |
-| L2 回查图 | Agent -> rag-service (A) | `fetch_subgraph_nodes(subgraph_ref)` -> `POST /rag/trace/expand` |
-| L1/L2 调文档 | Agent -> rag-service (B) | `search_docs(query, version_anchor)` -> `POST /rag/docs/query` |
-| E 委托 L1/L2 | rag-service (E) -> agent-service | `POST /agent/diagnose`（60s）、`POST /agent/draft`（30s），透传 `traceparent` |
-
-> **traceparent 全链路**：E 委托 L1 时手动注入 `traceparent`；L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求，接收 incoming `traceparent` 并续接 trace，出站 httpx instrumentation 自动透传到 A/B/MES。rag-service 侧 `shared/acl/base_client.py` 出站自动注入 `traceparent`。
-
-### 8.3 与 MES 的集成（只读）
-
-- **Kafka 只读事件**：`GraphProjector`(A) / `ReindexCoordinator`(B) 订阅各上下文 Outbox 事件，幂等消费（`event_id`）+ 位点落 MySQL。
-- **只读 REST 降级**：图投影滞后或需聚合计算时，A 经 `MesClients` 调各上下文只读 REST 补齐；B 检索时若调用方仅有 `route_id` 无版本号，经 ACL 查该 route 当前 ACTIVE 版本带入（仅"查当前生效"场景，历史回溯必须带具体版本锚点）。
-- **单向只读**：rag-service 从不回写 MES；图库/向量库崩返回 503 不阻塞生产。
-
-### 8.4 subgraph_ref 与版本一致性传递链
-
-```
-图 SNAPSHOT_OF_{kind}{version}（A，物理锁定版本；MVP 锁 route）
-  -> L1 evidence.version_anchor（透传）
-  -> L2 Draft.version_anchor（锁定）
-  -> MES 应用服务校验 ACTIVE（最后一道）
-```
-
-rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版发 `rag.reindex.request` 通知 B 重索引；B chunk 不可变，查询带版本锚点过滤（`version_kind`+`version`[+`version_ref_id`]）。版本锚点统一为 `VersionAnchor(kind, ref_id, version)`，覆盖 route/bom/rule/asset/standard（决策 #2，MVP 工艺绑定型按 route，评测后可切 rule）。
-
----
-
-## 9. 可观测性与兜底
-
-### 9.1 指标清单（`rag_` 前缀，按归属分类）
-
-| 归属 | 指标 | 类型 |
+| 风险 | 影响 | 对策 |
 |------|------|------|
-| A | `rag_trace_query_duration_seconds` | Histogram |
-| A | `rag_projection_lag_ms` | Histogram（事件 -> 入图滞后） |
-| A | `rag_projection_events_total` | Counter（按上下文/动作） |
-| B | `rag_doc_search_hits` | Histogram（top-k 命中数） |
-| B | `rag_doc_ingest_chunks_total` | Counter |
-| B | `rag_doc_reindex_lag_ms` | Histogram |
-| B | `rag_doc_chroma_query_duration_seconds` | Histogram（ChromaDB 检索延迟） |
-| E | `rag_agent_route_total` | Counter（按意图） |
-| E | `rag_agent_delegation_duration_seconds` | Histogram（L1/L2 委托） |
-| shared | `rag_llm_call_duration_seconds` | Histogram（按 model/prompt_version） |
-| shared | `rag_llm_tokens_total` | Counter（按 model） |
-| shared | `rag_kafka_consumer_lag` | Gauge（按消费者组） |
-| shared | `rag_storage_health` | Gauge（按 DB/路线：neo4j/chroma/mysql/redis，0/1） |
-
-### 9.2 trace 双存储 + traceparent
-
-- **Tempo / Jaeger**：SRE 火焰图，`session_span`/`retrieval_span`/`projection_span`/`llm_span`。
-- **MySQL 平铺表**：工程师 UI 证据链回溯，同源 `trace_id` 串联 agent-service 与 MES。
-- **traceparent**：跨服务（rag-service -> agent-service -> MES）全链路，决策 #1。
-
-### 9.3 兜底
-
-- **存储故障域隔离**：Neo4j/ChromaDB/MySQL/Redis 任一不可用，对应路线降级（返回 503），不拖垮其他路线（§3.3）。
-- **ChromaDB 重建兜底**：ChromaDB 数据丢失/损坏时，从原始文件 + chunk 策略 + 事件回放重建向量库（chunk 不可变使重建幂等）。
-- **低置信转人工**：与 MES 防错理念一致--宁可拦下让人判，不可错放。LLM 综合低置信度时返回"建议转人工/转规则引擎"，不硬答。
-- **版本失效保护**：检索强制带版本锚点（`version`+`version_kind`） 过滤（入口校验），物理杜绝失效工艺泄漏（安全红线，评测 CI 硬门禁）。
+| 关系型读模型滞后 | 制造事实不完整 | freshness 指标、阈值控制、MES 只读补数、必要时拒答 |
+| 固定关联计划覆盖不足 | 某些问题无法完整追溯 | 返回缺口；按评测新增评审后的计划，不开放任意查询 |
+| 关联字段质量差 | 错误串联或漏串联 | 唯一键约束、来源校验、异常关联评测、人工核验提示 |
+| Agentic 多步成本过高 | 延迟与 token 增加 | 简单请求直达、缓存、工具/步数/时间预算、无新增证据停止 |
+| 文档版本过滤被绕过 | 使用失效或不适用 SOP | Port 强制校验、契约测试、历史版本解析、安全评测阻断 |
+| ChromaDB 损坏或丢失 | 文档检索不可用 | 定期备份、确定性重建、降级为追溯证据 |
+| MES ACL 被误用为写客户端 | 产生生产副作用 | 白名单、独立只读账号、网络限制、启动与运行时检查 |
+| 统一契约过度膨胀 | 文档与制造证据互相污染 | 统一外层 `Evidence`，内部保留各自结构化 content 与 locator |
 
 ---
 
-## 10. 测试策略
+## 14. 完成定义（DoD）
 
-### 10.1 单元测试
-
-- `shared/` 抽象：`LlmPort`/`EmbeddingPort`/Port/Adapter 的 InProcess 路径、`Redactor` 脱敏纯函数。
-- `ReadOnly*Gate` 断言：构造违规 handler / 方法名 / 订阅拓扑，断言启动期 `StartupAssertionError`。
-- B 的 chunk 不可变：断言升版后老 chunk metadata 不变、新 chunk 追加、查询带版本隔离正确。
-- 版本契约：`version_contract` 锚点解析。
-
-### 10.2 集成测试
-
-- **Port/Adapter InProcess**：A -> B（`DocRagPort`）+ E -> A/B 全链路单服务内调用。
-- **Kafka 投影幂等**：重复投递同一 `event_id`，断言图/索引不重复写入（A 实现方案 §12.1）。
-- **多 DB 就绪**：lifespan 启动期就绪探测 + 按路线降级（拔 Neo4j，断言 A 返回 503、B 正常；拔 ChromaDB，断言 B 返回 503、A 正常）。
-- **ChromaDB 重建**：删 ChromaDB 持久化目录，重跑摄入管线重建，断言检索结果一致。
-- **版本一致性**：工艺升版后图快照边更新 + `rag.reindex.request` 触发 B 重索引（A 实现方案 §12.2）；B 侧老 chunk 不变、新版本 chunk 追加、查询带版本隔离。
-
-### 10.3 契约测试
-
-- **对外端点契约**：`/rag/trace/query`、`/rag/docs/query`、`/agent/chat` 的 schema 与 agent-service L1/L2 工具封装（`query_traceability_graph`/`search_docs`/`fetch_subgraph_nodes`）对齐。
-- **traceparent 契约**：E 委托 L1 的 header 注入、L1 续接 trace 的端到端断言。
-- **强制带版本契约**：B 检索入口版本锚点（`version`+`version_kind`）缺失时拒绝（工艺绑定型），断言不退回"查最新"。
-
-### 10.4 评测接入（mes-eval）
-
-| 被测对象 | 适配器 | 评测入口 | 断言 |
-|---------|--------|---------|------|
-| A 追溯型 | `traceability_rag.py` | `POST /rag/trace/query` | 5M1E 召回 + 证据回溯 + 版本锚点 |
-| B 文档型 | `doc_rag.py` | `POST /rag/docs/query` | 忠实度/答案相关性 + 版本过滤（强制带版本锚点（`version`+`version_kind`）） |
-| E Agentic | `agentic_rag.py` | `POST /agent/chat` | 路由准确率 + 工具链正确性 |
-
-> 版本锚定贯穿评测全程：每条金标准用例钉死版本锚点（`version_kind`+`version`+`version_ref_id`），`VersionAnchorChecker` 强制比对。安全红线（失效工艺泄漏/写越界/租户越权/PII/实体幻觉/证据空）任一非 0 阻断 CI。
-
----
-
-## 11. 风险与对策
-
-| # | 风险 | 影响 | 对策 | 关联 |
-|---|------|------|------|------|
-| 1 | 只读红线被绕过（路线间直 import 或 ACL 写动词） | 产生写副作用，违背"只读旁路" | `ReadOnly*Gate` 启动断言 + CI 静态检查禁止路线间直 import | §3 / 决策 #4 |
-| 2 | 多 DB 任一故障拖垮全服务 | 单点故障扩散 | 按路线降级（§3.3），故障域 Port 隔离 | 决策 #3 |
-| 3 | 迁移期路线文档与代码不一致 | 文档间矛盾、新人误读 | §6.3 同步修订清单逐项落地，决策 #3 不延后 | §6 |
-| 4 | bge 本地化推理资源不足（车间网 GPU/内存） | Embedding 延迟飙升 | bge-inference sidecar 独立配额；批量推理；Redis 缓存向量 | §1.4 |
-| 5 | 三路线版本漂移再次发生 | 依赖冲突、行为不一致 | 选型以本文 §1.1 为权威，路线文档改动需同步本文 | §1.2 |
-| 6 | 可拆性退化（路线间偷偷直 import） | 未来拆服务需大改 | 阶段四可拆性演练（换 Http Adapter 跑通）+ CI 禁止直 import | §7.5 / §8.1 |
-| 7 | 图投影滞后导致追溯不准 | 5M1E 召回不全 | `rag_projection_lag_ms` 指标告警 + MES 只读 REST 降级补齐 | §8.3 / §9.1 |
-| 8 | 决策 #3 联动 PUBLISHED 误发未审文档 | 未审 SOP 随工艺生效 | 责任归工艺 owner（工艺 owner 即文档 owner）；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED | 决策 #3 |
-| 9 | **ChromaDB 数据丢失/损坏（无 PITR）** | B 检索不可用 | 原始文件 + chunk 策略 + 事件回放重建（chunk 不可变使重建幂等）；Parquet 定期备份 | §1.2 / §9.3 |
-| 10 | **ChromaDB 单写者并发（重索引阻塞查询）** | 重索引期间 B 检索超时 | 文档量小、重索引量小可接受；重索引走异步 consumer + 查询侧超时降级 | §1.2 |
-| 11 | **强制带版本被绕过（调用方不带版本锚点退回查最新）** | 答出不适用工艺 SOP | 入口校验拒绝 + 契约测试 + 评测安全红线 | §1.2 / §10.3 |
-
----
-
-## 12. 约束落地检查清单（DoD）
-
-> 承接三路线实现方案的检查清单，补共享内核 / 单服务 / 迁移 / ChromaDB 维度。
-
-- [ ] 共享内核：`shared/` 下 ≥2 路线复用的设施全部上移，单路线专属设施留 `routes/<route>/infrastructure/`
-- [ ] 路线间无直接 import 对方 application/domain，一律走 `shared/acl/` Port
-- [ ] `ReadOnlyProjectionGate`/`RawDataTopicGate`/`ReadOnlyIngestionGate`/`ReadOnlyToolGate`/`ReadOnlyAclGate` 启动断言全部生效
-- [ ] `main.py` + lifespan 编排：启动断言 -> 存储就绪探测 -> 按路线开关启停
-- [ ] `/health`/`/ready`/`/metrics` 三端点就绪，`/ready` 含各 DB（neo4j/chroma/mysql/redis）连通性 + consumer 位点滞后
-- [ ] DI 容器注册 Port -> InProcess Adapter 绑定，可拆性演练通过
-- [ ] Alembic 管 MySQL 的 `rag_shared`/`rag_trace`/`rag_doc`/`rag_agentic`；Neo4j 用 `SchemaInitializer`，ChromaDB 用 collection 代码初始化
-- [ ] `TenantContext` 全服务共用，跨服务传递协议在 `shared/tenant/propagation.py` 一处定义
-- [ ] 路线级开关 `rag.<route>.enabled` 控制 router/consumer 启停，灰度顺序 B -> A -> E
-- [ ] 多 DB 故障域隔离：任一 DB 不可用只降级对应路线，不拖垮其他
-- [ ] **B 向量库 ChromaDB：chunk 不可变 + 强制带版本锚点（`version`+`version_kind`）（入口校验）+ 检索 `where` pre-filter**
-- [ ] **B 备份兜底：ChromaDB 可重建（重建演练通过）+ Parquet 定期备份**
-- [ ] traceparent 全链路：E -> L1 -> A/B/MES 同源 `trace_id` 在 Tempo 可见（决策 #1）
-- [ ] 版本一致性三段传递链：图快照边 -> L1 evidence -> L2 Draft -> MES 校验 ACTIVE
-- [ ] B 审核流联动 PUBLISHED 落地，去掉 SUBMITTED/PENDING_REBIND 中间态（决策 #3）
-- [ ] B `DocumentBinding` 预留 `rule_id`+`rule_version` 双轨字段（决策 #2）
-- [ ] LangGraph 版本统一 ≥0.2，路线文档回填一致
-- [ ] 三路线文档补"投影到 §2/§11，基类见 §3"说明（§6.3 #1）
-- [ ] mes-eval 三 `EvalTarget` 接入 CI，安全红线硬门禁 + 版本锚定强制比对
-- [ ] 指标统一 `rag_` 前缀，Grafana 看板 + SLI/SLO 告警上线
-
----
-
-## 13. 面试防守 Q&A
-
-**Q：rag-service 为什么不拆成三个独立微服务？**
-A：三路线基础设施 90% 同构--同一个 LLM 抽象、同一个 bge-m3、同一套 OTel/prometheus/structlog、同一套 Kafka envelope/幂等模式。拆三服务会把这 90% 复制三份，违背 DRY 与 SRP。我用"单服务 + 共享内核 + 路线间 Port/Adapter"：路线模块自包含，调用走 `shared/acl/` 的 Port，单服务内注入 InProcess Adapter，未来某路线 QPS/数据量单独增长时，把 Adapter 绑定换成 Http Adapter 即可拆出，业务代码零改动。可拆性是结构属性，不是口号。
-
-**Q：rag-service 只读红线怎么保证？靠自觉吗？**
-A：不靠自觉，靠启动断言兜底。统一的 `ReadOnly*Gate` 体系在 lifespan 启动期扫描：图投影 handler 禁止 `DELETE`/`REMOVE`、消费者组禁止订阅 `dc.*` 原始数据流、ACL client 方法名禁止写动词、E 的 ToolRegistry 拒绝注册非只读工具。任一失败即拒绝启动（fail-fast）。最坏情况是"没检索出来"，不会产生写副作用。
-
-**Q：单进程里 Neo4j、ChromaDB、MySQL、Redis 共存，一个崩了会不会全拖垮？**
-A：不会。每条存储链路在 `shared/persistence/` 与各路线 `infrastructure/` 间用 Port 隔离，lifespan 启动期做就绪探测，任一不可用按路线降级--Neo4j 崩只让 A 返回 503，ChromaDB 崩只让 B 返回 503，其他路线照常。故障域不扩散是硬约束，不是运维自觉。
-
-**Q：B 文档型为什么选 ChromaDB 而不是 PGVector / Milvus？**
-A：三个前提：车间 ToB 文档量小（数千文档/数十万 chunk 以内）、工艺路线查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB 的 `where` 能做且 pre-filter）、求开发简（嵌入式零额外服务、LlamaIndex 集成最成熟、少装一套 PG+pgvector+asyncpg）。核心是 chunk 不可变--写入后不改，工艺升版追加新版本 chunk 而非翻转老 chunk，查询带版本锚点天然隔离，直接绕开 ChromaDB 多记录翻转无事务的弱点。代价是 HA/备份弱，用原始文件可重建兜底。PGVector 的 SQL 过滤/同库事务优势在"等值版本过滤 + chunk 不可变"场景下不再决定性，ChromaDB 的简大于其弱。
-
-**Q：ChromaDB 没有事务，工艺升版时老 SOP 状态翻转怎么办？**
-A：不翻转。chunk 不可变--老版本 chunk 的版本锚点（`version`+`version_kind`）一直是 v3/route，写入后不改；工艺升版到 v4 时追加 v4 的新 chunk，查询带 `version_kind="route"`+`version=v3` 天然只召回 v3、带 v4 只召回 v4。ChromaDB 里根本没有"批量翻转"这个操作，多记录事务弱点直接消失。文档撤回是单条 upsert 改 `state`（单条原子，ChromaDB 能做），区别于"批量翻转"（不做）。
-
-**Q：ChromaDB 数据丢了怎么办？没 PITR。**
-A：可重建兜底。原始文档文件一直在对象存储，chunk 切分策略是确定性的，重索引事件幂等（`event_id` + `doc_id+version+chunk_seq` 去重）--从原始文件 + chunk 策略 + 事件回放就能重建整个向量库。chunk 不可变让重建幂等（不会产生重复 chunk）。再加 Parquet 定期备份。车间文档量小，重建成本可接受。
-
-**Q：迁移期怎么不破坏既有路线文档？**
-A：三路线实现方案现在写成独立服务包结构，是"被取代的旧视角"。我按整体结构设计 §11 的迁移映射逐路线投影（B -> A -> E），每条路线投影后跑该路线评测集回归确认行为不变，并同步修订路线文档（补"投影到 §2/§11"、LangGraph 版本统一、决策 #3 联动 PUBLISHED、B 向量库 ChromaDB 改造）。决策 #3 与 ChromaDB 改造解耦--决策 #3 改 version 层状态机，ChromaDB 改存储层 chunk 不可变，两者独立可并行。
-
-**Q：决策 #3 为什么把 B 审核流从"独立审核"反转为"联动 PUBLISHED"？**
-A：工艺绑定型文档（SOP/检验标准）的生效边界应与工艺路线一致--工艺 `ProcessRouteActivated` 即文档生效，责任归工艺 owner。如果文档走独立人工审核，会出现"工艺已生效但 SOP 还在 SUBMITTED"的窗口，操作工可能拿到失效或未对齐的 SOP。联动 PUBLISHED 把这个窗口消除。通用知识型/设备绑定型文档仍走独立 DRAFT->PUBLISHED，因为它们不绑工艺版本。
-
----
-
-## 14. 一句话定位
-
-"rag-service 用单服务 + 共享内核承载 A/B/E 三路线，技术选型收敛到一张表解决三路线版本漂移；B 向量库选 ChromaDB（车间文档少 + 强制带版本锚点（`version`+`version_kind`） + chunk 不可变绕开多记录事务弱点），落地按'共享内核先建 -> B -> A -> E 收口'灰度推进；只读红线靠 `ReadOnly*Gate` 启动断言兜底，多 DB 按 Port 隔离故障域，路线间走 Port/Adapter 保留零成本可拆性--把'现在单服务、将来可拆'从口号变成结构属性。"
+- [ ] 只有一个统一 `/rag/query` 问答入口和一套 `RagAnswer`/`Evidence` 契约。
+- [ ] 文档检索、追溯检索与 Agentic 不存在独立路线开关或路线间调用协议。
+- [ ] 追溯仅使用 MySQL 读模型、固定关联查询与 MES 只读接口，无图数据库依赖。
+- [ ] 追溯每个查询计划都有种子、时间窗、记录数、权限和版本限制。
+- [ ] 文档 chunk 不可变，版本、租户和发布状态在检索时过滤。
+- [ ] 历史问题能从制造记录解析版本，无法解析时不会退回最新工艺。
+- [ ] Agentic 工具全部只读，步数、工具次数、记录数、时长和 token 有预算。
+- [ ] 无新增证据、权限冲突和版本冲突能正确停止，不循环、不绕过。
+- [ ] 所有关键答案陈述可定位到文档片段或制造记录，缺失证据显式返回。
+- [ ] MySQL 迁移、ChromaDB 重建、事件幂等和读模型重建经过验证。
+- [ ] 依赖故障符合降级矩阵，不影响 MES 生产主事务。
+- [ ] 文档、追溯、Agentic、端到端与安全评测接入 CI，红线失败阻断交付。

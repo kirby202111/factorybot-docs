@@ -86,8 +86,8 @@
 | 服务 | 语言栈 | Kafka 角色 | topic | 边界 |
 |---|---|---|---|---|
 | rag-service | Python（aiokafka） | **只读图投影消费者**：订阅 `mes.*/process.*/material.*/quality.*` 增量构建 Neo4j 追溯图 | 复用既有领域事件 topic | 只读投影，`ReadOnlyProjectionGate` 禁止 DELETE/REMOVE；不订 `dc.*` 原始流 |
-| agent-service | Python（aiokafka） | **主动触发消费者**：订阅 `ProcessRouteActivated` / `equipment.fault` / 不良率突增等只读事件，触发 L2 草拟 / L3 编排 | 复用既有领域事件 topic | 只读旁路，物理隔离不进过点主事务 |
-| agent-service | Python（aiokafka） | **动作卡生产者**：L3 confirmation gate 的动作卡 WebSocket（实时）+ Kafka 持久兜底 | `agent.action_cards`（key=`session_id`） | 双通道，Kafka 兜底离线可达可回溯 |
+| agent-service | Python（aiokafka） | **主动触发消费者**：订阅 `ProcessRouteActivated` / `equipment.fault` / 不良率突增等只读事件，触发 草稿能力草拟 / 流程编排 | 复用既有领域事件 topic | 只读旁路，物理隔离不进过点主事务 |
+| agent-service | Python（aiokafka） | **动作卡生产者**：编排能力 confirmation gate 的动作卡 WebSocket（实时）+ Kafka 持久兜底 | `agent.action_cards`（key=`session_id`） | 双通道，Kafka 兜底离线可达可回溯 |
 
 ---
 
@@ -345,7 +345,7 @@ rag-service 的 `GraphProjector` 订阅领域事件流，增量构建 / 更新 N
 
 **实施重难点与技术挑战**
 
-1. **投影滞后与降级**：图允许秒级最终一致，但 L1 诊断若在投影滞后窗口内查询，会拿到不完整图。靠 L1 ACL 降级查询上下文只读 REST 补齐（如 `CONSUMED_BATCH` 边未投影时降级调 `GET /api/material/consumption`）。降级阈值 🔴 待定。
+1. **投影滞后与降级**：图允许秒级最终一致，但 诊断若在投影滞后窗口内查询，会拿到不完整图。靠 诊断能力 ACL 降级查询上下文只读 REST 补齐（如 `CONSUMED_BATCH` 边未投影时降级调 `GET /api/material/consumption`）。降级阈值 🔴 待定。
 2. **`CONSUMED_BATCH` 边 gap**：批次反向扩展依赖 `CONSUMED_BATCH` 边，但该边的事件契约（物料消耗明细）尚不明确 🔴。MVP 用降级 REST 兜底，待物料上下文明确消耗明细事件后改投影。
 3. **`event_id` 幂等与位点**：图投影侧 `event_id` 幂等表 + consumer offset 都落 MySQL，重启从断点续消费。幂等记录与图写入须同事务，否则重启会重复写图节点/边。
 4. **图 schema 演进**：Neo4j 图 schema（节点标签 / 边类型 / 属性）随业务演进，已有节点 / 边不能破坏性变更。需图 schema 版本化 + 兼容性策略。
@@ -359,9 +359,9 @@ rag-service 的 `GraphProjector` 订阅领域事件流，增量构建 / 更新 N
 
 agent-service 订阅只读领域事件，把 Agent 从"被动问答"变"主动巡检 / 编排"：
 
-- 订阅 `ProcessRouteActivated`（工艺升版 v4->v5）-> 触发 L3 `process_change` 编排（草拟新 SOP + 核对操作工资质 + 新工艺首件验证）/ 触发 L2 SOP 草拟
-- 订阅 `equipment.fault`（设备故障，Kafka topic 或维修看板手动触发）-> 触发 L3 `fault_response` 故障复产编排
-- 订阅不良率突增事件 -> 触发 L1 同批次诊断（`DefectRateSpikeListener`）
+- 订阅 `ProcessRouteActivated`（工艺升版 v4->v5）-> 触发 编排能力 `process_change` 编排（草拟新 SOP + 核对操作工资质 + 新工艺首件验证）/ 触发 草稿能力 SOP 草拟
+- 订阅 `equipment.fault`（设备故障，Kafka topic 或维修看板手动触发）-> 触发 编排能力 `fault_response` 故障复产编排
+- 订阅不良率突增事件 -> 触发 诊断能力同批次诊断（`DefectRateSpikeListener`）
 
 **Kafka 核心使用方式与作用**
 
@@ -371,13 +371,13 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 
 1. **Agent 只读旁路物理隔离**：跨语言物理边界天然强制 Agent 不进过点主事务、不旁路应用服务写路径。最坏情况是"没诊断出来"，不会产生写副作用（[整体技术选型 §1.3](../整体技术选型与模块划分.md)）。
 2. **事件驱动非问答主动触发**：复用既有领域事件契约，不造新管道。Agent 的触发源从"人点按钮"变成"业务事件"，覆盖"工程师还没注意到但系统已该介入"的场景。
-3. **L3 代码+agent 混合编排的零 LLM 快路径**：换线全程 PASS 时 agent 节点根本不触发，LLM 调用为 0（[整体技术选型 §4.3](../整体技术选型与模块划分.md)）。事件触发后先走代码节点（plan / query+compare / gate），仅非确定分支才调 agent 能力——"代码能做的不交给 LLM"。
+3. **编排能力代码+agent 混合编排的零 LLM 快路径**：换线全程 PASS 时 agent 节点根本不触发，LLM 调用为 0（[整体技术选型 §4.3](../整体技术选型与模块划分.md)）。事件触发后先走代码节点（plan / query+compare / gate），仅非确定分支才调 agent 能力——"代码能做的不交给 LLM"。
 4. **跨语言 trace 串联**：Python 侧 httpx OTel instrumentation 自动注入 W3C `traceparent`，Java 侧 OTel agent 续接同一 trace；Kafka 消费侧同样透传 `trace_id`，实现"事件触发 -> Agent 推理 -> 受限写"全链路追踪。
 
 **实施重难点与技术挑战**
 
 1. **触发去重与风暴控制**：同一事件可能因 Kafka 重投多次到达，或短时间内多个相关事件同时触发同一场景。Agent 触发须幂等（按 `event_id` + scenario 去重），且并发触发需限流（按 tenant 信号量），避免突发把 LLM 调用打爆。
-2. **Agent 长程任务与事件消费的背压**：L3 编排是长程任务（interrupt/resume，跨进程恢复），事件消费速率可能远超 Agent 处理速率。需消费端 pause 背压 + 任务入队，不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
+2. **Agent 长程任务与事件消费的背压**：流程编排是长程任务（interrupt/resume，跨进程恢复），事件消费速率可能远超 Agent 处理速率。需消费端 pause 背压 + 任务入队，不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
 3. **跨语言事件消费幂等**：Python 侧 `event_id` 幂等表 + 手动 ack，与 Java 侧同构但独立实现。两套幂等表 schema 须对齐。
 4. **触发条件配置化**：哪些事件触发哪个 Agent 场景、触发阈值（如不良率突增的"突增"定义）应配置化，不硬编码在监听器里。🔴 触发规则归属（Agent 侧配置 vs MES 侧事件契约）待定。
 
@@ -387,7 +387,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 
 **典型业务节点**
 
-L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双通道推送：
+编排能力 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双通道推送：
 
 - **WebSocket（实时）**：在线责任人即时收到
 - **Kafka `agent.action_cards`（持久兜底）**：离线也能收到、可回溯；partition_key=`session_id`；带 `traceparent`
@@ -399,7 +399,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 **架构闪光点**
 
 1. **双通道互补**：WebSocket 的实时性 + Kafka 的持久性。实时通道失败（责任人未连 WS）不影响持久通道；持久通道消费侧（前端拉取 / 重连补送）兜底。
-2. **Kafka 兜底离线 / 重连补送**：与 L3 长程任务的 interrupt/resume 同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `thread_id` 续跑。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
+2. **Kafka 兜底离线 / 重连补送**：与 编排能力长程任务的 interrupt/resume 同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `thread_id` 续跑。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
 3. **跨语言 Python 生产**：agent-service（Python aiokafka）生产 `agent.action_cards`，是本系统唯一的 Python->Kafka 生产路径（其余 Python 服务都是消费）。partition_key=`session_id` 保证同一编排会话的动作卡有序。
 
 **实施重难点与技术挑战**
@@ -611,7 +611,7 @@ L3 confirmation gate 节点产出的动作卡，经 `ActionCardDispatcher` 双�
 | 边缘网关 HA 部署形态 | 单网关+缓冲 / 主备 / 集群 | 关键线体主备；切换 RTO 按可用性预算定 | 模式 E |
 | 平台 `msg_id` 去重存储方案 | DB 唯一（v1 起步）/ Redis 布隆+DB（预案）/ Redis SET+异步 | v1 主推 DB 唯一 + 消费端幂等；布隆为 DB 扛不住时预案 | 模式 E |
 | 大载荷保留期 | 按 kind 分类 | `curve/aoi-image/log/deadletter/` 分类，按审计要求 | 模式 F |
-| 图投影降级阈值 | 图覆盖度低于多少触发降级 REST | 🔴 待 L1 诊断实测定 | 模式 G |
+| 图投影降级阈值 | 图覆盖度低于多少触发降级 REST | 🔴 待 诊断实测定 | 模式 G |
 | `CONSUMED_BATCH` 边事件契约 | 物料消耗明细事件是否定义 | MVP 用降级 REST，待物料上下文明确定义后改投影 | 模式 G |
 | Agent 触发规则归属 | 触发条件配置在 Agent 侧还是 MES 事件契约 | 🔴 待定 | 模式 H |
 | 同服务本地事务 vs 事件的边界 | 哪些运维异常走本地事务 | 同服务 + 强防错 -> 本地事务；跨服务或非强防错 -> 事件 | 模式 D / §5.8 |

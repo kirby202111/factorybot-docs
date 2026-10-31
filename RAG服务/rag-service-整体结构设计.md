@@ -1,78 +1,98 @@
 # rag-service 整体结构设计
 
-> 本文是 rag-service（单一 Python 微服务）的**整体结构设计**，位于 A/B/E 三路线详细设计/实现方案之上的一层：
-> - 定义**跨路线共享的内核**（LLM / Embedding / 可观测 / 配置 / Kafka / ACL / 持久化 / 租户 / Web 底座）；
-> - 定义**单服务骨架**（FastAPI 统一入口、三路线模块、启动断言、健康检查、DI、迁移）；
-> - 定义**路线间调用与对外集成契约**（Port/Adapter，保留可拆性）。
+> 本文定义一个统一的 rag-service，而不是若干条独立 RAG 路线。服务同时具备**文档检索、制造追溯、Agentic 检索编排**三项能力，它们在同一套领域契约、权限控制、版本治理和可观测体系下协同工作。
 >
-> 各路线内部的领域建模、Cypher/向量检索细节、事件投影 handler 清单，仍以各路线详细设计/实现方案文档为准；本文只规定它们在单服务内的**组织方式与共享边界**。
+> 文档检索负责找到制度、SOP、手册和历史经验；制造追溯负责从关系型读模型与 MES 只读接口还原单件、批次、工单及其 5M1E 证据；Agentic 负责根据问题选择工具、补充检索、交叉核验并组织答案。三者是内部能力，不是独立产品、独立服务或需要用户选择的运行路线。
 >
-> 与 [整体技术选型与模块划分.md](../整体技术选型与模块划分.md) §1.2/§3.2 对齐：rag-service 是**一个 Python 微服务**，A/B/E 三路线作为模块共存，**全程只读**（图是事件流的只读投影）。
+> **明确不采用图检索**：不引入 Neo4j、GraphRAG、Cypher、图投影或 `subgraph_ref`。追溯通过业务主键、关联字段、关系型读模型和受限的只读查询完成。
 >
-> **范围说明**：C 数据型、D 防错即时辅助两条路线暂不建设（descoped），不在本文档范围内。
+> rag-service 全程只读 MES，不进入过点等生产主事务；答案必须能够回到文档片段或制造记录，无法满足版本、权限或证据约束时应拒答或明确说明证据缺口。
 
 ---
 
-## 0. 设计取舍
+## 0. 设计目标与边界
 
-| # | 取舍 | 理由 |
-|---|------|------|
-| 1 | **模块化单体 + 共享内核（Shared Kernel）** | 三路线运行时 profile 同质（均为 FastAPI + 事件订阅 + 检索/编排），合并单服务可消除各路线文档中重复的 `llm_factory` / `bge_client` / `obs` / `config` / `kafka` 基类；与总览 §1.2 单服务表述一致 |
-| 2 | **可拆性是硬约束** | 每路线模块自包含（自带 application/domain），依赖只指向 `shared/` 的 Protocol（Port），路线间调用走 Port/Adapter；未来任一路线可零成本抽成独立微服务（strangler），只需把 InProcess Adapter 换成 Http Adapter |
-| 3 | **多存储共存于单进程** | A 用 Neo4j、B 用 ChromaDB、元数据/审计用 MySQL、缓存用 Redis；单服务集中了存储依赖，但每条存储链路在 `shared/persistence/` 与各路线 `infrastructure/` 间用 Port 隔离，故障域不扩散（如 Neo4j 不可用返回 503，不拖垮 B/E） |
-| 4 | **只读红线靠启动断言兜底，不靠自觉** | 统一的 `ReadOnly*Gate` 体系（投影/摄入/工具三类 gate）在 lifespan 启动期扫描，发现任何写动作/原始数据流订阅即拒绝启动 |
+| 项目 | 设计决策 |
+|------|---------|
+| 服务形态 | 一个 Python 微服务、一个统一问答入口、一套应用层与领域模型 |
+| 能力关系 | 文档检索与追溯是检索工具，Agentic 是按需启用的编排能力，不拆成三条业务路线 |
+| 追溯实现 | MySQL 关系型读模型 + MES 只读 REST，按种子实体和关联字段逐跳取证 |
+| 文档实现 | 文档解析、切块、向量召回、元数据过滤与重排，保留精确引用 |
+| 版本治理 | `VersionAnchor` 贯穿文档、追溯记录、检索结果和最终答案 |
+| 权限治理 | 租户、车间、产线及数据范围在检索前生效，不在生成后补救 |
+| 只读边界 | 只允许查询、摄入 RAG 自有知识数据和记录审计；不得调用 MES 写接口 |
+| Agentic 边界 | 有最大步数、工具白名单和停止条件，不做无限循环或开放式写操作 |
+| 降级原则 | 局部证据不可用时返回部分答案与缺口；不得用模型记忆补齐制造事实 |
 
-> **不选多服务**：三路线基础设施 90% 同构（同 LLM 抽象、同 bge-m3、同 OTel/prometheus、同 pydantic-settings、同 Kafka envelope/幂等模式），拆三服务会把这 90% 复制三份，违背 DRY 与 SRP；总览 §1.2 也只列了一个 rag-service。
+### 0.1 设计取舍
+
+1. **统一优先于拆分**：三类能力共享 query、证据、答案、版本、权限和审计模型，避免三套服务之间反复转换契约。
+2. **编排不等于业务分裂**：Agentic 可以调用不同工具，但调用工具不代表存在不同 RAG 路线。
+3. **追溯不等于图数据库**：MES 已有明确的工单、过点、物料批次、设备、人员和工艺版本关联，使用索引化关系查询更直接，也减少一套存储和同步链路。
+4. **证据先于生成**：检索器先产出结构化证据，生成器只能基于证据作答；没有证据时允许输出澄清问题或拒答。
+5. **简单请求不过度 Agentic**：单次检索足够时直接返回；只有需要多源组合、追加查询或交叉核验时才进入多步编排。
 
 ---
 
-## 1. 限界上下文与模块边界
+## 1. 统一能力模型
 
-### 1.1 模块上下文清单
+### 1.1 三项能力的职责
 
-rag-service 内部划分为 **4 个模块上下文**：3 个路线业务上下文 + 1 个共享内核。
+| 能力 | 输入 | 输出 | 不负责 |
+|------|------|------|--------|
+| 文档检索 | 自然语言、文档类型、版本锚点、权限上下文 | 文档片段、引用位置、相关性分数 | 直接推断制造事实、绕过版本过滤 |
+| 制造追溯 | 序列号、批次号、工单号、缺陷或时间范围 | 结构化制造记录、5M1E 证据、来源引用、缺失项 | 图遍历、无边界全链展开、根因断言 |
+| Agentic 编排 | 用户问题、会话上下文、可用工具 | 检索计划、工具调用、补充查询、综合答案 | 修改 MES、脱离证据自由推理 |
 
-| 模块上下文 | 包路径 | 类型 | 职责 |
-|-----------|--------|------|------|
-| 追溯型（A） | `routes/traceability/` | 业务上下文 | GraphRAG 全链路追溯，5M1E 根因串联 |
-| 文档型（B） | `routes/document/` | 业务上下文 | SOP/手册/标准/8D 向量检索 + 事件驱动重索引 |
-| Agentic RAG（E） | `routes/agentic/` | 业务上下文 | L0 收口入口，意图路由到 A/B + 委托 agent-service L1/L2 |
-| 共享内核 | `shared/` | 技术内核 | LLM/Embedding/obs/config/kafka/acl/persistence/tenant/web 基础抽象与实现 |
+三项能力共同回答同一类问题。例如“这个批次为什么出现焊接不良，应按什么处理”需要：
 
-### 1.2 上下文映射（Context Map）
+1. 追溯工具确认批次、过点、测试结果、物料、设备和工艺版本；
+2. 文档工具按相同版本锚点检索 SOP、检验标准和历史 8D；
+3. Agentic 对证据进行对齐，区分“记录显示的事实”“文档给出的处置建议”和“尚不能确认的根因”；
+4. 统一答案返回文档引用与制造记录引用，而不是只给一段自然语言。
 
+### 1.2 总体结构
+
+```text
+                           用户 / 前端 / agent-service
+                                      │
+                                      ▼
+                             POST /rag/query
+                                      │
+                       ┌──────────────┴──────────────┐
+                       │      RAG Application        │
+                       │  QueryService / Orchestrator│
+                       └──────┬───────────────┬───────┘
+                              │               │
+                    ┌─────────▼───────┐ ┌─────▼──────────┐
+                    │ DocumentSearch  │ │ TraceLookup    │
+                    │ 文档检索工具     │ │ 非图追溯工具    │
+                    └─────────┬───────┘ └─────┬──────────┘
+                              │               │
+                       ChromaDB + metadata    │ MySQL 读模型
+                              │               │ MES 只读 REST
+                              └───────┬───────┘
+                                      ▼
+                         Evidence Set + Version Anchor
+                                      │
+                                      ▼
+                         Evidence-grounded Generation
+                                      │
+                                      ▼
+                    RagAnswer + Citations + Missing Evidence
 ```
-                      ┌─────────── shared（Shared Kernel，U）───────────┐
-                      │  ai  embedding  obs  config  kafka  acl          │
-                      │  persistence  tenant  web  events                │
-                      └──┬───────┬───────────────────┬──────────────────┘
-                         │       │                   │
-            ┌────────────┘       │                   └────────────┐
-            ▼                    ▼                                ▼
-       traceability(A)      document(B)                      agentic(E)
-            │                    ▲                                │
-            │  suggested_action  │ (DocRagPort)                   │
-            │ ───────────────────┘                                │
-            │                                                      │
-            │      rag.reindex 事件                                 │
-            └───────────────────────────►B                         │
-                                                                   │
-            E 统一入口调 A/B（Port）◄───────────────────────────────┤
-            E 委托 agent-service L1/L2（httpx REST）◄────────────────┘
-```
 
-- **shared -> 三路线**：Shared Kernel（U/D），三路线依赖 shared 的抽象与实现，反向禁止。
-- **A -> B**：客户/供应商，A 的 `TraceAnswer.suggested_action` 经 `DocRagPort` 拉 B 的 SOP 片段；A 升版时发 `rag.reindex.request` 内部事件通知 B 重索引。
-- **E -> A / B**：客户/供应商，E 经 Port 调两路线；E -> agent-service L1/L2 经 httpx REST 委托。
-- **路线间禁止直接 import 对方的 domain/application**：一律走 `shared/acl/` 的 Port（见 §3.6），这是可拆性的关键。
+Agentic 编排位于应用层，不是另一套 RAG。简单问题由 `QueryService` 直接调用检索工具；复杂问题由 `RagOrchestrator` 在有限状态机内多次调用相同工具。
 
-### 1.3 与外部上下文的边界
+### 1.3 一次请求的通用流程
 
-| 外部上下文 | 关系 | 集成方式 |
-|-----------|------|---------|
-| MES 14 限界上下文（Java） | 只读消费者 | Kafka 领域事件（投影/重索引）+ 只读 REST（降级补齐） |
-| agent-service（L1/L2/L3） | 被调用方（A/B 被 L1/L2 调）+ 调用方（E 委托 L1/L2） | httpx REST，W3C `traceparent` 透传 |
-| mes-eval | 被测对象 | EvalTarget 适配器（见 §10） |
+1. **建立上下文**：解析租户与数据权限，继承 `trace_id`，记录问题与请求预算。
+2. **解析约束**：识别序列号、批次、工单、时间范围和显式版本要求；无法确认关键约束时先澄清。
+3. **制定检索计划**：确定需要文档证据、追溯证据或二者，并设置结果数量与查询范围。
+4. **执行检索**：所有工具接收同一个 `RetrievalContext`，强制执行租户和版本过滤。
+5. **判断证据充分性**：证据足够则生成；存在可补救缺口则在预算内追加检索；否则返回缺口。
+6. **组织答案**：分离事实、建议与推断，每个关键陈述绑定证据 ID。
+7. **审计与返回**：保存工具调用、证据快照引用、模型信息和答案摘要，返回统一 `RagAnswer`。
 
 ---
 
@@ -81,378 +101,409 @@ rag-service 内部划分为 **4 个模块上下文**：3 个路线业务上下�
 ```text
 rag_service/
 ├── app/
-│   ├── api/                              # FastAPI 路由层（统一注册 + 横切）
-│   │   ├── __init__.py                   # register_routers(app) 汇总三路线 router
-│   │   ├── deps.py                       # 依赖注入 provider（get_*_service）
-│   │   ├── middleware.py                 # TenantMiddleware / RequestLogMiddleware
-│   │   ├── errors.py                     # 全局 exception_handler
-│   │   └── v1/
-│   │       ├── trace_router.py           # A: POST /rag/trace/query, /rag/trace/expand
-│   │       ├── doc_router.py             # B: POST /rag/docs/{query,search,ingest}
-│   │       └── chat_router.py            # E: POST /agent/chat, GET /agent/explain/{id}
+│   ├── api/
+│   │   ├── v1/
+│   │   │   ├── query_router.py          # 统一问答与证据查询
+│   │   │   └── document_router.py       # 文档摄入等管理接口
+│   │   ├── deps.py
+│   │   ├── middleware.py
+│   │   └── errors.py
 │   │
-│   ├── routes/                           # 三路线模块（各含 application/domain/infrastructure）
-│   │   ├── traceability/                 # A -- 详见《追溯型 RAG-详细设计/实现方案》
-│   │   ├── document/                     # B -- 详见《文档型 RAG-详细设计/实现方案》
-│   │   └── agentic/                      # E -- 详见《Agentic RAG-详细设计/实现方案》
+│   ├── application/
+│   │   ├── query_service.py             # 统一用例入口
+│   │   ├── orchestrator.py              # Agentic 状态机与停止条件
+│   │   ├── query_planner.py             # 从问题提取检索需求
+│   │   ├── answer_composer.py           # 基于证据生成统一答案
+│   │   ├── document_ingestion_service.py
+│   │   └── ports/
+│   │       ├── document_search.py       # 文档检索 Port
+│   │       ├── trace_lookup.py          # 追溯检索 Port
+│   │       ├── llm.py
+│   │       └── audit.py
 │   │
-│   ├── shared/                           # 共享内核（技术底座，见 §3）
-│   │   ├── ai/                           # LLM 抽象（ObservableChatModel + llm_factory + LlmPort）
-│   │   ├── embedding/                    # Embedding 抽象（EmbeddingPort + bge + reranker）
-│   │   ├── obs/                          # 可观测底座（context/port/tracing/metrics/logging/redactor）
-│   │   ├── config/                       # 统一配置（BaseSettings + RagSettings 聚合）
-│   │   ├── kafka/                        # 事件消费基类（ConsumerGroup + envelope + 幂等/位点）
-│   │   ├── acl/                          # ACL 基类 + 路线间 Port/Adapter + MES 只读客户端
-│   │   ├── persistence/                  # 多 Engine 工厂 + DeclarativeBase + Alembic
-│   │   ├── tenant/                       # TenantContext + 依赖注入 + 跨服务传递协议
-│   │   ├── web/                          # lifespan + health + DI 容器
-│   │   └── events/                       # 版本契约（VersionAnchor: route/bom/rule/asset/standard）
+│   ├── domain/
+│   │   ├── query.py                     # RagQuery / RetrievalContext
+│   │   ├── answer.py                    # RagAnswer / AnswerSection
+│   │   ├── evidence.py                  # Evidence / Citation / MissingEvidence
+│   │   ├── document.py                  # 文档、版本、chunk、绑定关系
+│   │   ├── trace.py                     # TraceSeed / TraceRecord / FiveM1EEvidence
+│   │   ├── version.py                   # VersionAnchor
+│   │   └── policy.py                    # 权限、版本与只读策略
 │   │
-│   ├── config.py                         # 入口 Settings 加载
-│   └── main.py                           # FastAPI app + lifespan + register_routers
+│   ├── infrastructure/
+│   │   ├── document/
+│   │   │   ├── parsers/
+│   │   │   ├── chunking/
+│   │   │   ├── chromadb/
+│   │   │   └── repositories/
+│   │   ├── trace/
+│   │   │   ├── mysql_read_models/       # 索引化关系型追溯读模型
+│   │   │   ├── mes_readonly/            # MES 只读 REST 适配器
+│   │   │   └── query_plans.py           # 白名单关联查询与展开限制
+│   │   ├── orchestration/
+│   │   │   └── langgraph_runner.py
+│   │   ├── llm/
+│   │   ├── embedding/
+│   │   ├── persistence/
+│   │   ├── kafka/
+│   │   ├── observability/
+│   │   └── tenancy/
+│   │
+│   ├── config.py
+│   └── main.py
 │
-├── alembic/                              # 迁移脚本（统一管理多 schema，见 §9）
+├── alembic/
 ├── tests/
 ├── pyproject.toml
 ├── Dockerfile
 └── docker-compose.yml
 ```
 
-> 各路线 `routes/<route>/` 内部的 `application/domain/infrastructure` 三层结构，与各路线现有实现方案文档的包结构**一一投影**（如 A 的 `infrastructure/neo4j/`、`projections/`、`acl/` 原样保留），只是顶层从"独立服务根"挪到"单服务下的路线模块"。迁移映射见 §11。
+目录按技术与领域职责划分，不再使用 `routes/document`、`routes/traceability`、`routes/agentic` 表达三个并列业务路线。`DocumentSearch` 与 `TraceLookup` 通过应用层 Port 注入，编排器只依赖接口，不依赖 ChromaDB、SQL 或 HTTP 实现。
 
 ---
 
-## 3. 共享内核（shared/）设计
-
-共享内核是三路线的 Shared Kernel，**只放被 ≥2 条路线复用的抽象与实现**；仅单路线使用的设施留在该路线 `infrastructure/` 下。
-
-### 3.1 `shared/ai/` -- LLM 抽象
-
-| 组件 | 职责 |
-|------|------|
-| `LlmPort`（Protocol） | LLM 抽象接口，业务层依赖它而非具体 provider（DIP） |
-| `ObservableChatModel` | 包装任意 `langchain-core` `BaseChatModel`，统一埋 token/延迟/模型/`prompt_version`，provider 无关 |
-| `llm_factory` | 按 config 创建 `ObservableChatModel`，适配 Claude/通义千问/DeepSeek/本地模型；模型可插拔 |
-
-> 现状：A/B/E 三份实现方案各自定义了 `llm_factory.py`。本文将其上移到 `shared/ai/`，各路线删本地副本、改 import。降本组件（`ModelRouter`/`EvalGate`/`CacheControl` 等）属 agent-service 成本优化横切，rag-service 仅在 E（LangGraph 路由图）内按需引用，不进 shared。
-
-### 3.2 `shared/embedding/` -- Embedding 抽象
-
-| 组件 | 职责 |
-|------|------|
-| `EmbeddingPort`（Protocol） | 向量化抽象，A（缺陷描述语义入口）/ B（文档向量化主体）两路线共用 |
-| `BgeClient` | bge-m3 1024 维实现，批量推理；A 的 DefectCatalog `name_embedding` 也走它 |
-| `BgeReranker` | bge-reranker-v2-m3 cross-encoder 精排（B 用） |
-
-> 选型理由见各路线文档：bge-m3 多语种、可本地化、1024 维 cosine。
-
-### 3.3 `shared/obs/` -- 可观测底座
-
-对齐 agent-service 可观测方案，rag-service 复用同一套五层可观测模型与 trace 双存储。
-
-| 组件 | 职责 |
-|------|------|
-| `ObservabilityContext` | 不可变 dataclass，随会话流动（`session_id`/`trace_id`/`tenant`/`route`/`prompt_version`/`step_no`） |
-| `ObservabilityPort`（Protocol） | 抽象接口，业务节点依赖它而非 OTel/prometheus 具体实现（DIP） |
-| `Tracing` | OTel span 封装（`session_span`/`retrieval_span`/`projection_span`/`llm_span`） |
-| `MetricsCollector` | Counter/Histogram 集中定义；统一指标前缀 `rag_`（如 `rag_trace_query_duration_seconds`、`rag_doc_search_hits`、`rag_projection_lag_ms`） |
-| `LoggingContext` | structlog + JSONRenderer，自动注入 `trace_id`/`span_id` |
-| `Redactor` | 脱敏纯函数（序列号保留前 4 后 2、物料批次白名单、PII 不采集） |
-
-> Trace 双存储：Tempo/Jaeger（SRE 火焰图）+ MySQL 平铺表（工程师 UI 证据链回溯），同源 `trace_id` 串联 agent-service 与 MES。观测是只读旁路，失败不反噬业务（图库崩返回 503，不影响 MES 过点）。
-
-### 3.4 `shared/config/` -- 统一配置
-
-| 组件 | 职责 |
-|------|------|
-| `BaseSettings` | 公共配置项：Kafka/MySQL/Redis/LLM/Embedding/OTel，环境变量命名统一前缀 `RAG_` |
-| `RagSettings` | 聚合各路线子配置（`TraceSettings`/`DocSettings`/`AgenticSettings`），按路线开关启停（如 `rag.agentic.enabled=false` 则不注册 E 的 router） |
-
-> 现状：三路线各自 `config.py`。本文上移公共项到 `BaseSettings`，各路线子配置作为 `RagSettings` 的嵌套字段。路线级开关支持灰度引入（先 B 再 A，E 收口）。
-
-### 3.5 `shared/kafka/` -- 事件消费基类
-
-| 组件 | 职责 |
-|------|------|
-| `DomainEvent` | 领域事件 envelope 公共定义（`event_id`/`event_type`/`event_version`/`occurred_at`/`source_service`/`trace_id`/`partition_key`），对齐 [消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §4.3 |
-| `ConsumerGroup` | aiokafka 消费者基类：手动 ack + 位点落 MySQL + 消费者组按主题前缀分组 |
-| `IdempotencyRepo` | `event_id` 幂等表操作基类（A/B 两路线共用模式） |
-| `OffsetRepo` | 消费者位点表操作基类 |
-| `ProjectionHandler`（Protocol） | 事件 -> 投影 handler 协议（ISP），A 的图投影 / B 的重索引都实现它 |
-
-> 现状：A/B 两路线各自实现 `consumer_group.py`/`listeners.py`/`idempotency_repo.py`/`offset_repo.py`，逻辑高度同构。本文上移基类到 `shared/kafka/`，各路线只保留自己的 `handlers/`（事件 -> 投影动作映射）。
-
-### 3.6 `shared/acl/` -- ACL 基类 + 路线间 Port/Adapter
-
-**这是可拆性的核心。** 分两类：
-
-**(a) 对 MES 只读 REST 的 ACL（出站）**
-
-| 组件 | 职责 |
-|------|------|
-| `BaseReadonlyAclClient` | httpx 异步基类：自动注入 `traceparent`、超时/重试、租户 header、只读断言（方法名禁止写动词） |
-| `MesClients` | 对 MES 14 上下文只读 REST 的客户端集合（工艺/物料/质量/过点/设备…），A/B 共享（降级补齐用） |
-
-**(b) 路线间调用的 Port/Adapter（可拆性关键）**
-
-| Port（Protocol） | 默认 Adapter（单服务内） | 拆服务后 Adapter | 调用方 |
-|-----------------|----------------------|----------------|--------|
-| `TraceRagPort` | `InProcessTraceRagAdapter`（直调 A 的 `TraceRetrievalService`） | `HttpTraceRagAdapter`（httpx -> rag-service A） | E |
-| `DocRagPort` | `InProcessDocRagAdapter`（直调 B 的 `DocumentRetrievalService`） | `HttpDocRagAdapter`（httpx -> rag-doc-service） | A、E |
-
-> 规则：路线间**禁止直接 import 对方的 application/domain**，一律依赖 `shared/acl/` 的 Port。单服务模式下 DI 容器注入 InProcess Adapter；未来拆服务只需把绑定换成 Http Adapter，业务代码零改动。这把"现在单服务、将来可拆"从口号变成结构属性。
-
-### 3.7 `shared/persistence/` -- 多存储 Engine 工厂 + 迁移
-
-| 组件 | 职责 |
-|------|------|
-| `db` | AsyncEngine 工厂：MySQL 主库（元数据/审计/幂等/位点）+ ChromaDB persistent client（B 的向量库），按 config 懒初始化 |
-| `base` | SQLAlchemy 2.0 `DeclarativeBase`（async + asyncmy，MySQL） |
-| `migrations/` | Alembic 统一管理多 schema（见 §9） |
-
-> 现状：各路线用原始 SQL DDL，无迁移工具。本文引入 Alembic 统一管理（§9）。
-> 多 DB 注意：单进程同时持有 Neo4j driver + ChromaDB client + MySQL asyncmy + Redis client，连接池分别配额，lifespan 启动期做就绪探测，任一不可用按路线降级（不拖垮其他路线）。
-
-### 3.8 `shared/tenant/` -- 租户上下文 + 跨服务传递
-
-| 组件 | 职责 |
-|------|------|
-| `TenantContext` | 租户上下文（`tenant_id`/`scopes`: workshop/line 列表） |
-| `dependency` | FastAPI 依赖：`tenant_from_token`（从 JWT 解析）/ `tenant_from_header`（从 `X-Tenant-Scope` 解析） |
-| `propagation` | 跨服务传递协议：出站 httpx 自动注入 `X-Tenant-Scope` header；Kafka 消费时从事件 envelope metadata 还原 |
-
-> 现状缺口：各路线各自定义 `TenantContext` 与过滤逻辑（A 用 Cypher `WHERE`、B 用 SQL `WHERE`），但**未定义跨服务传递协议**。本文统一：A/B/E 共用一个 `TenantContext`，传递协议在 `shared/tenant/propagation.py` 一处定义。
-
-### 3.9 `shared/web/` -- FastAPI 公共底座
-
-| 组件 | 职责 |
-|------|------|
-| `lifespan` | 启动断言编排（见 §7）+ 各存储就绪探测 + 按路线开关启停 consumer/router |
-| `health` | `GET /health`（进程存活）+ `GET /ready`（Neo4j/PG/MySQL/Redis/Kafka 连通性 + 各 consumer 组位点滞后度） |
-| `container` | DI 容器：注册 LLM/Embedding/各 Port 的 Adapter 绑定，`deps.py` 从容器取实例 |
-
-> 现状缺口：三路线均无健康检查端点、无统一 router 注册、无 DI 容器。本文一次性补齐。
-
-### 3.10 `shared/events/` -- 版本契约
-
-| 组件 | 职责 |
-|------|------|
-| `version_contract` | `VersionAnchor(kind, ref_id, version)` 统一版本锚点（route/bom/rule/asset/standard）；`ProcessRouteActivated` 驱动的版本失效事件 -> A 重投图 / B 重索引的统一入口 |
-
-> 版本一致性三段传递链（核心安全契约）：`图 SNAPSHOT_OF_{kind}{version} -> L1 evidence.version_anchor -> L2 Draft.version_anchor -> MES 应用服务校验 ACTIVE`。rag-service 侧负责第一段（图用快照边物理锁定版本）+ 发布 `rag.reindex.request` 内部事件通知 B。
-
----
-
-## 4. 三路线模块设计
-
-各路线模块内部结构沿用其详细设计/实现方案文档，此处只给**模块边界 + 对外端点 + 与 shared 的依赖关系**的速查表。
-
-### 4.1 路线 A 追溯型（`routes/traceability/`）
-
-| 层 | 关键组件 | 依赖 shared |
-|----|---------|------------|
-| domain | `TraceSubgraph`/`TraceNode`/`TraceEdge`/`FiveM1ECluster`、`TraceAnswer`/`RootCauseHypothesis`/`FiveM1ECategory`、`Seed`、`ProjectionHandler`/`GraphProjector`/`ReadOnlyProjectionGate` | tenant |
-| application | `TraceRetrievalService`、`SeedResolver` | ai、embedding、obs |
-| infrastructure | `neo4j/`(driver/schema/retriever)、`projections/`(各上下文投影 handler)、`acl/`(降级 MES 只读 REST) | kafka、persistence、acl、obs |
-
-**对外端点**：`POST /rag/trace/query`（检索+综合）、`POST /rag/trace/expand`（只取子图不综合）。
-**存储**：Neo4j（图主体 + DefectCatalog 向量索引）、MySQL（幂等/位点/审计）、Redis（子图缓存）。
-**GraphProjector** 订阅：`mes.checkpoint.lifecycle`/`mes.testresult.structured`/`mes.routing.progress`/`process.route.lifecycle`/`material.*`/`quality.*`（MVP 4 上下文，详见 A 实现方案 §5.1）。
-
-### 4.2 路线 B 文档型（`routes/document/`）
-
-| 层 | 关键组件 | 依赖 shared |
-|----|---------|------------|
-| domain | `KnowledgeDocument`(聚合根)/`DocumentVersion`/`DocumentChunk`/`DocumentBinding`/`ChunkLocator`、`DocAnswer`/`DocCitation`、`ReindexHandler`/`ReadOnlyIngestionGate` | tenant |
-| application | `DocumentIngestionService`、`DocumentRetrievalService`、`ReindexCoordinator`、`ChunkStrategySelector` | ai、embedding、obs |
-| infrastructure | `chromadb/`(client/schema/retriever/document_repo)、`acl/` | kafka、persistence、acl、obs |
-
-**对外端点**：`POST /rag/docs/query`（检索+综合）、`POST /rag/docs/search`（只检索 chunks）、`POST /rag/docs/ingest`（文档摄入）。
-**存储**：ChromaDB（chunk 向量 + metadata，chunk 不可变 + 版本隔离靠查询过滤）、MySQL（幂等/位点/审计）、Redis（检索缓存）。
-**重索引触发**：订阅 `process.route.lifecycle` + A 发布的 `rag.reindex.request` 内部事件。
-**审核流**：工艺绑定型文档（SOP/检验标准）随 `ProcessRouteActivated` **联动 PUBLISHED**（工艺生效即文档生效，责任归工艺 owner，决策 #3）；通用知识型/设备绑定型仍走独立 DRAFT->PUBLISHED。
-**版本绑定**：MVP 工艺绑定型按 ROUTE 锚点（`version_kind="route"`），`VersionAnchor` 统一覆盖 route/bom/rule/asset/standard，评测后可切 RULE 锚点（决策 #2）。
-
-### 4.3 路线 E Agentic RAG（`routes/agentic/`）
-
-| 层 | 关键组件 | 依赖 shared |
-|----|---------|------------|
-| domain | `IntentCategory`、`AgentAnswer`/`AnswerSource`、`ToolDescriptor`/`ToolRegistry`/`ReadOnlyToolGate` | tenant |
-| application | `GatewayService`、`IntentRouter` | ai、obs |
-| infrastructure | `ai/route_graph_builder`(LangGraph 轻量路由图，`recursion_limit=6`)、`acl/`(trace_rag/doc_rag/l1_delegation/l2_delegation) | acl、persistence、obs |
-
-**对外端点**：`POST /agent/chat`（统一问答入口）、`GET /agent/explain/{audit_id}`（回溯路由与工具链）。
-**存储**：MySQL（答案审计 `answer_audit`/路由 trace `route_trace`）、Redis（查询缓存）。
-**调用方式**：A/B 经 `shared/acl/` Port（单服务内 InProcess Adapter）；L1/L2 委托经 httpx REST（`POST /agent/diagnose`、`POST /agent/draft`，透传 `traceparent`）。
-**双角色**：E 既是 rag-service 的路线 E（收口 A/B），又是 agent-service 分层的 L0（见总览 §4.1）；本服务只实现其"路由 + 轻量组合 + 委托"部分，深度多步推理仍委托 L1。
-
----
-
-## 5. 对外接口契约汇总
-
-| 路线 | 端点 | 方法 | 用途 | 主要调用方 |
-|------|------|------|------|-----------|
-| A | `/rag/trace/query` | POST | 子图检索 + LLM 综合，返回 `TraceAnswer`（含 `subgraph_ref`） | agent-service L1（`query_traceability_graph` 工具） |
-| A | `/rag/trace/expand` | POST | 只取子图不综合，返回 `TraceSubgraph` | L1、E、工程师 UI |
-| B | `/rag/docs/query` | POST | 检索 + LLM 综合，返回 `DocAnswer` | L1/L2（`search_docs` 工具）、E |
-| B | `/rag/docs/search` | POST | 只检索 chunks，返回 `list[ChunkHit]` | L1、E |
-| B | `/rag/docs/ingest` | POST | 文档摄入（管理接口） | 文档管理员 |
-| E | `/agent/chat` | POST | 统一问答入口，返回 `AgentAnswer` | 责任人卡片 / 前端 |
-| E | `/agent/explain/{audit_id}` | GET | 回溯路由与工具链 | 审计/工程师 UI |
-| shared | `/health` | GET | 进程存活 | K8s liveness |
-| shared | `/ready` | GET | 依赖连通性 + consumer 位点滞后 | K8s readiness |
-| shared | `/metrics` | GET | prometheus 指标 | Prometheus |
-
-> 所有业务端点均经 `TenantMiddleware` 注入 `TenantContext`，出站自动透传 `X-Tenant-Scope` + `traceparent`。
-
----
-
-## 6. 模块间集成点
-
-### 6.1 路线间调用（进程内 Port/Adapter）
-
-| 调用方 -> 被调方 | Port | 单服务内路径 | 说明 |
-|-----------------|------|------------|------|
-| A -> B | `DocRagPort` | `TraceRetrievalService` -> `InProcessDocRagAdapter` -> `DocumentRetrievalService` | A 的 `suggested_action` 拉 SOP 片段，带 `version_anchor` |
-| A -> B（事件） | `rag.reindex.request` | A 发布 -> B 的 `ReindexCoordinator` 消费 | 工艺升版触发 B 重索引 |
-| E -> A/B | `TraceRagPort`/`DocRagPort` | `GatewayService` -> InProcess Adapter -> 各路线 service | E 不自己多步推理，轻量组合 `recursion_limit=6` |
-
-> 拆服务时：把 DI 容器里 Port -> InProcess Adapter 的绑定换成 Port -> Http Adapter，业务代码零改动。
-
-### 6.2 与 agent-service 的集成
-
-| 集成点 | 方向 | 契约 |
-|--------|------|------|
-| L1 调图 | Agent -> rag-service (A) | `query_traceability_graph` 工具封装 `POST /rag/trace/query`，注册在 L1 ToolRegistry 首位 |
-| L2 回查图 | Agent -> rag-service (A) | `fetch_subgraph_nodes(subgraph_ref)` -> `POST /rag/trace/expand`，L2 不重查图 |
-| L1/L2 调文档 | Agent -> rag-service (B) | `search_docs(query, version_anchor)` -> `POST /rag/docs/query` |
-| E 委托 L1/L2 | rag-service (E) -> agent-service | `POST /agent/diagnose`（60s）、`POST /agent/draft`（30s），透传 `traceparent` |
-
-> **traceparent 全链路**（决策 #1）：E 委托 L1 时手动注入 `traceparent`；L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求，接收 incoming `traceparent` 并续接 trace，出站 httpx instrumentation 自动透传到 A/B/MES。L1 实现方案需补 instrumentation 接入。
-
-### 6.3 与 MES 的集成（只读）
-
-- **Kafka 只读事件**：`GraphProjector`(A) / `ReindexCoordinator`(B) 订阅各上下文 Outbox 事件，幂等消费（`event_id`）+ 位点落 MySQL。
-- **只读 REST 降级**：图投影滞后或需聚合计算时，A 经 `MesClients` 调各上下文只读 REST 补齐。
-- **单向只读**：rag-service 从不回写 MES；图库崩返回 503 不阻塞生产。
-
-### 6.4 subgraph_ref 与版本一致性传递链
-
-```
-图 SNAPSHOT_OF_{kind}{version}（A，物理锁定版本；MVP 锁 route）
-  -> L1 evidence.version_anchor（透传）
-  -> L2 Draft.version_anchor（锁定）
-  -> MES 应用服务校验 ACTIVE（最后一道）
+## 3. 统一领域契约
+
+### 3.1 查询与答案
+
+```text
+RagQuery
+├── query: str
+├── session_id: str | None
+├── subject_refs: list[SubjectRef]        # serial/batch/work_order 等可选线索
+├── time_range: TimeRange | None
+├── version_anchor: VersionAnchor | None
+├── response_mode: AUTO | RETRIEVAL_ONLY
+└── retrieval_budget: RetrievalBudget
+
+RagAnswer
+├── answer_id: str
+├── summary: str
+├── sections: list[AnswerSection]         # 事实 / 处置建议 / 待确认事项
+├── citations: list[Citation]
+├── evidence_ids: list[str]
+├── version_anchors: list[VersionAnchor]
+├── missing_evidence: list[MissingEvidence]
+├── retrieval_steps: list[RetrievalStepSummary]
+└── trace_id: str
 ```
 
-rag-service 侧：A 用快照边把版本一致性变成结构属性；A 升版发 `rag.reindex.request` 通知 B 重索引。版本锚点统一为 `VersionAnchor(kind, ref_id, version)`，覆盖 route/bom/rule/asset/standard。
+`response_mode` 只控制是否生成自然语言，不用于选择所谓 RAG 路线。系统是否进行多步检索由证据需求和预算决定。
+
+### 3.2 统一证据模型
+
+| 字段 | 说明 |
+|------|------|
+| `evidence_id` | 本次请求内稳定的证据标识 |
+| `evidence_type` | `DOCUMENT_CHUNK` 或 `TRACE_RECORD` |
+| `source` | 文档 ID 与版本，或 MES 上下文与只读资源 |
+| `locator` | 文档页码/chunk 位置，或制造记录类型与业务主键 |
+| `content` | 用于生成的原文片段或结构化记录 |
+| `occurred_at` | 制造记录发生时间；文档可为空 |
+| `version_anchor` | 与证据绑定的工艺/BOM/规则等版本 |
+| `permissions_snapshot` | 检索时使用的数据范围摘要，不保存敏感令牌 |
+| `freshness` | 读模型位点或接口读取时间 |
+
+最终答案只能引用已进入 `EvidenceSet` 的内容。文档证据与追溯证据采用同一引用协议，UI 不需要理解三套答案模型。
+
+### 3.3 版本与权限
+
+- `VersionAnchor(kind, ref_id, version)` 覆盖 `route/bom/rule/asset/standard`。
+- 用户显式指定版本时不得静默切换；未指定时可根据工单或过点记录解析历史版本。
+- 当前操作指导只使用有效且已发布的文档；历史质量分析必须使用该制造记录当时的版本。
+- `TenantContext` 至少包含 `tenant_id` 与 workshop/line scopes，并作为所有检索 Port 的必填参数。
+- 文档元数据过滤、SQL 条件与 MES 只读请求都必须携带相同权限上下文。
 
 ---
 
-## 7. 启动断言与只读红线
+## 4. 核心能力设计
 
-统一的 `ReadOnly*Gate` 体系，在 `shared/web/lifespan` 启动期扫描，任一失败即拒绝启动（fail-fast）。
+### 4.1 文档检索
 
-| Gate | 归属 | 断言内容 |
+文档链路为：解析 -> 清洗 -> 切块 -> 元数据绑定 -> 向量化 -> 过滤召回 -> 重排 -> 证据输出。
+
+关键约束：
+
+1. **版本是元数据的一部分**：chunk 绑定文档版本及 `VersionAnchor`，不可只依赖正文中的版本文字。
+2. **chunk 不可变**：文档升版生成新 chunk，旧版本保留用于历史追溯；发布状态与生效区间独立维护。
+3. **先过滤再生成**：租户、文档状态、版本和生效时间在召回阶段过滤，重排不得越权召回其他数据。
+4. **引用可定位**：保留文档 ID、版本、页码、章节、chunk ID 和原文位置。
+5. **事件驱动更新**：消费文档与工艺生命周期事件，幂等更新 RAG 自有索引，不回写 MES。
+
+文档工具可以独立支撑简单 SOP 问答，也可以由 Agentic 在追溯结果明确工艺版本后再次调用，实现“先定位历史版本，再查对应作业指导”。
+
+### 4.2 非图制造追溯
+
+#### 数据来源
+
+- **MySQL 关系型读模型**：保存查询所需的制造事实快照和索引，数据来自 MES 领域事件或只读同步。
+- **MES 只读 REST**：用于读模型缺数、位点滞后或需要权威记录时补齐，响应仍转换为统一证据。
+
+读模型按业务查询设计，例如 `work_order_fact`、`unit_operation_fact`、`test_result_fact`、`material_usage_fact`、`route_version_fact`。它们使用业务主键和关联字段连接，不建立图节点、图边或 Cypher 查询。
+
+#### 查询过程
+
+1. **种子解析**：从序列号、批次号、工单号或缺陷记录定位最小查询范围。
+2. **主体取证**：读取工单、单件过点、测试结果等核心记录。
+3. **受限关联展开**：根据白名单查询计划，通过 `work_order_id`、`operation_record_id`、`material_lot_id`、`asset_id`、`operator_id`、`route_version` 等字段追加 5M1E 记录。
+4. **版本对齐**：以目标过点记录为基准确认当时工艺版本，禁止用当前版本覆盖历史事实。
+5. **证据裁剪**：按问题与时间范围保留相关记录，对重复记录去重，并标注读模型 freshness。
+6. **缺口处理**：关联字段为空、接口超时或权限不足时写入 `MissingEvidence`，不得虚构关系。
+
+#### 展开边界
+
+| 限制 | 默认策略 |
+|------|---------|
+| 关联深度 | 由固定查询计划限定，不开放任意递归 |
+| 时间范围 | 优先使用目标过点前后窗口或工单周期 |
+| 记录数量 | 每次查询与整次请求均设上限，超出后要求缩小范围 |
+| 可查询关联 | 仅允许评审过的 MES 业务关联，禁止客户端传 SQL/表名 |
+| 权限 | 每一跳都校验相同租户与数据范围 |
+| 超时 | 读模型与 REST 分别设置超时，部分失败不伪装成完整链路 |
+
+追溯结果可以按人、机、料、法、测、环分组，但分组只是证据展示方式。系统只能提出有证据支持的候选原因，不能把相关性直接表述为已确认根因。
+
+### 4.3 Agentic 检索编排
+
+Agentic 的价值是根据证据缺口调整检索，而不是为所有请求增加模型调用。
+
+```text
+ANALYZE
+   │ 提取实体、约束和证据需求
+   ▼
+PLAN ───────────────┐
+   │                │
+   ▼                │
+ACT: 调用文档/追溯工具 │
+   │                │
+   ▼                │
+OBSERVE: 规范化证据   │
+   │                │
+   ├── 缺口可补救且预算未用尽 ──┘
+   │
+   ▼
+COMPOSE: 生成有引用的答案
+   │
+   ▼
+COMPLETE / CLARIFY / INSUFFICIENT_EVIDENCE
+```
+
+硬性约束：
+
+- 工具仅包含只读 `document_search`、`trace_lookup`、`record_expand`、`version_resolve` 等白名单能力。
+- 默认最大 6 个编排步骤，并限制模型调用次数、工具次数、总时长和证据条数。
+- 无新增证据、达到预算或权限/版本冲突时立即停止循环。
+- 编排器不能绕过应用层直接访问数据库，也不能传入任意 SQL、URL 或工具名称。
+- 深度诊断或报告撰写如需交给 agent-service，应通过明确的外部用例接口委托；rag-service 仍负责提供同一套证据与版本契约。
+
+### 4.4 证据融合与答案生成
+
+`AnswerComposer` 接收证据集合而非原始数据库连接，按以下顺序组织答案：
+
+1. 已核实的制造事实；
+2. 与事实对应版本的文档要求；
+3. 有证据支持的候选解释或建议；
+4. 缺失证据、冲突与下一步人工确认事项。
+
+不同来源冲突时不得由模型投票决定。应展示来源、时间和版本差异，并优先提示人工核验。
+
+---
+
+## 5. 应用层与技术底座
+
+### 5.1 应用服务
+
+| 组件 | 职责 |
+|------|------|
+| `QueryService` | 统一事务边界与请求编排入口，建立权限、版本、审计上下文 |
+| `QueryPlanner` | 提取检索需求，不直接访问基础设施 |
+| `RagOrchestrator` | 在预算内调用工具并判断停止条件 |
+| `DocumentSearch` | 返回标准化文档证据 |
+| `TraceLookup` | 返回标准化追溯证据及缺失项 |
+| `AnswerComposer` | 调用 LLM 并校验引用完整性 |
+| `DocumentIngestionService` | 管理 RAG 自有文档与索引 |
+| `AnswerAuditService` | 保存请求、检索步骤、证据引用和结果摘要 |
+
+### 5.2 技术组件
+
+| 组件 | 职责 |
+|------|------|
+| LLM 抽象 | 统一模型提供方、超时、重试、token 与延迟观测 |
+| Embedding / Reranker | bge-m3 向量化与重排，支持本地化部署 |
+| Persistence | MySQL Engine、ChromaDB client、Redis client 的集中管理 |
+| Kafka | 统一事件 envelope、幂等、位点与错误处理 |
+| MES ACL | 只读 httpx 客户端，统一超时、租户和 `traceparent` 透传 |
+| Observability | OTel tracing、Prometheus metrics、结构化日志与脱敏 |
+| Web | FastAPI lifespan、统一异常、DI、健康检查 |
+
+基础设施可以复用，但不以“被几条路线复用”为归属标准；只要属于当前统一服务的横切能力，就集中定义接口和配置。
+
+---
+
+## 6. 对外接口
+
+| 端点 | 方法 | 用途 | 调用方 |
+|------|------|------|--------|
+| `/rag/query` | POST | 统一问答；按需组合文档、追溯与 Agentic | 前端、agent-service |
+| `/rag/answers/{answer_id}/evidence` | GET | 查看答案证据、引用和检索步骤摘要 | 前端、审计 |
+| `/rag/documents/ingest` | POST | 摄入或更新 RAG 自有知识文档 | 文档管理员 |
+| `/rag/documents/{document_id}/status` | GET | 查看解析、发布与索引状态 | 文档管理员 |
+| `/health` | GET | 进程存活 | K8s |
+| `/ready` | GET | MySQL、ChromaDB、Redis、Kafka 与关键只读依赖状态 | K8s |
+| `/metrics` | GET | Prometheus 指标 | Prometheus |
+
+文档检索和追溯检索作为内部工具 Port 暴露给编排器。若 agent-service 需要单独检索，可复用 `/rag/query` 的 `RETRIEVAL_ONLY` 模式，并传入主题线索，避免维护两套互相漂移的查询契约。
+
+所有业务接口统一返回 `trace_id`；错误响应区分权限不足、版本冲突、依赖不可用、证据不足与请求预算耗尽。
+
+---
+
+## 7. 外部集成
+
+### 7.1 与 MES
+
+- 通过 Kafka 消费经过契约评审的领域事件，更新文档索引或关系型追溯读模型。
+- 通过 ACL 调用 MES 只读 REST，禁止写方法和凭据提权。
+- 所有事件以 `event_id` 幂等，记录 consumer offset 与读模型 freshness。
+- 不订阅与检索无关的高频原始采集流，不将全量原始数据复制到 RAG。
+- 任何 RAG 故障都不阻塞 MES 过点和生产写事务。
+
+### 7.2 与 agent-service
+
+- agent-service 将 rag-service 作为统一知识与制造证据提供方。
+- 调用时透传 `traceparent`、租户上下文和主题线索，接收统一 `RagAnswer` 或证据集合。
+- 诊断和报告生成可以引用 RAG 证据，但不得绕过 RAG 自行拼装另一套文档/追溯检索实现。
+- rag-service 的 Agentic 仅负责检索与证据组织；跨领域业务流程仍由相应应用服务负责。
+
+---
+
+## 8. 数据一致性与版本传递
+
+```text
+MES 领域事件 / 只读记录
+        │
+        ├── 文档版本与发布状态 ──> chunk metadata ──> Document Evidence
+        │
+        └── 制造事实与版本字段 ──> 关系型读模型 ────> Trace Evidence
+                                                │
+                                                ▼
+                                      统一 VersionAnchor 校验
+                                                │
+                                                ▼
+                                     RagAnswer / agent-service
+```
+
+- 文档与追溯证据必须使用可比较的版本语义，不能只做字符串拼接后交给模型判断。
+- 历史问题以目标制造记录的版本为准；当前作业指导以当前 ACTIVE/PUBLISHED 版本为准。
+- 读模型滞后时必须展示 freshness；对强一致要求的查询直接读取 MES 只读接口或提示暂不可答。
+- 文档升版追加新数据，不覆盖历史 chunk；追溯读模型可按事件更新，但审计中保留证据来源与读取时间。
+
+---
+
+## 9. 只读、安全与启动断言
+
+| Gate / 策略 | 断言内容 |
+|-------------|---------|
+| `ReadOnlyMesClient` | 仅允许白名单 GET/只读查询接口，禁止 create/update/delete/complete 等写动作 |
+| `ReadOnlyToolPolicy` | Agentic 工具注册必须声明只读，拒绝动态加载未评审工具 |
+| `RetrievalScopePolicy` | 每个文档与追溯 Port 调用都必须包含租户与数据范围 |
+| `VersionPolicy` | 工艺相关检索缺少可解析版本时不得返回确定性的作业指导 |
+| `RawDataTopicPolicy` | 禁止订阅未评审的原始高频数据主题 |
+| `QueryPlanPolicy` | 追溯只允许预定义关联查询，限制深度、记录数和时间窗口 |
+| `CitationPolicy` | 生成后校验关键事实引用；引用为空或证据不匹配时降级为拒答/澄清 |
+
+启动时校验工具、ACL 和配置；运行时在每次调用执行权限与预算检查。启动断言不能替代运行时授权。
+
+---
+
+## 10. 存储与 Schema
+
+| 存储 | 内容 | 管理方式 |
 |------|------|---------|
-| `ReadOnlyProjectionGate` | A | 图投影 handler 禁止 `DELETE`/`REMOVE`/历史覆盖性 `SET` |
-| `RawDataTopicGate` | A | 消费者组禁止订阅 `dc.*` 原始数据流（高频采集不全量入图） |
-| `ReadOnlyIngestionGate` | B | 摄入/重索引 handler 禁止任何写 MES 调用 |
-| `ReadOnlyToolGate` | E | ToolRegistry 拒绝注册 `read_only=False` 的工具 |
-| `BaseReadonlyAclClient` 方法名扫描 | shared | 所有 ACL 客户端方法名禁止写动词（create/update/delete/...） |
+| MySQL `rag_knowledge` | 文档元数据、版本、绑定、摄入状态 | Alembic |
+| MySQL `rag_trace` | 关系型追溯读模型、查询所需索引 | Alembic |
+| MySQL `rag_runtime` | 事件幂等与位点、答案审计、检索步骤摘要 | Alembic |
+| ChromaDB | 文档 chunk 向量与过滤元数据 | collection 代码初始化与备份重建 |
+| Redis | 短期检索缓存、请求预算与限流状态 | 无业务事实唯一副本 |
 
-> 启动断言是把"只读旁路"从约定变成结构属性：最坏情况是"没检索出来"，不会产生写副作用。
-
----
-
-## 8. 部署与运行时
-
-- **进程模型**：单进程，`uvicorn + gunicorn` worker；A/B/E 均为请求-响应型，共享 worker 池。
-- **K8s**：独立微服务 `rag-service`，liveness probe = `/health`，readiness probe = `/ready`，按路线 QPS 配 HPA（A/B/E 合一指标）。
-- **路线级开关**：`RagSettings` 的 `rag.<route>.enabled` 控制 router 注册与 consumer 启停，支持灰度引入（先 B -> A -> E 收口）。
-- **故障域隔离**：Neo4j/PG/MySQL/Redis 任一不可用，对应路线降级（返回 503），不拖垮其他路线。
-- **可拆触发条件**（未来）：某路线 QPS/数据量单独增长到需要独立伸缩（如 A 的图投影 consumer 与 B 的检索争抢资源），按 §3.6 换 Http Adapter 即可拆出，业务代码零改动。
+不部署 Neo4j，不维护图 Schema。MySQL 中的追溯表是面向查询的读模型，不是 MES 权威数据源，可通过事件重放或只读同步重建。
 
 ---
 
-## 9. 数据库迁移与 Schema 管理
+## 11. 可观测与审计
 
-引入 **Alembic** 统一管理（现状缺口：各路线用原始 SQL DDL，无迁移工具）。
+### 11.1 Tracing
 
-| schema | 归属路线 | 内容 |
-|--------|---------|------|
-| `rag_shared` | shared | `DomainEvent` 幂等/位点基表（若统一） |
-| `rag_trace` | A | `index_idempotency`/`index_offset`/`subgraph_audit` |
-| `rag_doc` | B | ChromaDB collection（chunk 向量+metadata，非 Alembic）；幂等/位点归 `rag_shared` |
-| `rag_agentic` | E | `answer_audit`/`route_trace` |
+统一 span 链：`rag.query -> plan -> document.search/trace.lookup -> llm.compose`。每次工具调用记录耗时、结果数量、过滤条件摘要、版本锚点、读模型位点和错误类型，不记录敏感原文或访问令牌。
 
-- **MySQL**（A/E 元数据与审计）：Alembic 管理 schema 演进。
-- **ChromaDB**（B）：非 Alembic，collection 由代码初始化，Parquet 文件持久化（chunk 不可变）。
-- **Neo4j**（A）：`SchemaInitializer` 启动时幂等执行约束/索引/向量索引 DDL（非 Alembic，图库 DDL 幂等即可）。
+### 11.2 Metrics
 
----
+- `rag_query_duration_seconds`、`rag_query_total`
+- `rag_document_retrieval_duration_seconds`、`rag_document_hits`
+- `rag_trace_lookup_duration_seconds`、`rag_trace_records`
+- `rag_orchestrator_steps`、`rag_tool_calls_total`
+- `rag_answer_citation_failures_total`、`rag_insufficient_evidence_total`
+- `rag_consumer_lag`、`rag_read_model_freshness_seconds`
 
-## 10. 评测接入（mes-eval）
+### 11.3 审计
 
-rag-service 是 mes-eval 的被测对象，3 条路线各一个 `EvalTarget` 适配器（见总览 §3.3）：
-
-| 被测对象 | 适配器 | 评测入口 |
-|---------|--------|---------|
-| A 追溯型 | `mes_eval/infrastructure/targets/traceability_rag.py` | 调 `POST /rag/trace/query`，断言 5M1E 召回 + 证据回溯 + 版本锚点 |
-| B 文档型 | `doc_rag.py` | 调 `POST /rag/docs/query`，断言忠实度/答案相关性 + 版本过滤 |
-| E Agentic | `agentic_rag.py` | 调 `POST /agent/chat`，断言路由准确率 + 工具链正确性 |
-
-> 版本锚定贯穿评测全程：每条金标准用例钉死版本锚点（`version_kind`+`version`+`version_ref_id`），`VersionAnchorChecker` 强制比对。安全红线（失效工艺泄漏/写越界/租户越权/PII/实体幻觉/证据空）任一非 0 阻断 CI。
+审计保存答案 ID、请求摘要、模型与 prompt 版本、工具步骤、证据 ID/来源/版本和最终状态。正文与敏感字段按数据治理要求脱敏或限制保存周期。工程师可以从答案回到原始文档位置或 MES 只读记录。
 
 ---
 
-## 11. 与各路线详细设计文档的关系
+## 12. 部署与故障处理
 
-本文档定义**跨路线共享结构 + 单服务骨架**；各路线详细设计/实现方案文档定义**路线内部细节**。迁移映射：
+- 单服务部署，API 与事件消费者可共用代码和配置，按负载拆为不同进程角色，但不改变统一领域模型。
+- MySQL、ChromaDB、Redis 和 Kafka 分别配置连接池、超时与就绪检查。
+- ChromaDB 不可用时，追溯证据仍可返回，但答案必须注明文档建议缺失。
+- 追溯读模型或 MES 只读接口不可用时，可回答有证据的文档问题；制造事实不得由文档内容代替。
+- LLM 不可用时，`RETRIEVAL_ONLY` 仍可返回证据；普通问答返回可重试的依赖错误。
+- Redis 仅作缓存与限流，故障不应造成证据或权限判断失真。
 
-| 各路线文档原位置 | 本文档新位置 | 动作 |
-|----------------|------------|------|
-| `rag_service/app/api/trace_router.py` 等 | `app/api/v1/<route>_router.py` | 路由层上移到统一 `api/v1/` |
-| 各路线 `app/application/` `app/domain/` | `app/routes/<route>/application/` `domain/` | 原样下沉到路线模块 |
-| 各路线 `infrastructure/ai/llm_factory.py` | `app/shared/ai/llm_factory.py` | **上移合并**，删本地副本 |
-| 各路线 `infrastructure/embedding/bge_client.py` | `app/shared/embedding/bge_client.py` | **上移合并** |
-| 各路线 `infrastructure/obs/` | `app/shared/obs/` | **上移合并** |
-| 各路线 `config.py` | `app/shared/config/`（公共）+ 路线子配置 | **拆分合并** |
-| 各路线 `infrastructure/kafka/consumer_group.py`/`idempotency_repo.py`/`offset_repo.py` | `app/shared/kafka/` | **上移基类**，各路线只留 `handlers/` |
-| 各路线 `infrastructure/acl/`（对 MES） | `app/routes/<route>/infrastructure/acl/`（路线专属）+ `app/shared/acl/MesClients`（公共） | 公共部分上移 |
-| 路线间互调的 httpx 客户端 | `app/shared/acl/` Port + InProcess/Http Adapter | **重构为 Port/Adapter** |
-| 各路线 `main.py` | `app/main.py`（统一）+ `app/shared/web/lifespan` | **合并**，加健康检查/DI/router 注册 |
-
-> 后续动作：各路线详细设计/实现方案文档需补一句"包结构投影到 rag-service 整体结构设计 §2/§11，`llm_factory`/`embedding`/`obs`/`config`/`kafka` 基类见 §3"，避免文档间矛盾。此项不在本文档范围内，列为待办。
+配置按基础设施和功能策略组织，例如 `rag.document.*`、`rag.trace.*`、`rag.orchestration.*`，用于调参和安全限制，不作为三条独立产品的启用开关。
 
 ---
 
-## 12. 决策记录
+## 13. 评测设计
 
-以下 4 项原为各路线文档标记为 🔴 的待对齐项，2026-07-13 经评审定稿（仅 #2 的 rule_version 切换时机为评测后触发）：
+围绕一个统一 RAG 的能力与端到端结果评测，而不是分别维护三套路线指标。
 
-| # | 议题 | 决策 | 落地影响 |
-|---|------|------|---------|
-| 1 | E 委托 L1 的 `traceparent` 透传 | L1 `main.py` 挂 `opentelemetry-instrumentation-fastapi` 为硬要求，接收 incoming `traceparent` 并续接 trace；出站 httpx instrumentation 已有 | E -> L1 -> A/B/MES 全链路串联；L1 实现方案需补 instrumentation 接入 |
-| 2 | B 检验标准文档版本绑定 | MVP 工艺绑定型按 ROUTE 锚点（`version_kind="route"`），`VersionAnchor` 统一覆盖 route/bom/rule/asset/standard，评测后可切 RULE 锚点 | `routes/document/domain/document.py` 双轨字段；`shared/events` 增 quality.gate 事件 |
-| 3 | B 工艺绑定型文档审核流 | **联动 PUBLISHED**：`ProcessRouteActivated` 直接把关联文档置 PUBLISHED，工艺生效即文档生效，责任归工艺 owner（**与 B 详细设计默认"独立审核"相反，需同步修订 B 详细设计 §4.3**） | `routes/document/application/reindex_coordinator.py` 改为自动 PUBLISHED；去掉 SUBMITTED 人工确认中间态 |
-| 4 | 单服务内 E 调 A/B 的方式 | 走 InProcess Adapter（直调 application service），不走本机 REST；外部契约（A/B 对 agent-service）由 L1/L2 工具封装对齐 | `shared/acl/` 注入 InProcess Adapter |
+| 维度 | 关键指标 |
+|------|---------|
+| 文档检索 | Recall@k、重排命中、引用定位准确率、版本过滤正确率 |
+| 制造追溯 | 种子解析准确率、关键记录召回率、错误关联率、版本对齐率、缺口识别率 |
+| Agentic | 工具选择正确率、追加检索收益、平均步数、预算超限率、无效应答率 |
+| 综合答案 | 忠实度、答案相关性、引用完整率、事实/建议区分、缺失证据表达 |
+| 安全 | 租户越权、失效版本泄漏、写操作、无证据制造事实均为阻断项 |
+| 性能 | 端到端延迟、工具耗时、token 成本、依赖故障下的降级成功率 |
 
-> 已定稿决策不再标 🔴。#3 反转了 B 详细设计默认，需同步修订 B 路线文档。
-> **范围决策**：C 数据型、D 防错即时辅助两条路线暂不建设（descoped），原涉 C/D 的待对齐项（C 读库来源、defect_records 持久化、D 缓存粒度、EAM/PM 只读 REST 等）随之撤销。
+端到端用例至少覆盖：纯 SOP 查询、单件历史追溯、批次不良与对应版本 SOP 组合、证据不足、版本冲突、读模型滞后和越权访问。
 
 ---
 
-## 13. 附录：关键决策汇总
+## 14. 分阶段交付
+
+阶段划分只表示同一服务的增量交付，不表示引入不同 RAG 路线。
+
+| 阶段 | 交付内容 | 退出标准 |
+|------|---------|---------|
+| 一：统一检索底座 | 统一契约、权限/版本策略、文档摄入与检索、基础 `/rag/query` | 文档引用与版本过滤评测通过，只读和租户测试通过 |
+| 二：非图追溯 | 关系型读模型、MES 只读适配器、固定查询计划、5M1E 证据输出 | 关键记录召回、错误关联、版本对齐和缺口测试通过 |
+| 三：Agentic 编排 | 有限状态机、工具预算、补充检索、证据融合和答案审计 | 复杂问题收益明确，步数与成本受限，无证据不硬答 |
+| 四：生产治理 | 完整可观测、备份重建、压测、故障演练和评测门禁 | 降级、恢复、重建与安全红线全部通过 |
+
+---
+
+## 15. 关键决策汇总
 
 | # | 决策 | 核心权衡 |
 |---|------|---------|
-| 1 | **单服务·三路线模块 + 共享内核** | 消除三路线 90% 同构基础设施的重复；与总览 §1.2 一致；每路线模块自包含可拆 |
-| 2 | **路线间调用走 Port/Adapter，禁止直 import** | 把"现在单服务、将来可拆"从口号变成结构属性；拆服务只换 Adapter 绑定 |
-| 3 | **shared 只放 ≥2 路线复用的设施** | 避免共享内核膨胀；单路线专属设施留路线 `infrastructure/` |
-| 4 | **多 DB 共存，按路线降级** | 单进程集中存储依赖（Neo4j/ChromaDB/MySQL/Redis），但 Port 隔离故障域，任一 DB 不可用不拖垮其他路线 |
-| 5 | **统一 ReadOnly*Gate 启动断言** | 只读红线靠结构兜底不靠自觉；fail-fast 拒绝启动 |
-| 6 | **Alembic 统一管多 schema** | 补齐各路线无迁移工具的缺口；Neo4j/ChromaDB 除外（幂等 DDL / collection 代码初始化） |
-| 7 | **统一健康检查 + DI 容器 + router 注册** | 补齐三路线均缺失的运维底座 |
-| 8 | **租户跨服务传递协议一处定义** | 补齐各路线各自定义 TenantContext、无传递协议的缺口 |
-| 9 | **C/D 暂不建设（descoped）** | rag-service MVP 收窄为 A/B/E；C（NL2SQL 旁路）、D（实时推送）暂不建设，本文档不涉及 |
+| 1 | 一个 RAG 服务与统一答案契约 | 避免能力被产品化拆分，减少重复编排与契约转换 |
+| 2 | 文档、追溯、Agentic 是内部能力 | 可按需组合，但共享权限、版本、证据和审计 |
+| 3 | 追溯采用关系型读模型与只读接口 | 复用明确业务关联，避免图数据库和图投影的额外复杂度 |
+| 4 | Agentic 仅用于有收益的追加检索 | 控制延迟与成本，简单请求保持确定性链路 |
+| 5 | 统一证据模型约束生成 | 文档和制造记录都可审计，缺证据时不硬答 |
+| 6 | 版本与权限在检索前强制执行 | 防止失效工艺和跨范围数据进入模型上下文 |
+| 7 | RAG 只读并退出生产主事务 | 故障不阻塞生产，模型无写副作用 |
+| 8 | 分阶段增量交付同一服务 | 先验证证据质量，再增加多步编排，不以路线拆分进度 |

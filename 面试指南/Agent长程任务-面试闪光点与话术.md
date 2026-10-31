@@ -1,6 +1,6 @@
 # Agent 长程任务 · 面试闪光点与话术（状态持久化 / 一致性保证 / 中断恢复 / 人在回路深度版）
 
-> **定位**：本文是 [L3编排型Agent-实现方案.md](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) 与 [L3编排型Agent-LangGraph架构与流程图.md](../AGENT服务/L3编排型Agent/L3编排型Agent-LangGraph架构与流程图.md) 的**面试纵深展开**，聚焦 L3 编排型 Agent 作为系统中唯一面向长程任务设计的模块，钻进 **状态持久化、一致性保证、中断恢复、人在回路、超时兜底、部分失败回滚** 六条主线讲到底，每条都绑出处 + 防守话术。
+> **定位**：本文是 [FactoryAgent-流程编排能力.md](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) 与 [FactoryAgent-LangGraph统一架构与流程图.md](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) 的**面试纵深展开**，聚焦 流程编排能力作为系统中唯一面向长程任务设计的模块，钻进 **状态持久化、一致性保证、中断恢复、人在回路、超时兜底、部分失败回滚** 六条主线讲到底，每条都绑出处 + 防守话术。
 >
 > **口径纪律**（沿用 [项目亮点与指标卡片.md](项目亮点与指标卡片.md) §0）：这是**设计规划阶段**方案，不是"已上线长程任务引擎"。设计规模 / 架构 SLA 目标可给，须标注口径；不编造业务效果数字。长程任务的核心矛盾不是"跑得久不久"，而是"**既能跨小时跨人工确认保持状态一致、又能在进程重启/超时/人无响应/部分失败时安全降级、还要写动作绝不旁路 MES 的聚合根不变式**"——所有设计围绕这个矛盾展开。
 
@@ -10,16 +10,16 @@
 
 | 闪光点 | 一句话 | 出处 |
 |--------|--------|------|
-| **异步驱动 + 中断恢复** | HTTP 只负责启动，`asyncio.create_task` 异步驱动，gate 处 `interrupt` 暂停等人，state 落 MySQL 可跨进程续跑 | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §7.3 |
-| **状态外置持久化** | LangGraph `SqlSaver` 以 `thread_id=session_id` 持久化，进程重启从断点恢复，gate 等待状态不丢 | [L3流程图](../AGENT服务/L3编排型Agent/L3编排型Agent-LangGraph架构与流程图.md) §3 |
-| **confirmation token 绑定 action:target** | 人确认后发 token，绑定具体写动作（`isolation.issue:tenant_001`）+ 过期，防篡改防重放 | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §5.7 |
-| **写不旁路应用服务** | 写落库走各上下文**正常应用服务**，过聚合根不变式 + 事务发件箱，与正常写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认" | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §5.5 |
-| **步数 + 时长双闸门** | `recursion_limit=40` + `timeout=3600s`，超限标 FAILED 转人工，不硬走 | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §7.3 |
-| **gate deadline 挂起** | 每个 confirmation gate 有 deadline，超时自动 `SUSPENDED` 推责任人，不无限阻塞产线 | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §12 |
-| **barrier 硬防错** | 并行分支汇合后 barrier 按结构化结果确定性分流，未 PASS 绝不推放行卡——编排层防错，非 agent 判定 | [L3流程图](../AGENT服务/L3编排型Agent/L3编排型Agent-LangGraph架构与流程图.md) §3 |
-| **故障隔离不污染整链** | agent 连续失败 2 次标 `SUSPENDED` 推异常卡，不自动重试到死；低置信度标 `need_human_review` 不自动路由 | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §12 |
-| **会话全生命周期可审计** | `l3_session` + `l3_step_record`（含 `node_type` CODE/AGENT 区分 + `gate_decision` 谁/何时/基于哪张卡/agent 假设），每一步决策可回溯 | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §5.3 |
-| **代码节点 vs agent 节点物理分层** | `orchestration/code_nodes/` 与 `orchestration/agents/` 分开落点，`node_type` 落库可验——换线全程 PASS 时 LLM 调用为 0 | [L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §6 |
+| **异步驱动 + 中断恢复** | HTTP 只负责启动，`asyncio.create_task` 异步驱动，gate 处 `interrupt` 暂停等人，state 落 MySQL 可跨进程续跑 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
+| **状态外置持久化** | LangGraph `SqlSaver` 以 `thread_id=session_id` 持久化，进程重启从断点恢复，gate 等待状态不丢 | [L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
+| **confirmation token 绑定 action:target** | 人确认后发 token，绑定具体写动作（`isolation.issue:tenant_001`）+ 过期，防篡改防重放 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.7 |
+| **写不旁路应用服务** | 写落库走各上下文**正常应用服务**，过聚合根不变式 + 事务发件箱，与正常写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认" | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.5 |
+| **步数 + 时长双闸门** | `recursion_limit=40` + `timeout=3600s`，超限标 FAILED 转人工，不硬走 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
+| **gate deadline 挂起** | 每个 confirmation gate 有 deadline，超时自动 `SUSPENDED` 推责任人，不无限阻塞产线 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
+| **barrier 硬防错** | 并行分支汇合后 barrier 按结构化结果确定性分流，未 PASS 绝不推放行卡——编排层防错，非 agent 判定 | [L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
+| **故障隔离不污染整链** | agent 连续失败 2 次标 `SUSPENDED` 推异常卡，不自动重试到死；低置信度标 `need_human_review` 不自动路由 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
+| **会话全生命周期可审计** | `agent_session` + `agent_step_record`（含 `node_type` CODE/AGENT 区分 + `gate_decision` 谁/何时/基于哪张卡/agent 假设），每一步决策可回溯 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3 |
+| **代码节点 vs agent 节点物理分层** | `orchestration/code_nodes/` 与 `orchestration/agents/` 分开落点，`node_type` 落库可验——换线全程 PASS 时 LLM 调用为 0 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6 |
 
 > 这组是长程任务设计的"门面"。被问"Agent 跑一半人没确认怎么办"或"进程重启了 task 状态还在吗"时，直接甩"异步驱动 + SqlSaver 持久化 + interrupt/resume + confirmation token + 双闸门 + 故障隔离"六件套。
 
@@ -27,7 +27,7 @@
 
 ## 1. 30 秒电梯陈述
 
-"MES Agent 的长程任务设计，核心是 L3 编排型 Agent。它处理的是跨多个限界上下文、含人工确认的完整业务流程——比如一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等人确认处置，全程可能 30 分钟到 1 小时。
+"MES Agent 的长程任务设计，核心是 流程编排能力。它处理的是跨多个限界上下文、含人工确认的完整业务流程——比如一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等人确认处置，全程可能 30 分钟到 1 小时。
 
 长程任务的一致性不是靠'一个长事务锁到底'，而是靠**四层设计**：
 
@@ -49,7 +49,7 @@
 
 #### A.1 异步驱动：HTTP 只负责"启动"
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §7.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3）：
 
 ```python
 async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
@@ -58,7 +58,7 @@ async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
     return session  # 立即返回 session_id，不阻塞 HTTP
 ```
 
-- HTTP 请求 `/agent/l3/{scenario}/start` 只做两件事：创建 session 记录 + 启动异步任务，**立即返回** `session_id`。
+- HTTP 请求 `/agent/orchestration/{scenario}/start` 只做两件事：创建 session 记录 + 启动异步任务，**立即返回** `session_id`。
 - 后续流程（plan -> gate -> agent -> gate -> done）在后台异步执行，gate 处 `interrupt` 暂停等人，不占 HTTP 连接。
 - 调用方拿到 `session_id` 后轮询 session 状态或通过 WebSocket 收动作卡推送。
 
@@ -68,7 +68,7 @@ async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
 
 #### A.2 状态外置持久化：进程重启不丢状态
 
-**核心机制**（[L3流程图](../AGENT服务/L3编排型Agent/L3编排型Agent-LangGraph架构与流程图.md) §3）：
+**核心机制**（[L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3）：
 
 - LangGraph 的 `SqlSaver` checkpointer 以 `thread_id=session_id` 将 state 持久化到 MySQL。
 - `interrupt` 暂停时，当前 state（包括已执行的步骤、待确认的 gate、agent 产出的假设）全部落库。
@@ -81,10 +81,10 @@ async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
 
 #### A.3 会话状态表设计
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §5.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3）：
 
 ```sql
-l3_session
+agent_session
   - session_id (PK)
   - scenario (CHANGEOVER / FAULT_RESPONSE / COMPLAINT_8D / PROCESS_CHANGE)
   - work_order_id / batch_id / asset_id
@@ -93,7 +93,7 @@ l3_session
   - current_step
   - created_at / updated_at
 
-l3_step_record
+agent_step_record
   - record_id (PK)
   - session_id (FK)
   - step
@@ -113,7 +113,7 @@ l3_step_record
 - `gate_decision` + `gate_decided_by` + `gate_decided_at` 让每次人工确认可审计——谁、何时、基于哪张卡、agent 假设是什么。
 - `status` 枚举覆盖完整生命周期：PLANNING -> RUNNING -> SUSPENDED/DONE/FAILED。
 
-**防守话术**："`l3_step_record` 的 `node_type` 字段把代码节点和 agent 节点区分落库——可观测时能量化'本次换线调了几次 LLM'。换线全程 PASS 时 agent 调用为 0，这个指标本身就是健康度信号。"
+**防守话术**："`agent_step_record` 的 `node_type` 字段把代码节点和 agent 节点区分落库——可观测时能量化'本次换线调了几次 LLM'。换线全程 PASS 时 agent 调用为 0，这个指标本身就是健康度信号。"
 
 ---
 
@@ -121,7 +121,7 @@ l3_step_record
 
 #### B.1 写动作 confirmation gate（最大闪光点）
 
-**核心机制**（[L3流程图](../AGENT服务/L3编排型Agent/L3编排型Agent-LangGraph架构与流程图.md) §5）：
+**核心机制**（[L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §5）：
 
 ```
 Agent 草拟 intent + draft（动作卡）
@@ -143,7 +143,7 @@ Agent 草拟 intent + draft（动作卡）
 
 #### B.2 WriteToolGate：写工具不声明就启动失败
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §4.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §4.3）：
 
 ```python
 class WriteToolGate(Exception):
@@ -165,7 +165,7 @@ class ToolRegistry:
 
 #### B.3 放行能力从架构层切掉
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §7.5）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.5）：
 
 ```python
 # 启动断言：任何 capability 下均无放行/拦截类工具
@@ -185,7 +185,7 @@ for cap in ("root_cause", "fault_impact", "traceability", "draft_sop", "draft_8d
 
 #### C.1 步数 + 时长双闸门
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §7.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3）：
 
 ```python
 await asyncio.wait_for(
@@ -207,7 +207,7 @@ await asyncio.wait_for(
 
 #### C.2 gate deadline：每个确认点都有超时
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §12）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12）：
 
 - 每个 confirmation gate 有独立 deadline，超时自动挂起 `SUSPENDED`，推责任人。
 - 不无限阻塞——不会因为某个 gate 的人休假导致整条产线的 agent 会话卡住。
@@ -217,15 +217,15 @@ await asyncio.wait_for(
 
 #### C.3 故障隔离：agent 失败不污染整链
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §12）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12）：
 
 | 触发条件 | 动作 | 观测 |
 |---------|------|------|
-| agent 连续失败 2 次 | 标 `SUSPENDED`，推异常卡，不自动重试到死 | `l3_suspended_total` +1 |
+| agent 连续失败 2 次 | 标 `SUSPENDED`，推异常卡，不自动重试到死 | `orchestration_suspended_total` +1 |
 | agent 置信度 `low` | 处置卡标 `need_human_review`，列疑点，不自动路由 | `agent_low_confidence_total` +1 |
-| barrier 未 PASS | 禁止推放行卡，分流到 agent 或挂起 | `l3_suspended_total` +1 |
-| gate 超 deadline | 挂起 `SUSPENDED`，推责任人 | `l3_suspended_total` +1 |
-| 写工具未带有效 token | `WriteToolGate` 拒绝 + P0 告警 | `l3_write_rejected_total` +1 |
+| barrier 未 PASS | 禁止推放行卡，分流到 agent 或挂起 | `orchestration_suspended_total` +1 |
+| gate 超 deadline | 挂起 `SUSPENDED`，推责任人 | `orchestration_suspended_total` +1 |
+| 写工具未带有效 token | `WriteToolGate` 拒绝 + P0 告警 | `orchestration_write_rejected_total` +1 |
 
 **为什么是亮点**：长程任务中局部失败是常态——agent 某次推理置信度低、人迟迟不确认、工具调用偶发失败。设计的关键不是"保证不失败"，而是**失败隔离**：一个 agent 能力失败不污染其他能力，一个 gate 超时不影响其他 gate，单点失败挂起不整链雪崩。最坏情况是流程退回人工编排——不会越界写、不会错误放行。
 
@@ -233,13 +233,13 @@ await asyncio.wait_for(
 
 #### C.4 部分完成不能回滚的场景——靠"不自动写"规避
 
-**为什么这是设计取舍**：长程任务不像数据库事务可以 ROLLBACK——人已经确认了工艺激活、但后续钢网核对失败了，工艺已经切了，不能"回滚"工艺版本。L3 的设计选择是**不引入补偿事务，而是靠"不自动写"规避**：
+**为什么这是设计取舍**：长程任务不像数据库事务可以 ROLLBACK——人已经确认了工艺激活、但后续钢网核对失败了，工艺已经切了，不能"回滚"工艺版本。编排能力的设计选择是**不引入补偿事务，而是靠"不自动写"规避**：
 
 - 写动作必须人确认，人确认前全是草稿态——草稿不落库，没有"回滚"问题。
 - 人确认后的写动作走正常应用服务，应用服务内部的聚合根不变式负责一致性——这不是 Agent 层该管的事。
 - 如果流程中途失败（如 agent 连续失败被挂起），已确认的步骤**不撤销**（因为人确认过），未确认的步骤不执行——这是"人在回路"的语义：人的确认就是 commit point。
 
-**防守话术**："长程任务的中间状态怎么回滚？不回滚。这不是 bug 是设计取舍——L3 的写动作个个过 confirmation gate，人的确认就是 commit point。人确认过的步骤不撤销（因为那是人基于证据做的决策），未确认的步骤不执行（草稿不落库）。这和 MES 的实操一致——线长确认激活工艺后，不会因为后续钢网核对失败就'撤销工艺激活'，而是处置钢网问题。长程任务的一致性不靠分布式事务的 ROLLBACK，靠的是'草稿不落库 + 人确认 = commit + 聚合根不变式保护写'。"
+**防守话术**："长程任务的中间状态怎么回滚？不回滚。这不是 bug 是设计取舍——编排能力的写动作个个过 confirmation gate，人的确认就是 commit point。人确认过的步骤不撤销（因为那是人基于证据做的决策），未确认的步骤不执行（草稿不落库）。这和 MES 的实操一致——线长确认激活工艺后，不会因为后续钢网核对失败就'撤销工艺激活'，而是处置钢网问题。长程任务的一致性不靠分布式事务的 ROLLBACK，靠的是'草稿不落库 + 人确认 = commit + 聚合根不变式保护写'。"
 
 ---
 
@@ -247,19 +247,19 @@ await asyncio.wait_for(
 
 #### D.1 全生命周期落库
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §5.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3）：
 
-- `l3_session`：会话级（哪个场景、哪个工单、当前状态、起止时间）。
-- `l3_step_record`：步骤级（代码节点还是 agent 节点、哪个能力、gate 决策、谁确认的、agent 假设 + 置信度）。
+- `agent_session`：会话级（哪个场景、哪个工单、当前状态、起止时间）。
+- `agent_step_record`：步骤级（代码节点还是 agent 节点、哪个能力、gate 决策、谁确认的、agent 假设 + 置信度）。
 - 每一步都有 `occurred_at`，可以重建完整时间线。
 
 **为什么是亮点**：长程任务出问题最怕"不知道卡在哪一步、谁确认的、为什么确认"。全生命周期落库让每次长程任务的执行过程可完整回溯——"这次换线为什么卡了 15 分钟？因为工艺 gate 等工程师确认等了 15 分钟，agent 假设是 confidence=high，工程师确认 PASS"——一条时间线全讲清。
 
-**防守话术**："换线跑了一半卡住了，怎么排查？`l3_session` 看当前 `status` 和 `current_step`，`l3_step_record` 看每一步的 `occurred_at` 时间线，找到卡住的 gate——谁在等确认、agent 假设是什么、confidence 多少。不是看日志翻半天，是结构化可查询的。"
+**防守话术**："换线跑了一半卡住了，怎么排查？`agent_session` 看当前 `status` 和 `current_step`，`agent_step_record` 看每一步的 `occurred_at` 时间线，找到卡住的 gate——谁在等确认、agent 假设是什么、confidence 多少。不是看日志翻半天，是结构化可查询的。"
 
 #### D.2 动作卡带证据链
 
-**核心机制**（[L3实现方案](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) §5.4）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.4）：
 
 ```python
 class ActionCard(BaseModel):
@@ -292,7 +292,7 @@ class ActionCard(BaseModel):
 
 **Q：你这套 Agent 系统里，哪个模块是长程任务？为什么它是长程？**
 
-A：L3 编排型 Agent。它处理的是跨多个限界上下文、含人工确认的完整业务流程——一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等处置确认，全程可能 30 分钟到 1 小时。L0/L1/L2 都是短程——L0 单次问答，L1 多步只读推理秒级完成，L2 草拟后即结束。只有 L3 涉及"启动 -> 等人确认 -> 继续 -> 再等人确认 -> 完成"的异步长链。
+A：流程编排能力。它处理的是跨多个限界上下文、含人工确认的完整业务流程——一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等处置确认，全程可能 30 分钟到 1 小时。收口入口/诊断与草稿 都是短程——收口入口单次问答，诊断能力多步只读推理秒级完成，草稿能力草拟后即结束。只有 编排能力涉及"启动 -> 等人确认 -> 继续 -> 再等人确认 -> 完成"的异步长链。
 
 **Q：长程任务的状态怎么管理？HTTP 请求一直等到结束吗？**
 
@@ -319,7 +319,7 @@ A：Agent 不直接写——它生成 intent + draft（动作卡），人确认�
 
 **Q：人确认了工艺激活，但后续钢网核对失败，怎么回滚？**
 
-A：不回滚——这是设计取舍，不是 bug。L3 的 confirmation gate 就是 commit point：人确认过的事不撤销，因为那是人基于证据做的决策。实际 MES 现场也一样——线长确认激活工艺后，不会因为后续钢网核对失败就"撤销工艺激活"，而是处置钢网问题（归还 ST-A、领用 ST-B、重检）。
+A：不回滚——这是设计取舍，不是 bug。编排能力的 confirmation gate 就是 commit point：人确认过的事不撤销，因为那是人基于证据做的决策。实际 MES 现场也一样——线长确认激活工艺后，不会因为后续钢网核对失败就"撤销工艺激活"，而是处置钢网问题（归还 ST-A、领用 ST-B、重检）。
 
 长程任务的一致性不靠分布式事务的 ROLLBACK，靠的是"草稿不落库 + 人确认 = commit + 聚合根不变式保护写"。如果流程中途失败被挂起，已完成的人确认步骤不撤销，未执行的步骤不执行——人在回路保证了 commit 语义。
 
@@ -349,13 +349,13 @@ A：不会。每个 gate 有独立 deadline，超时自动挂起 `SUSPENDED` 推
 A：三个兜底：
 1. **动作卡带证据链**：人确认时不盲批——卡上有 evidence（trace_id 列表）+ agent_hypothesis + confidence。人可以看到 agent 查了什么、推理过程是什么，基于证据做判断。
 2. **低置信度不自动路由**：confidence=low 时卡上标 `need_human_review`，列疑点，不自动路由到执行——强制人仔细看。
-3. **gate 决策可审计**：谁、何时、基于哪张卡做的确认，全落 `l3_step_record`。事后可追溯"这次确认是基于 agent 的什么假设和证据"。
+3. **gate 决策可审计**：谁、何时、基于哪张卡做的确认，全落 `agent_step_record`。事后可追溯"这次确认是基于 agent 的什么假设和证据"。
 
 但最终——如果 agent 推理错了且人没看出来且确认了，责任在人。Agent 是辅助决策工具，不是决策者。这和 MES 的"设备防错 + 人确认"双保险一脉相承——防错能拦住的由代码拦，拦不住的由人确认，出了事可审计。
 
 **Q：如果 agent-service 整个挂掉（比如 OOM Kill），正在跑的 10 个换线会话怎么办？**
 
-A：状态全在 MySQL（`l3_session` + `l3_step_record` + SqlSaver checkpointer），不在 agent-service 进程内存里。Pod 重启后：
+A：状态全在 MySQL（`agent_session` + `agent_step_record` + SqlSaver checkpointer），不在 agent-service 进程内存里。Pod 重启后：
 - 10 个 session 的状态都在，status 可能是 RUNNING/SUSPENDED/GATE_WAITING。
 - 对于 GATE_WAITING 的 session：人仍可通过 `/confirm` 端点 resume（因为 state 从 MySQL 恢复）。
 - 对于 RUNNING 的 session：需要重新触发或手动恢复。
@@ -383,7 +383,7 @@ A：不会。三层隔离：
 
 **Q：为什么不用 Saga 做长程任务的补偿回滚？**
 
-A：两个原因。一是 L3 的写动作个个过 confirmation gate，人的确认就是 commit point——Saga 的补偿语义是"自动撤销"，但人确认过的事不应该自动撤销，那是推翻人的决策。二是 MES 场景下补偿事务的副作用太大——比如"撤销工艺激活"可能把已经在跑的新工艺在制品打回旧工艺，这个风险远大于"不撤销、让人处置"。
+A：两个原因。一是 编排能力的写动作个个过 confirmation gate，人的确认就是 commit point——Saga 的补偿语义是"自动撤销"，但人确认过的事不应该自动撤销，那是推翻人的决策。二是 MES 场景下补偿事务的副作用太大——比如"撤销工艺激活"可能把已经在跑的新工艺在制品打回旧工艺，这个风险远大于"不撤销、让人处置"。
 
 设计选择：**不引入 Saga，靠"草稿不落库 + 人确认 = commit"控制写边界**。这也和 [领域总览.md](../领域模型/领域总览.md) §5.3 的"过点主事务零分布式事务"一脉相承——能不跨事务就不跨，能用单点确认就不搞分布式协调。
 
@@ -393,7 +393,7 @@ A：LangGraph 的 `interrupt` / `Command(resume=...)` 是**图级别的暂停恢
 
 而且 `interrupt` 是显式的图节点——在 StateGraph 的边上看得到"这里有个 gate 等人"，可审计、可追踪。消息队列的"暂停/恢复"是隐式的——你看不到图里哪些节点会等人。
 
-**Q：为什么 L3 的 timeout 是 3600 秒而不是更长或更短？**
+**Q：为什么 编排能力的 timeout 是 3600 秒而不是更长或更短？**
 
 A：3600 秒（1 小时）是**设计目标**，不是硬上限。选取基于两个假设：换线/故障复产/客诉 8D 的最长路径（含人工确认）在经验上不会超过 1 小时；超过 1 小时说明某环节出了问题（人休假、系统卡死、agent 循环），应挂起转人工而非继续等。
 
@@ -408,17 +408,17 @@ A：骨架够用，需要调整两个参数。`SqlSaver` 的状态持久化本�
 
 但核心的"状态外置 + interrupt/resume + confirmation gate + 写不旁路"这套骨架不需要改。这是长程任务设计的可扩展性——**状态持久化与流程编排解耦**，流程时长从 1 小时变 1 天，改的是超时参数，不是架构。
 
-**Q：和传统工作流引擎（Camunda、Temporal）比，L3 这套有什么不同？为什么不用它们？**
+**Q：和传统工作流引擎（Camunda、Temporal）比，编排能力这套有什么不同？为什么不用它们？**
 
-A：传统工作流引擎做的是"确定性步骤编排 + 人工任务 + 补偿"——换线 5 步的顺序、gate 等人、超时挂起，这些工作流引擎都能做。但 L3 多了一个工作流引擎做不了的东西：**在非确定决策点嵌入 agent 能力**。
+A：传统工作流引擎做的是"确定性步骤编排 + 人工任务 + 补偿"——换线 5 步的顺序、gate 等人、超时挂起，这些工作流引擎都能做。但 编排能力多了一个工作流引擎做不了的东西：**在非确定决策点嵌入 agent 能力**。
 
 - 工作流引擎能做：plan -> 查首件 -> gate -> 查工艺 -> gate -> 查钢网/齐套 -> barrier -> 放行 -> gate。
 - 工作流引擎做不了：钢网 mismatch 时，自适应取证（查钢网借还记录 -> 查到 ST-A 借出未还 -> 自适应查上工单收线记录），根因推理（产线拿错 / 未还库 / 台账改名 / 工艺录错），草拟处置卡（路由给谁 + 建议动作）。
 
-所以 L3 不是"用 LangGraph 替代工作流引擎"，而是"工作流引擎能做的用代码节点做（零 LLM 调用），工作流引擎做不了的用 agent 能力做"。如果某场景完全确定、没有非确定决策点，那就不该上 L3，直接上工作流引擎就够了——这是"懂什么时候不用 AI"的体现。
+所以 编排能力不是"用 LangGraph 替代工作流引擎"，而是"工作流引擎能做的用代码节点做（零 LLM 调用），工作流引擎做不了的用 agent 能力做"。如果某场景完全确定、没有非确定决策点，那就不该上 编排能力，直接上工作流引擎就够了——这是"懂什么时候不用 AI"的体现。
 
 ---
 
 ## 4. 一句话定位（收尾用）
 
-"MES Agent 的长程任务设计，核心是 L3 编排型 Agent 的**状态外置 + 人在回路 + 写不旁路**三层一致性保证——LangGraph `SqlSaver` 把 state 持久化到 MySQL 可跨进程续跑，`interrupt`/`resume` 在 confirmation gate 等人确认时不占连接不丢状态，confirmation token 绑定 `action:target` + 过期防篡改防重放，写落库走各上下文正常应用服务过聚合根不变式 + 事务发件箱；`recursion_limit=40` + `timeout=3600s` 双闸门 + gate deadline 防无限阻塞，agent 连续失败/低置信度挂起隔离不污染整链。长程任务的一致性不靠分布式事务 ROLLBACK，靠的是'草稿不落库 + 人确认 = commit + 聚合根不变式保护写'——写的闸门始终在人手里，最坏情况退回人工编排，不会越界写、不会错误放行。"
+"MES Agent 的长程任务设计，核心是 流程编排能力的**状态外置 + 人在回路 + 写不旁路**三层一致性保证——LangGraph `SqlSaver` 把 state 持久化到 MySQL 可跨进程续跑，`interrupt`/`resume` 在 confirmation gate 等人确认时不占连接不丢状态，confirmation token 绑定 `action:target` + 过期防篡改防重放，写落库走各上下文正常应用服务过聚合根不变式 + 事务发件箱；`recursion_limit=40` + `timeout=3600s` 双闸门 + gate deadline 防无限阻塞，agent 连续失败/低置信度挂起隔离不污染整链。长程任务的一致性不靠分布式事务 ROLLBACK，靠的是'草稿不落库 + 人确认 = commit + 聚合根不变式保护写'——写的闸门始终在人手里，最坏情况退回人工编排，不会越界写、不会错误放行。"

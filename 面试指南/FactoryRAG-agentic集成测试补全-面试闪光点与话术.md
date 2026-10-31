@@ -51,7 +51,7 @@
 
 #### B.1 真 IntentRouter / RouteGraphBuilder / ToolExecutor / Delegator / L1L2Client，只伪造叶端
 
-**处理**：14 例测试里，`GatewayService` 的所有协作者都用真的：真 `IntentRouter`（规则优先 + LLM 兜底）、真 `RouteGraphBuilder`（真 langgraph `CompiledStateGraph`）、真 `ToolExecutor`（权限校验 + trace 记录 + handler 调用）、真 `SubAgentDelegator`、真 `L1DelegationClient`/`L2DelegationClient`（真 httpx 调用契约）。只伪造**叶端基础设施**：A/B Port 的 handler（`trace_rag_port.expand` / `doc_rag_port.search` 用 `AsyncMock`）、L1/L2 的 httpx（`MagicMock` + `post=AsyncMock`）、Redis（`_FakeCache`）、MySQL session（`AsyncMock` 的 `audit_repo` / `trace_repo`）、obs（`MagicMock`）。与 [_mock_rag_infra.py](../FactoryRAG/tests/_mock_rag_infra.py) 的"真实组件最大化、伪造件只替代基础设施"口径一致。
+**处理**：14 例测试里，`GatewayService` 的所有协作者都用真的：真 `IntentRouter`（规则优先 + LLM 兜底）、真 `RouteGraphBuilder`（真 langgraph `CompiledStateGraph`）、真 `ToolExecutor`（权限校验 + trace 记录 + handler 调用）、真 `SubAgentDelegator`、真 `L1DelegationClient`/`L2DelegationClient`（真 httpx 调用契约）。只伪造**叶端基础设施**：A/B Port 的 handler（`trace_rag_port.expand` / `doc_rag_port.search` 用 `AsyncMock`）、诊断与草稿 的 httpx（`MagicMock` + `post=AsyncMock`）、Redis（`_FakeCache`）、MySQL session（`AsyncMock` 的 `audit_repo` / `trace_repo`）、obs（`MagicMock`）。与 [_mock_rag_infra.py](../FactoryRAG/tests/_mock_rag_infra.py) 的"真实组件最大化、伪造件只替代基础设施"口径一致。
 
 **为什么是亮点**：两个判断。一是**真实组件最大化才挖得到集成层 bug**。如果我把 `ToolExecutor`/`Delegator` 也 mock 掉，`GatewayService` 就只剩个空壳路由，`audit_id` 从 state 读出来这条路径根本不跑--bug 就藏住了。真实组件最大化不是为了好看，是为了让集成测试**真能穿过集成层**（图状态在节点间流转、tool_result 物化、trace_repo 写入）。二是**伪造件只替代叶端**--A/B Port 的 handler、httpx、Redis、DB 这些外部依赖用伪造件满足契约，使 application/domain 层逻辑被完整覆盖且零外部依赖可跑。面试官问"为什么不直接 mock GatewayService 的协作者"，答"mock 协作者就只剩空壳路由，集成层的 bug--比如 state 在节点间丢键--根本走不到。真实组件最大化才能让集成测试挖到集成层的 bug"。
 
@@ -63,7 +63,7 @@
 
 #### C.1 audit_id/trace_id 没声明就被丢，traceparent/session_id 声明了活下来
 
-**识别过程**：第一个测试 `test_chat_trace_fact_routes_to_a_tool` 断言 `trace_repo.save_ok` 收到的 `audit_id` 非空，失败--实际是 `''`。`ToolExecutor` 读 `state.get("audit_id", "")`，默认空串，说明 state 里没这个键。但 `GatewayService._run_graph` 明明把 `audit_id` 放进了 `initial` state。用一段探针脚本（伪 tool 节点打印收到的 state keys）证实：tool 节点收到的 keys 恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在其中。根因：`AgentState` 漏声明 `audit_id`/`trace_id`，而 LangGraph `StateGraph(AgentState)` **按 TypedDict 声明字段过滤状态**，未声明的键在节点间被丢弃。`traceparent`/`session_id` 声明了所以活下来（这也解释了为什么 L1 委托的 traceparent header 一直正常、没人发现 audit_id 丢了）。
+**识别过程**：第一个测试 `test_chat_trace_fact_routes_to_a_tool` 断言 `trace_repo.save_ok` 收到的 `audit_id` 非空，失败--实际是 `''`。`ToolExecutor` 读 `state.get("audit_id", "")`，默认空串，说明 state 里没这个键。但 `GatewayService._run_graph` 明明把 `audit_id` 放进了 `initial` state。用一段探针脚本（伪 tool 节点打印收到的 state keys）证实：tool 节点收到的 keys 恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在其中。根因：`AgentState` 漏声明 `audit_id`/`trace_id`，而 LangGraph `StateGraph(AgentState)` **按 TypedDict 声明字段过滤状态**，未声明的键在节点间被丢弃。`traceparent`/`session_id` 声明了所以活下来（这也解释了为什么 诊断能力委托的 traceparent header 一直正常、没人发现 audit_id 丢了）。
 
 **后果链**：`ToolExecutor`/`Delegator` 读 `audit_id=""` -> `route_trace` 行 `audit_id` 为空 -> `AnswerAuditRepo.find_by_id(audit_id)` 用 `WHERE RouteTraceModel.audit_id == audit_id` 关联 -> **返回空 route_traces** -> `GET /agent/explain/{audit_id}`（正是 P0 #3 那个端点）只显示审计行、没有工具/委托证据。证据链断裂。
 
@@ -71,7 +71,7 @@
 
 **为什么是亮点**：这是"框架隐式契约"的典型坑。LangGraph `StateGraph` 的状态过滤是**隐式行为**--你传一个 dict 进去，它静默地只保留 TypedDict 声明的键，不报错不警告。`traceparent`/`session_id` 声明了活下来，给人"状态透传没问题"的错觉，`audit_id`/`trace_id` 漏声明就静默丢失。**识别出"`traceparent` 活下来不是因为我透传对了，是因为它碰巧声明了；`audit_id` 丢不是因为没传，是因为没声明"**，体现的是对框架状态模型的把握，不是"再加一个字段"的本能反应。而且这个 bug 直接断了 MES 的核心关注点--追溯性（`/agent/explain/{audit_id}` 是证据链入口）。面试官问"你怎么发现的"，答"第一个测试断言 audit_id 非空就失败了，写探针脚本看 tool 节点收到的 keys，发现恰好是 AgentState 声明的那几个，audit_id 没声明被 StateGraph 滤掉了"。
 
-**防守话术**："`AgentState` 漏声明 `audit_id`/`trace_id`，LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键节点间被丢。`traceparent`/`session_id` 声明了活下来，所以 L1 委托的 traceparent 一直正常、没人发现 audit_id 丢了。`ToolExecutor` 读到空串，route_trace 挂不上 answer_audit，`/agent/explain/{audit_id}` 证据链断。`_FallbackGraph` 走 plain dict 不过滤，既有测试全绿但生产裸奔--虚假安心。"
+**防守话术**："`AgentState` 漏声明 `audit_id`/`trace_id`，LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键节点间被丢。`traceparent`/`session_id` 声明了活下来，所以 诊断能力委托的 traceparent 一直正常、没人发现 audit_id 丢了。`ToolExecutor` 读到空串，route_trace 挂不上 answer_audit，`/agent/explain/{audit_id}` 证据链断。`_FallbackGraph` 走 plain dict 不过滤，既有测试全绿但生产裸奔--虚假安心。"
 
 ---
 
@@ -82,7 +82,7 @@
 **三个 bug 的发现路径**：
 1. **audit_id 断链**：**失败的测试用例直接暴露**。`test_chat_trace_fact_routes_to_a_tool` 断言 `ok_kwargs["audit_id"]` 非空，pytest 红了 `assert ''`。这是最强的发现--测试替你抓到了。
 2. **失败原因丢弃**：**写测试时读 `_build_answer` 发现**。我写失败路径测试时发现 `_build_answer` 一律用 `_materialize(tool_result)` 算 summary、从不读 `state["answer"]`，而 `ToolExecutor`/`Delegator` 在失败分支写的 `state["answer"]` 全是死代码。不是测试失败暴露的，是读码发现的。
-3. **route_taken 不一致**：**写测试时读码发现**。断言 delegation 失败的 `route_taken` 时，发现它是 "L1"（保留所尝试路线），而图级失败是 "HUMAN"，同一语义两种表示。
+3. **route_taken 不一致**：**写测试时读码发现**。断言 delegation 失败的 `route_taken` 时，发现它是 "诊断能力"（保留所尝试路线），而图级失败是 "HUMAN"，同一语义两种表示。
 
 **为什么是亮点**：**不把读码发现说成测试发现**。很多人会把"写测试时顺便发现的 bug"都归功于"集成测试发现的"，显得测试威力大。但 audit_id 是测试**失败**抓到的（测试替你工作了），后两个是**读码**发现的（你替测试工作了）。区分清楚反而更显功力：集成测试的价值有两个维度--一是**自动抓 bug**（audit_id），二是**强迫你读路径**（读码时发现死代码和不一致）。面试官问"集成测试发现了几个 bug"，答"测试直接抓了 1 个--audit_id 断链，用例红了；另外 2 个是我写测试时读 _build_answer 发现的--失败原因丢弃和 route_taken 不一致。前一个是测试替你抓，后两个是你替测试读。我不把读码发现说成测试发现"。
 
@@ -100,13 +100,13 @@
 
 #### E.2 route_taken：节点内失败保留所尝试路线，图级失败才 HUMAN
 
-**问题**：节点内失败（委托超时/工具异常/权限不足）`tool_result` 是 `None`，但 `_route_taken(intent, tool_chain)` 仍按意图返回 "L1"/"A"（保留所尝试路线）。而图级异常/超时走 `_human_fallback` 设 `route_taken="HUMAN"`。**同一"转人工"语义两种表示**。
+**问题**：节点内失败（委托超时/工具异常/权限不足）`tool_result` 是 `None`，但 `_route_taken(intent, tool_chain)` 仍按意图返回 "诊断能力"/"A"（保留所尝试路线）。而图级异常/超时走 `_human_fallback` 设 `route_taken="HUMAN"`。**同一"转人工"语义两种表示**。
 
-**处理**：`_route_taken(intent, tool_result)` 改为以 `tool_result is None` 为失败信号统一返回 "HUMAN"（UNKNOWN 仍 HUMAN）。所尝试的工具/委托记在 `tool_chain`（如 `["L1:diagnose"]`/`["delegation:failed"]`/`["query_traceability_graph"]`），不靠 `route_taken` 表达。三条转人工路径现在一致：`route_taken="HUMAN"` + `detail["reason"]`。
+**处理**：`_route_taken(intent, tool_result)` 改为以 `tool_result is None` 为失败信号统一返回 "HUMAN"（UNKNOWN 仍 HUMAN）。所尝试的工具/委托记在 `tool_chain`（如 `["诊断能力:diagnose"]`/`["delegation:failed"]`/`["query_traceability_graph"]`），不靠 `route_taken` 表达。三条转人工路径现在一致：`route_taken="HUMAN"` + `detail["reason"]`。
 
-**为什么是亮点**：两个判断。一是**死代码识别**--`state["answer"]` 被写但不被读，是典型的"作者意图没落到消费侧"。`_build_answer` 重算 summary 把它架空了。识别出"写入侧精心构造、消费侧从不读取"的死代码，比删几行更有价值。二是**语义一致性**--`route_taken` 在失败时该表达"结果"（HUMAN）还是"尝试"（L1/A）是设计选择，但不能同一个字段两种语义。统一成"结果"（HUMAN），"尝试"让 `tool_chain` 表达，职责切干净。面试官问"你怎么发现这两个 bug"，答"写失败路径测试时读 _build_answer，发现它从不读 state['answer']，而 ToolExecutor 写了一堆--死代码；再断言 route_taken 时发现节点内失败是 L1、图级失败是 HUMAN，同一语义两种表示"。
+**为什么是亮点**：两个判断。一是**死代码识别**--`state["answer"]` 被写但不被读，是典型的"作者意图没落到消费侧"。`_build_answer` 重算 summary 把它架空了。识别出"写入侧精心构造、消费侧从不读取"的死代码，比删几行更有价值。二是**语义一致性**--`route_taken` 在失败时该表达"结果"（HUMAN）还是"尝试"（诊断能力/A）是设计选择，但不能同一个字段两种语义。统一成"结果"（HUMAN），"尝试"让 `tool_chain` 表达，职责切干净。面试官问"你怎么发现这两个 bug"，答"写失败路径测试时读 _build_answer，发现它从不读 state['answer']，而 ToolExecutor 写了一堆--死代码；再断言 route_taken 时发现节点内失败是 诊断能力、图级失败是 HUMAN，同一语义两种表示"。
 
-**防守话术**："`_build_answer` 一律用 `_materialize(tool_result)` 算 summary，从不读 `state['answer']`，ToolExecutor/Delegator 写的失败原因全成死代码，summary 退化为通用文案。修：`tool_result is None` 走失败分支用 `state['answer']` 作 summary + 进 `detail['reason']`。route_taken 原来节点内失败保留 L1/A、图级失败才 HUMAN，同一语义两种表示；改成以 `tool_result is None` 统一 HUMAN，所尝试路线记 tool_chain。`_materialize` 的 None 分支移除，契约收紧。"
+**防守话术**："`_build_answer` 一律用 `_materialize(tool_result)` 算 summary，从不读 `state['answer']`，ToolExecutor/Delegator 写的失败原因全成死代码，summary 退化为通用文案。修：`tool_result is None` 走失败分支用 `state['answer']` 作 summary + 进 `detail['reason']`。route_taken 原来节点内失败保留 诊断能力/A、图级失败才 HUMAN，同一语义两种表示；改成以 `tool_result is None` 统一 HUMAN，所尝试路线记 tool_chain。`_materialize` 的 None 分支移除，契约收紧。"
 
 ---
 
@@ -170,7 +170,7 @@ audit_id 断链的修法我没自行假设，列了三个选项和权衡交还�
 
 ### 话术 4：LangGraph 按声明过滤状态这个坑你怎么定位的
 
-"第一个测试断言 `audit_id` 非空就红了 `assert ''`。`ToolExecutor` 读 `state.get('audit_id','')` 得空串，说明 state 里没这键，但 `_run_graph` 明明放进了 initial。我写了个探针脚本--伪 tool 节点打印收到的 state keys--发现恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在。LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键静默丢弃。`traceparent`/`session_id` 声明了活下来，所以 L1 委托的 traceparent 一直正常、没人发现 audit_id 丢了。"
+"第一个测试断言 `audit_id` 非空就红了 `assert ''`。`ToolExecutor` 读 `state.get('audit_id','')` 得空串，说明 state 里没这键，但 `_run_graph` 明明放进了 initial。我写了个探针脚本--伪 tool 节点打印收到的 state keys--发现恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在。LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键静默丢弃。`traceparent`/`session_id` 声明了活下来，所以 诊断能力委托的 traceparent 一直正常、没人发现 audit_id 丢了。"
 
 ### 话术 5：三个 bug 都是怎么发现的
 
@@ -201,13 +201,13 @@ A：方向相反。`_FallbackGraph` 不过滤意味着 state 是原样 dict，�
 A：因为 E 路线零集成测试，失败路径从来没被端到端跑过。`state["answer"]` 被 `ToolExecutor`/`Delegator` 写入，但 `_build_answer` 用 `_materialize(tool_result)` 重算 summary 把它架空--写入侧和消费侧脱节。单测若只测 `ToolExecutor` 会看到 `state["answer"]="权限不足"` 觉得没问题，只测 `_build_answer` 会看到 `_materialize` 逻辑觉得没问题，**集成才暴露写入的消费侧从不读它**。这正是集成测试的价值--跨组件的脱节只有穿过整条链才看得到。
 
 **Q：route_taken 统一成 HUMAN，会不会丢失"尝试了哪条路线"的信息？**
-A：不会，所尝试的路线记在 `tool_chain`。`tool_chain` 是 `["L1:diagnose"]`/`["delegation:failed"]`/`["query_traceability_graph"]`，能看出尝试了什么、是否失败。`route_taken` 表达**结果**（成功走 A/B/L1/L2、失败转 HUMAN），`tool_chain` 表达**过程**（尝试了哪些工具/委托）。职责切开后，"结果"和"过程"各归各位，比一个字段两种语义清晰。
+A：不会，所尝试的路线记在 `tool_chain`。`tool_chain` 是 `["诊断能力:diagnose"]`/`["delegation:failed"]`/`["query_traceability_graph"]`，能看出尝试了什么、是否失败。`route_taken` 表达**结果**（成功走 A/B/诊断与草稿、失败转 HUMAN），`tool_chain` 表达**过程**（尝试了哪些工具/委托）。职责切开后，"结果"和"过程"各归各位，比一个字段两种语义清晰。
 
 **Q：真实组件最大化，测试会不会很慢/很脆？**
 A：14 例 1.15 秒跑完，不慢。因为伪造的是叶端基础设施（Port handler / httpx / Redis / DB 都是内存 mock），真实的只是 application/domain 逻辑和 langgraph 图编排--这些是纯计算没 IO。脆性方面，真实 langgraph 版本升级可能影响图行为，但这正是集成测试该捕获的--如果 langgraph 升级改了状态过滤语义，我的测试会红，这是好事不是坏事。
 
 **Q：14 例覆盖了哪些分支？**
-A：三意图正常路径（TRACE_FACT->A 工具 / DOC_LOOKUP->B 工具 / ROOT_CAUSE->L1 委托 / DRAFT_REQUEST->L2 委托）、L1 委托超时转人工、图异常 + 图超时（`_run_graph` 两条 except）、缓存命中短路、权限不足转人工、工具失败转人工、UNKNOWN 转人工、`IntentRouter` 规则优先 + LLM 兜底（成功/失败）。失败路径测试还断言了失败原因保留 + route_taken=HUMAN + 证据链 audit_id 挂得上。
+A：三意图正常路径（TRACE_FACT->A 工具 / DOC_LOOKUP->B 工具 / ROOT_CAUSE->诊断能力委托 / DRAFT_REQUEST->草稿能力委托）、诊断能力委托超时转人工、图异常 + 图超时（`_run_graph` 两条 except）、缓存命中短路、权限不足转人工、工具失败转人工、UNKNOWN 转人工、`IntentRouter` 规则优先 + LLM 兜底（成功/失败）。失败路径测试还断言了失败原因保留 + route_taken=HUMAN + 证据链 audit_id 挂得上。
 
 ---
 
@@ -254,7 +254,7 @@ A：绝对不行。`_FallbackGraph` 是降级执行器，单趟定长（router -
 | E 路线零集成测试，仅测 _FallbackGraph | 真实 CompiledStateGraph 路径裸奔 | 补 14 例真实路径端到端测试 |
 | AgentState 漏声明 audit_id/trace_id | LangGraph 滤掉 -> route_trace.audit_id="" -> /agent/explain 证据链断 | 补声明入 AgentState |
 | _build_answer 不读 state["answer"] | 失败原因成死代码，summary 退化通用文案 | tool_result is None 走失败分支用 state["answer"] + detail["reason"] |
-| route_taken 节点内失败保留尝试路线 | 同一转人工语义两种表示（L1/A vs HUMAN） | _route_taken 以 tool_result is None 统一 HUMAN |
+| route_taken 节点内失败保留尝试路线 | 同一转人工语义两种表示（诊断能力/A vs HUMAN） | _route_taken 以 tool_result is None 统一 HUMAN |
 | _materialize 含 None 死分支 | 误导性死代码（None 实由 _build_answer 处理） | 移除 None 分支，契约收紧 |
 
 ### 卡片 C：能力表述（讲做了什么）

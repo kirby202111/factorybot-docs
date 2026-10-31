@@ -1,4 +1,4 @@
-# Agent 记忆系统 -- 设计与实现方案（Python 技术栈，L1/L2/L3 共用）
+# Agent 记忆系统 -- 设计与实现方案（Python 技术栈，三项能力 共用）
 
 > 本文档把 factorybot Agent 中所有与"记忆"相关的设计沉淀为一处。它不是新设计，而是把散落在
 > `Agent长程任务-实现细节深度剖析.md`（状态持久化 / interrupt-resume）、
@@ -36,7 +36,7 @@
 
 | 既有文档 | 讲了什么 | 本文档的补充 |
 |---|---|---|
-| `Agent长程任务-实现细节深度剖析.md` | L3State / SqlSaver 三表 / interrupt-resume / 跨进程恢复 / ConfirmationStore | 把它讲的"工作记忆"+"确认令牌"纳入分层视图，补它与上下文压缩、证据链的层间关系 |
+| `Agent长程任务-实现细节深度剖析.md` | OrchestrationState / SqlSaver 三表 / interrupt-resume / 跨进程恢复 / ConfirmationStore | 把它讲的"工作记忆"+"确认令牌"纳入分层视图，补它与上下文压缩、证据链的层间关系 |
 | `AgentToken成本优化-设计与实现方案.md` | ResultCompactor / CacheControl / EarlyStop / ToolResultCache / 语义缓存 | 把它讲的"上下文窗口记忆"+"跨会话缓存"纳入分层视图，补"模型看摘要"与"trace 落全文"的双路设计 |
 | `Agent可观测性-设计与实现方案.md` | tool_call_trace / node_trace 表族 / 证据链回溯 | 把它讲的"证据链长期记忆"纳入分层视图，补 trace 与 LLM 压缩版的对应关系 |
 
@@ -44,7 +44,7 @@
 
 ### 1.3 不覆盖
 
-- 不覆盖 L1/L2/L3 各自的业务流程（见各自实现方案）。
+- 不覆盖 三项能力 各自的业务流程（见各自实现方案）。
 - 不覆盖可观测性的指标体系细节（见可观测性文档）。
 - 不覆盖写路径的 ACL 客户端实现（见长程任务文档 §7）。
 
@@ -54,10 +54,10 @@
 
 | 层 | 名称 | 核心组件 | 存储介质 | 存什么 | 寿命 | 服务对象 | 落地状态 |
 |---|---|---|---|---|---|---|---|
-| L1 | 工作记忆 | `Checkpointer` + `L3State` | MySQL `SqlSaver`(real) / `MemorySaver`(mock) | 图状态快照（channel 值） | 会话级，可跨进程恢复 | LangGraph 引擎（interrupt/resume） | ✅ mock 跑通 / 🔧 SqlSaver 待启用 |
-| L2 | 上下文窗口记忆 | `ResultCompactor` / `CacheControl` / `EarlyStop` | 内存（请求级） | 喂模型的消息压缩、prompt 缓存标记 | 单次 LLM 调用 ~ 5min/1h | LLM | 🔧 已实现类，待接线 |
-| L3 | 证据链长期记忆 | `ToolCallTraceRepo` / `NodeTraceRepo` / `L3Step` | MySQL 平铺表 | 工具调用全文、节点执行记录 | 永久 | 工程师 UI / 审计 | ✅ 已落地并接线 |
-| L4 | 跨会话缓存 | `ToolResultCache` | Redis | 稳定工具结果的版本化缓存 | 按 tool 策略 TTL | 降本（命中省一次 ACL+回灌） | 🔧 已实现类，灰度接入 |
+| M1 | 工作记忆 | `Checkpointer` + `OrchestrationState` | MySQL `SqlSaver`(real) / `MemorySaver`(mock) | 图状态快照（channel 值） | 会话级，可跨进程恢复 | LangGraph 引擎（interrupt/resume） | ✅ mock 跑通 / 🔧 SqlSaver 待启用 |
+| M2 | 上下文窗口记忆 | `ResultCompactor` / `CacheControl` / `EarlyStop` | 内存（请求级） | 喂模型的消息压缩、prompt 缓存标记 | 单次 LLM 调用 ~ 5min/1h | LLM | 🔧 已实现类，待接线 |
+| M3 | 证据链长期记忆 | `ToolCallTraceRepo` / `NodeTraceRepo` / `OrchestrationStep` | MySQL 平铺表 | 工具调用全文、节点执行记录 | 永久 | 工程师 UI / 审计 | ✅ 已落地并接线 |
+| 自治 | 跨会话缓存 | `ToolResultCache` | Redis | 稳定工具结果的版本化缓存 | 按 tool 策略 TTL | 降本（命中省一次 ACL+回灌） | 🔧 已实现类，灰度接入 |
 | L5 | 会话元数据 & 令牌 | `L3Repo` / `SessionManager` / `ConfirmationStore` | MySQL + Redis | 会话生命周期、失败计数、确认令牌 | 会话级 ~ 30min | 编排器 / 写动作闸门 | ✅ 已落地并接线 |
 
 > 落地状态图例：✅ 已落地并接线（mock 端到端跑通）/ 🔧 已实现类，待接线（真实模式或灰度启用）/ 📐 设计中。
@@ -70,24 +70,24 @@
                         └─────────────────────────────────────────────┘
                               ▲                        ▲
               压缩后摘要回灌 │                        │ prompt 缓存标记
-              (L2 ResultCompactor)            (L2 CacheControl)
+              (M2 ResultCompactor)            (M2 CacheControl)
                               │                        │
    ┌──────────────────────────┴────────────────────────┴──────────────┐
-   │  L2 上下文窗口记忆（瞬时，请求级）                                  │
+   │  M2 上下文窗口记忆（瞬时，请求级）                                  │
    │  ResultCompactor · CacheControl · EarlyStop · recursion_limit    │
    └──────────────────────────┬───────────────────────────────────────┘
                               │ 工具调用
    ┌──────────────────────────┴───────────────────────────────────────┐
-   │  L3 证据链长期记忆（永久）  tool_call_trace / node_trace / l3_step │
+   │  M3 证据链长期记忆（永久）  tool_call_trace / node_trace / agent_step │
    │  ★ output_payload 存 FULL view（压缩前的全文）                    │
    └──────────────────────────┬───────────────────────────────────────┘
                               │ 同步落 trace
    ┌──────────────────────────┴───────────────────────────────────────┐
-   │  L4 跨会话缓存（Redis）  ToolResultCache  key=tc:{tenant}:{tool}:{hash(args+version_anchor)} │
+   │  自治 跨会话缓存（Redis）  ToolResultCache  key=tc:{tenant}:{tool}:{hash(args+version_anchor)} │
    └──────────────────────────────────────────────────────────────────┘
 
    ┌──────────────────────────────────────────────────────────────────┐
-   │  L1 工作记忆（会话级，可跨进程）                                    │
+   │  M1 工作记忆（会话级，可跨进程）                                    │
    │  LangGraph Checkpointer  thread_id = session_id                   │
    │  MySQL: checkpoints / checkpoint_writes / checkpoint_blobs        │
    │  interrupt(value=card) ──resume──> Command(resume=token)          │
@@ -101,7 +101,7 @@
 
 ### 2.3 数据流：一次工具调用如何流经各层
 
-以 L1 诊断的一次工具调用为例（[tool_node.py](../factorybot/app/infrastructure/ai/tool_node.py)）：
+以 诊断的一次工具调用为例（[tool_node.py](../factorybot/app/infrastructure/ai/tool_node.py)）：
 
 ```
 agent_node 产出 pending_tool_calls
@@ -109,15 +109,15 @@ agent_node 产出 pending_tool_calls
    ▼
 ToolNode.__call__
    │
-   ├─[权限] capability + tenant scope 过滤 ─否─> save_denied (L3) ─> 返回 error 消息
+   ├─[权限] capability + tenant scope 过滤 ─否─> save_denied (M3) ─> 返回 error 消息
    │
    ├─[执行] descriptor.handler(**args, tenant) -> view (FULL)
    │      │
-   │      └─[L4] (设计中) ToolResultCache.get_or_compute 命中则直接返回 view
+   │      └─[自治] (设计中) ToolResultCache.get_or_compute 命中则直接返回 view
    │
-   ├─[L3 落全文] trace_repo.save_ok(args, view=FULL_view, ...) -> trace_id
+   ├─[M3 落全文] trace_repo.save_ok(args, view=FULL_view, ...) -> trace_id
    │
-   ├─[L2 压缩] (设计中) ResultCompactor.compact(tool_name, view) -> compacted
+   ├─[M2 压缩] (设计中) ResultCompactor.compact(tool_name, view) -> compacted
    │      ★ 当前 mock：模型看 trace_id + 全文；真实模式由 ResultCompactor 压缩
    │
    └─[回灌模型] tool 消息 {trace_id, data: compacted_or_full}
@@ -127,17 +127,17 @@ ToolNode.__call__
 当前 mock 为简化把全文直接喂模型（[tool_node.py:90](../factorybot/app/infrastructure/ai/tool_node.py#L90) 注释），
 真实模式接线 ResultCompactor 后才走压缩路径。
 
-## 3. L1 工作记忆：Checkpointer + L3State
+## 3. M1 工作记忆：Checkpointer + OrchestrationState
 
 这是大家通常说的"Agent 记忆"--**图跑到一半挂起，靠它续跑**。
 
-### 3.1 状态 schema：L3State（channel 模型）
+### 3.1 状态 schema：OrchestrationState（channel 模型）
 
-[l3_state.py:128](../factorybot/app/domain/l3_state.py#L128) 定义 supervisor StateGraph 的 channel schema（`TypedDict, total=False`）。
+[orchestration.py:128](../factorybot/app/domain/orchestration.py#L128) 定义 supervisor StateGraph 的 channel schema（`TypedDict, total=False`）。
 每个字段是一个 LangGraph channel，节点用 `state.get()` 取。关键字段分组：
 
 ```python
-class L3State(TypedDict, total=False):
+class OrchestrationState(TypedDict, total=False):
     # 会话标识
     session_id: str
     scenario: str
@@ -168,7 +168,7 @@ class L3State(TypedDict, total=False):
     confirmation: Optional[dict]
 ```
 
-`last_wins` reducer（[l3_state.py:15](../factorybot/app/domain/l3_state.py#L15)）：并发分支同写一 channel 时取后者，`None` 不覆盖。
+`last_wins` reducer（[orchestration.py:15](../factorybot/app/domain/orchestration.py#L15)）：并发分支同写一 channel 时取后者，`None` 不覆盖。
 四类场景（换线 / 故障复产 / 客诉 8D / 工艺变更）**共用一套 schema，各场景只装配自己用到的子集**--DDD 共享内核 + 限界上下文装配的落地。
 
 ### 3.2 持久化：thread_id = session_id
@@ -187,7 +187,7 @@ def get_checkpointer() -> Any:
     return MemorySaver()
 ```
 
-**关键映射**：`thread_id = session_id`（[l3_orchestrator.py:102](../factorybot/app/application/l3_orchestrator.py#L102)）。
+**关键映射**：`thread_id = session_id`（[orchestration_service.py:102](../factorybot/app/application/orchestration_service.py#L102)）。
 LangGraph 按 thread_id 隔离 state；SqlSaver 的 thread_id 是联合主键的一部分，MySQL 行锁保证同 thread_id 的 checkpoint 写串行。
 
 > 落地状态：当前 mock 两个分支都返回 `MemorySaver`（SqlSaver 代码注释示意，真实部署启用）。
@@ -216,11 +216,11 @@ checkpoint_4 (parent=cp_3)  <- process_switch done (after resume)
 
 存的是 **state 本身**（各 channel 当前值）。注意：`interrupt(value=card)` 的 value（动作卡）**不进 checkpoint**--它只是传给外部的值；
 恢复时 LangGraph 从最新 checkpoint 重建 state，从 interrupt 的下一行继续。
-L3 不用回退（gate 确认后不撤销），但链式结构是 LangGraph 内建能力。
+编排能力不用回退（gate 确认后不撤销），但链式结构是 LangGraph 内建能力。
 
 ### 3.5 interrupt / resume 协议
 
-gate 节点暂停（[l3_orchestrator.py 注释](../factorybot/app/application/l3_orchestrator.py#L1-L7)）：
+gate 节点暂停（[orchestration_service.py 注释](../factorybot/app/application/orchestration_service.py#L1-L7)）：
 
 ```python
 async def await_confirmation(self, session_id, step, card):
@@ -234,7 +234,7 @@ async def await_confirmation(self, session_id, step, card):
 
 `interrupt` 做四件事：① 存当前 checkpoint ② 抛 `GraphInterrupt`（控制流信号，非异常）③ 把 value 返回调用方 ④ 协程挂起。
 
-人确认后续跑（[l3_orchestrator.py:128 resume()](../factorybot/app/application/l3_orchestrator.py#L128)）：
+人确认后续跑（[orchestration_service.py:128 resume()](../factorybot/app/application/orchestration_service.py#L128)）：
 
 ```python
 state = await graph.aget_state(config)              # 取 pending 动作卡
@@ -276,15 +276,15 @@ result = await sub.ainvoke(
 `{session_id}_{capability}` 使 supervisor 与 subgraph 的 checkpoint 在 MySQL 分开存放，互不覆盖。
 这是"多 session 并发 + 子图独立"的隔离手段。
 
-### 3.8 L1 诊断图为何不带 checkpointer
+### 3.8 诊断图为何不带 checkpointer
 
 [graph_builder.py:51](../factorybot/app/infrastructure/ai/graph_builder.py#L51) 注释"无 checkpointer，同步跑完"。
-L1 是短链路 ReAct（recursion_limit=20），跑完即出报告，**不需要中途暂停**，所以不需要工作记忆持久化。
+诊断能力是短链路 ReAct（recursion_limit=20），跑完即出报告，**不需要中途暂停**，所以不需要工作记忆持久化。
 
-> **记忆按场景需要才上，不是无脑全配。** L1 无 checkpointer / 无 ResultCompactor 接线；
-> L3 必带 checkpointer（长程任务要 gate 暂停 / 跨进程恢复）。这是分层记忆的"按需启用"原则。
+> **记忆按场景需要才上，不是无脑全配。** 诊断能力无 checkpointer / 无 ResultCompactor 接线；
+> 编排能力必带 checkpointer（长程任务要 gate 暂停 / 跨进程恢复）。这是分层记忆的"按需启用"原则。
 
-## 4. L2 上下文窗口记忆：喂模型的瞬时记忆
+## 4. M2 上下文窗口记忆：喂模型的瞬时记忆
 
 这层解决"ReAct 每步重发 system prompt + 历史，token 二次方放大"问题。属于"给 LLM 看的瞬时记忆"。
 
@@ -372,10 +372,10 @@ class EarlyStopDetector:
 
 ### 4.5 其他杠杆
 
-- `recursion_limit`：L1=20 / L3=40 硬上限，兜底封顶单会话步数（[graph_builder.py:92](../factorybot/app/infrastructure/ai/graph_builder.py#L92)）
+- `recursion_limit`：诊断能力=20 / 编排能力=40 硬上限，兜底封顶单会话步数（[graph_builder.py:92](../factorybot/app/infrastructure/ai/graph_builder.py#L92)）
 - 并行工具调用：`ToolNode` 用 `asyncio.gather` 并发执行多 tool_call，减少回灌次数（降 N）
 
-## 5. L3 证据链长期记忆：给系统留的全量记忆
+## 5. M3 证据链长期记忆：给系统留的全量记忆
 
 这层是 MES **追溯性 (Traceability)** 硬约束的落地--所有工具调用、节点执行必须可回溯。对应可观测性文档 §7。
 
@@ -404,20 +404,20 @@ class ToolCallTrace:
 
 > 落地状态：✅ 已落地并接线（[tool_node.py:83](../factorybot/app/infrastructure/ai/tool_node.py#L83) 每次调用落一行）。
 
-### 5.2 NodeTrace / L3Step / DraftTrace
+### 5.2 NodeTrace / OrchestrationStep / DraftTrace
 
 - `NodeTraceRepo`（[repos.py:97](../factorybot/app/infrastructure/persistence/repos.py#L97)）：CODE/AGENT 节点执行记录，含 `agent_hypothesis` / `agent_confidence` / `tool_call_traces` 反向引用
-- `L3Step`（[l3_state.py:105](../factorybot/app/domain/l3_state.py#L105)）：步骤级记录，状态 `PENDING|RUNNING|GATE_WAITING|CONFIRMED|FAILED`
-- `DraftTraceRepo`（[repos.py:85](../factorybot/app/infrastructure/persistence/repos.py#L85)）：L2 草稿归档（L2 只落草稿不落库）
+- `OrchestrationStep`（[orchestration.py:105](../factorybot/app/domain/orchestration.py#L105)）：步骤级记录，状态 `PENDING|RUNNING|GATE_WAITING|CONFIRMED|FAILED`
+- `DraftTraceRepo`（[repos.py:85](../factorybot/app/infrastructure/persistence/repos.py#L85)）：草稿归档（草稿能力只落草稿不落库）
 
 real 模式落 MySQL（[models.py](../factorybot/app/infrastructure/persistence/models.py)），表结构对齐可观测文档 §7.1 / 长程任务 §2.2。
 
 ### 5.3 与工程师 UI 回溯的关系
 
 证据链 = span 树的业务投影（可观测性文档 §4.5）。工程师 UI 读的是 `tool_call_trace.output_payload`（全文），
-不是 L2 压缩版。这就是"模型看摘要，trace 落全文"的后半句--**LLM 会幻觉，但 trace 永远是全量真相**。
+不是 M2 压缩版。这就是"模型看摘要，trace 落全文"的后半句--**LLM 会幻觉，但 trace 永远是全量真相**。
 
-## 6. L4 跨会话缓存：ToolResultCache
+## 6. 自治 跨会话缓存：ToolResultCache
 
 [tool_cache.py:15](../factorybot/app/infrastructure/redis_/tool_cache.py#L15)。Redis 精确缓存（**非语义缓存**）：
 
@@ -466,7 +466,7 @@ class ToolResultCache:
 ### 7.1 L3Repo / SessionManager：会话生命周期记忆
 
 [L3Repo](../factorybot/app/infrastructure/persistence/repos.py#L120) 承载：
-- 会话状态机 `PLANNING -> RUNNING -> SUSPENDED/DONE/FAILED`（[l3_state.py:27](../factorybot/app/domain/l3_state.py#L27)）
+- 会话状态机 `PLANNING -> RUNNING -> SUSPENDED/DONE/FAILED`（[orchestration.py:27](../factorybot/app/domain/orchestration.py#L27)）
 - **失败计数** `failure_count: dict[str,int]`，按 `(session_id, capability)` 追踪 agent 连续失败，≥2 次触发 `SUSPENDED`（agent 故障隔离，不自动重试）
 - `suspend_reason`、gate 决策记录、步骤记录
 
@@ -497,10 +497,10 @@ Key2: confirm:session:{session_id}:{step}    -> token_id（防重复确认，幂
 `action = f"{verb}:{session_id}"`（如 `activate_route:S-xxx`）绑定 session+step，校验时 `valid_for(expected_action)` 防篡改。
 两个 key 都 TTL 30min。`is_already_confirmed` 提供幂等：同 session+step 已确认则返回既有 token。
 
-**token 双重身份**：既是 L1 resume 的 `Command(resume=token)` 入参，又是下游应用服务的**幂等键**--
+**token 双重身份**：既是 编排会话续跑 的 `Command(resume=token)` 入参，又是下游应用服务的**幂等键**--
 Agent 侧重试不会导致重复写（如重复创建隔离单）。这是 L5 记忆与写路径的交汇点。
 
-> 落地状态：✅ 已落地并接线（[l3_orchestrator.py:140](../factorybot/app/application/l3_orchestrator.py#L140) resume 时 issue；container 装配）。
+> 落地状态：✅ 已落地并接线（[orchestration_service.py:140](../factorybot/app/application/orchestration_service.py#L140) resume 时 issue；container 装配）。
 
 ## 8. 设计哲学与关键权衡
 
@@ -513,7 +513,7 @@ Agent 侧重试不会导致重复写（如重复创建隔离单）。这是 L5 �
 
 ### 8.2 版本一致性红线贯穿全栈
 
-`route_version` 出现在：L3State 字段 -> 工具入参（system prompt 强约束"查工艺必须带 route_version"）-> L4 缓存 key 哈希 -> L3 trace。
+`route_version` 出现在：OrchestrationState 字段 -> 工具入参（system prompt 强约束"查工艺必须带 route_version"）-> M4 缓存 key 哈希 -> 编排能力 trace。
 MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓存层 key 设计。
 
 ### 8.3 时变性决定缓存策略
@@ -523,7 +523,7 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 
 ### 8.4 记忆按场景需要才上
 
-L1 无 checkpointer（短链路跑完即出）、无 ResultCompactor 接线；L3 必带 checkpointer（长程任务要 gate 暂停 / 跨进程恢复）。
+诊断能力无 checkpointer（短链路跑完即出）、无 ResultCompactor 接线；编排能力必带 checkpointer（长程任务要 gate 暂停 / 跨进程恢复）。
 **不无脑全配**--记忆组件都有成本（MySQL I/O / 缓存失效复杂度 / 接线维护），按场景痛点启用。
 
 ### 8.5 状态外置换跨进程生存
@@ -541,41 +541,41 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 ### 8.7 固定工具集 + prompt 缓存 优于 动态工具集
 
 **权衡**：缓存命中率 vs 小工具集省 token。结论：固定工具集 + 缓存命中（~0.1x）通常比动态工具集 + 缓存未命中更省。
-动态工具绑定只在工具集极大时（L3 14 上下文）才考虑。
+动态工具绑定只在工具集极大时（编排能力覆盖 14 个上下文）才考虑。
 
 ## 9. 存储介质总表
 
 | 存储 | 技术 | 存什么 | key | TTL | 用途 | 落地 |
 |---|---|---|---|---|---|---|
-| `checkpoints` | MySQL (SqlSaver) | L3State 全量快照 | (thread_id, checkpoint_ns, checkpoint_id) | 永久 | L1 工作记忆，interrupt/resume | 🔧 待启用 |
+| `checkpoints` | MySQL (SqlSaver) | 编排状态全量快照 | (thread_id, checkpoint_ns, checkpoint_id) | 永久 | M1 工作记忆，interrupt/resume | 🔧 待启用 |
 | `checkpoint_writes` | MySQL (SqlSaver) | 单 channel 写入 | (+ task_id, idx) | 永久 | checkpoint 变更跟踪 | 🔧 待启用 |
 | `checkpoint_blobs` | MySQL (SqlSaver) | 大对象分片 | (+ channel, version) | 永久 | blob 存储 | 🔧 待启用 |
-| `tool_call_trace` | MySQL (app) | 工具调用全文 | trace_id | 永久 | L3 证据链 | ✅ |
-| `node_trace` / `l3_step` | MySQL (app) | 节点/步骤记录 | record_id | 永久 | L3 审计 | ✅ |
-| `l3_session` | MySQL (app) | 会话元数据 | session_id | 永久 | L5 生命周期 | ✅ |
+| `tool_call_trace` | MySQL (app) | 工具调用全文 | trace_id | 永久 | M3 证据链 | ✅ |
+| `node_trace` / `agent_step` | MySQL (app) | 节点/步骤记录 | record_id | 永久 | 编排能力审计 | ✅ |
+| `agent_session` | MySQL (app) | 会话元数据 | session_id | 永久 | L5 生命周期 | ✅ |
 | `failure_count` | MySQL (app, via L3Repo) | 失败计数 | (session_id, capability) | 会话级 | L5 故障隔离 | ✅ |
 | `confirm:{token_id}` | Redis | 确认令牌 payload | token_id | 30min | L5 写动作闸门 | ✅ |
 | `confirm:session:{sid}:{step}` | Redis | 防重复确认 | (session_id, step) | 30min | L5 幂等 | ✅ |
-| `tc:{tenant}:{tool}:{hash}` | Redis | 工具结果缓存 | tenant+tool+args+version_anchor | 按 tool 策略 | L4 降本 | 🔧 灰度 |
+| `tc:{tenant}:{tool}:{hash}` | Redis | 工具结果缓存 | tenant+tool+args+version_anchor | 按 tool 策略 | 自治 降本 | 🔧 灰度 |
 | `llm_call_log` | MySQL (app) | LLM 调用指标 | call_id | 永久 | 可观测/降本归因 | ✅ |
 | `_active_tasks` | 进程内 dict | session_id->Task | session_id | 进程寿命 | 活跃任务跟踪 | ✅ |
-| prompt cache | provider 侧 | system prompt+工具定义 | 内容哈希 | 5m/1h | L2 降本 | 🔧 待接线 |
+| prompt cache | provider 侧 | system prompt+工具定义 | 内容哈希 | 5m/1h | 上下文窗口层降本 | 🔧 待接线 |
 
 ## 10. 落地状态与接线清单
 
-当前 mock（`RUN_MODE=mock`）已端到端跑通 L1 诊断 -> L2 草稿 -> L3 换线（3 个 gate interrupt/resume -> DONE），
+当前 mock（`RUN_MODE=mock`）已端到端跑通 诊断 -> 草稿 -> 流程编排换线（3 个 gate interrupt/resume -> DONE），
 7 个 pytest 全绿。但**记忆系统的各层落地进度不一致**，下表是真实模式接线清单：
 
 | 组件 | 类实现 | mock 接线 | 真实模式待办 |
 |---|---|---|---|
-| `MemorySaver` (checkpointer) | ✅ | ✅ L3 各场景图 | — |
+| `MemorySaver` (checkpointer) | ✅ | ✅ 编排各场景图 | — |
 | `SqlSaver` (MySQL checkpointer) | 📐 注释示意 | — | 接 `langgraph.checkpoint.mysql.AsyncSqlSaver` + 连接池 |
 | `ToolCallTraceRepo` | ✅ | ✅ ToolNode | 替换为 SQLAlchemy 实现 |
 | `L3Repo` / `SessionManager` | ✅ | ✅ orchestrator | 替换为 SQLAlchemy 实现 |
 | `ConfirmationStore` | ✅ | ✅ orchestrator | FakeRedis -> 真 Redis |
 | `ResultCompactor` | ✅ | 🔧 未接线 | ToolNode 回灌前调用 `compact()` |
 | `CacheControl` | ✅ | 🔧 未接线 | ObservableChatModel 外层套 `apply()` |
-| `EarlyStopDetector` | ✅ | 🔧 未接线 | L1 图条件边接入 `should_stop()` |
+| `EarlyStopDetector` | ✅ | 🔧 未接线 | 诊断图条件边接入 `should_stop()` |
 | `ToolResultCache` | ✅ | 🔧 未接线 | ACL 客户端 `get_or_compute` 封装 |
 
 **设计原则**：mock 验证的是"流程正确性"（记忆流转、interrupt/resume、证据链落库），
@@ -585,17 +585,17 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 
 | 本文章节 | 详细实现见 |
 |---|---|
-| §3 L1 工作记忆 | `Agent长程任务-实现细节深度剖析.md` §2-4（SqlSaver / interrupt-resume / 跨进程恢复） |
+| §3 M1 工作记忆 | `Agent长程任务-实现细节深度剖析.md` §2-4（SqlSaver / interrupt-resume / 跨进程恢复） |
 | §3.7 子图隔离 | `Agent长程任务-实现细节深度剖析.md` §9 |
-| §4 L2 上下文窗口记忆 | `AgentToken成本优化-设计与实现方案.md` §6-7（Prompt Caching / ResultCompactor / EarlyStop） |
-| §5 L3 证据链 | `Agent可观测性-设计与实现方案.md` §7（trace 落库表族 / 证据链回溯） |
-| §6 L4 跨会话缓存 | `AgentToken成本优化-设计与实现方案.md` §8（工具结果缓存 / 语义缓存） |
+| §4 M2 上下文窗口记忆 | `AgentToken成本优化-设计与实现方案.md` §6-7（Prompt Caching / ResultCompactor / EarlyStop） |
+| §5 M3 证据链 | `Agent可观测性-设计与实现方案.md` §7（trace 落库表族 / 证据链回溯） |
+| §6 自治 跨会话缓存 | `AgentToken成本优化-设计与实现方案.md` §8（工具结果缓存 / 语义缓存） |
 | §7.3 ConfirmationStore | `Agent长程任务-实现细节深度剖析.md` §5（Token 签发与校验） |
 | §7.2 失败计数 | `Agent长程任务-实现细节深度剖析.md` §11（agent 连续失败隔离） |
 
 ---
 
-> **一句话总结**：factorybot Agent 的记忆是五层分层架构--L1 工作记忆（checkpointer 续跑）、
-> L2 上下文窗口记忆（压缩 + prompt 缓存）、L3 证据链长期记忆（全文落库审计）、
-> L4 跨会话缓存（版本化精确缓存）、L5 会话元数据 & 令牌（生命周期 + 写动作闸门）。
-> 核心哲学"模型看摘要，trace 落全文"贯穿 L2↔L3；版本一致性红线贯穿 L1->L4；时变性红线决定 L4 缓存策略。
+> **一句话总结**：factorybot Agent 的记忆是五层分层架构--M1 工作记忆（checkpointer 续跑）、
+> M2 上下文窗口记忆（压缩 + prompt 缓存）、M3 证据链长期记忆（全文落库审计）、
+> 自治 跨会话缓存（版本化精确缓存）、L5 会话元数据 & 令牌（生命周期 + 写动作闸门）。
+> 核心哲学"模型看摘要，trace 落全文"贯穿 M2↔M3；版本一致性红线贯穿 M1->M4；时变性红线决定 M4 缓存策略。

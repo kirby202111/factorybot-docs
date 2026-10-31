@@ -1,10 +1,10 @@
 
-# RAG 与 Agent 评测 -- 设计与实现方案（Python 技术栈，覆盖 RAG 三路线 + Agent L1/L2/L3）
+# RAG 与 Agent 评测 -- 设计与实现方案（Python 技术栈，覆盖 RAG 三路线 + Agent 三项能力）
 
-> 本文是 [RAG服务引入路线.md](../RAG服务/RAG服务引入路线.md) 三路线、[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) L1/L2/L3 与 [Agent可观测性-设计与实现方案.md](../AGENT服务/Agent可观测性-设计与实现方案.md) §9/§10/§11 的**收敛展开**，输出**评测对象分层、金标准数据集构建、指标体系、离线/在线评测流水线、LLM-as-judge、置信度标定、漂移检测、人工闭环、数据模型、包结构与代码骨架、实现步骤与约束落地**。
-> **定位**：RAG（文档型/数据型/追溯型/防错即时辅助/Agentic）与 Agent（L1 诊断/L2 草稿/L3 编排）共用同一套评测底座。各路线 / 各层级实现方案里散落的"评测集 / 金标准 / 标定 / 漂移"片段**自此收敛为指针，事实源唯一在本篇**--避免多处各说各话。具体收敛点：
+> 本文是 [RAG服务引入路线.md](../RAG服务/RAG服务引入路线.md) 三路线、[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) 三项能力 与 [Agent可观测性-设计与实现方案.md](../AGENT服务/Agent可观测性-设计与实现方案.md) §9/§10/§11 的**收敛展开**，输出**评测对象分层、金标准数据集构建、指标体系、离线/在线评测流水线、LLM-as-judge、置信度标定、漂移检测、人工闭环、数据模型、包结构与代码骨架、实现步骤与约束落地**。
+> **定位**：RAG（文档型/数据型/追溯型/防错即时辅助/Agentic）与 Agent（诊断/草稿/流程编排）共用同一套评测底座。各路线 / 各层级实现方案里散落的"评测集 / 金标准 / 标定 / 漂移"片段**自此收敛为指针，事实源唯一在本篇**--避免多处各说各话。具体收敛点：
 > - [追溯型 RAG-实现方案.md](../RAG服务/追溯型 RAG/追溯型 RAG-实现方案.md) §12.3「检索准确性评测集」、§11 阶段三 step13「金标准评测集」/ 阶段五 step20 -> 本文 §4/§5/§6。
-> - [L1诊断型Agent-实现方案.md](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md) 阶段五 step21「沉淀评测集」-> 本文 §4/§5/§6。
+> - [FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) 阶段五 step21「沉淀评测集」-> 本文 §4/§5/§6。
 > - [Agent可观测性-设计与实现方案.md](../AGENT服务/Agent可观测性-设计与实现方案.md) §9 置信度标定 / §10 评测与回归 / §11 漂移 -> 本文 §5/§6/§8/§9（可观测篇的 §9/§10/§11 仍保留链路侧视角，**评测的事实源在本篇**）。
 > **技术栈**：Python（pytest + Pydantic + 自研评测骨架 + Ragas/DeepEval 适配层 + LLM-as-judge），与 `rag-service` / `agent-service` 同栈，评测契约抽成共享库 `mes-eval` 供两个服务复用，不造新契约。
 > **口径纪律**：评测本身是**只读旁路**--它只跑只读推理、只落评测结果表，绝不进过点主事务（[领域总览.md](../领域模型/领域总览.md) §5.3），绝不旁路任何上下文的写路径，评测数据同样受租户隔离与脱敏约束。本篇讲的是**设计规划**，不是说"已建成全自动评测体系"。MES 领域对错误答案零容忍（错给一条已失效工艺会直接导致批量不良），所以本文的主轴不是"堆指标"，而是**版本锚定的金标准 + 安全硬失败用例 + 人工闭环**--宁可让评测拦下不合格的变更，也不盲发。
@@ -19,7 +19,7 @@
 
 > **这条 AI 给出的根因假设 / 草稿 / 动作卡，凭什么判它合格？检索对不对、证据齐不齐、版本带没带、有没有把已失效工艺当现行工艺答出来、置信度报 0.8 是不是真有八成准？**
 
-这与 MES 防错理念同构：所有 AI 输出必须**可度量、可回归、可拦下**。L1 全程只读、L2 草稿不落库、L3 写动作过 confirmation gate、RAG 永远只读--这些红线要"讲得出也测得清"，靠的就是这套评测。没有评测，提示词 / 模型 / 检索策略的改动就是凭感觉改，而 MES 场景下"凭感觉改"的代价是批量不良。
+这与 MES 防错理念同构：所有 AI 输出必须**可度量、可回归、可拦下**。诊断能力全程只读、草稿不落库、编排能力写动作过 confirmation gate、RAG 永远只读--这些红线要"讲得出也测得清"，靠的就是这套评测。没有评测，提示词 / 模型 / 检索策略的改动就是凭感觉改，而 MES 场景下"凭感觉改"的代价是批量不良。
 
 ### 1.2 与通用软件测试 / 通用 RAG 评测的区别
 
@@ -34,7 +34,7 @@
 
 ### 1.3 覆盖范围与不覆盖范围
 
-- **覆盖**：`rag-service`（三路线）与 `agent-service`（L1/L2/L3）的 AI 输出质量评测--检索质量、生成质量、Agent 行为、安全红线、置信度标定、漂移。
+- **覆盖**：`rag-service`（三路线）与 `agent-service`（三项能力）的 AI 输出质量评测--检索质量、生成质量、Agent 行为、安全红线、置信度标定、漂移。
 - **不覆盖**：MES 三大 Java 服务的业务功能测试（那是 MES 主体的事，走既有单测 / 集成测）。评测只把 Java 只读 REST / 领域事件当作"被检索的数据源"，不替 Java 服务做功能测试。
 - **不覆盖**：纯性能压测（过点 P99 ≤200ms、图投影滞后等已在各方案的可观测章节定义，本文只在"评测是否回归了性能红线"层面引用，不重做压测设计）。
 - **不覆盖**：模型本身的预训练评测（那是模型供应商的事）。本文评测的是"模型 + 提示词 + 检索/工具 + 领域数据"组合后的**端到端表现**。
@@ -43,7 +43,7 @@
 
 | 边界 | 说明 | 落地 |
 |------|------|------|
-| **只读旁路** | 评测只跑只读推理、落评测结果表，不写业务表 | 评测用例调的是各路线 / 各层级的只读入口（`/rag/trace/query`、L1 诊断 API、L2 草稿生成 API）；L2 评测只验草稿不验下达，绝不触发落库 |
+| **只读旁路** | 评测只跑只读推理、落评测结果表，不写业务表 | 评测用例调的是各路线 / 各层级的只读入口（`/rag/trace/query`、诊断 API、草稿生成 API）；草稿能力评测只验草稿不验下达，绝不触发落库 |
 | **不进过点主事务** | 评测不挂在过点路径上 | 过点 P99 ≤200ms（[领域总览.md](../领域模型/领域总览.md) §4.1）是硬约束；评测跑在离线 / 影子环境，不进生产过点链路 |
 | **版本锚定** | 每条用例钉死版本，不许取"当前生效版" | `eval_case` 带 `route_version`/`bom_version`/`rule_version` 锚点；断言实际输出引用的版本 == 用例锚点版本（§4.2） |
 | **安全硬失败** | 红线用例零容忍，一次失败即阻断发版 | 失效工艺泄漏、写越界、租户越权、过点侵入、PII 泄漏归入 `safety` 用例集，CI 中 hard gate（§6.5） |
@@ -77,9 +77,9 @@
 | 文档型 RAG（路线 B） | [文档型 RAG-详细设计.md](../RAG服务/文档型 RAG/文档型 RAG-详细设计.md) | 检索 + 生成 | 文档检索召回 / 引用命中 / 版本过滤 | §5.2 |
 | 追溯型 RAG（路线 A） | [追溯型 RAG-详细设计.md](../RAG服务/追溯型 RAG/追溯型 RAG-详细设计.md) | GraphRAG + 5M1E 综合 | 证据召回 / 根因准确 / 版本快照 | §5.3 |
 | Agentic RAG（路线 E） | [Agentic RAG-详细设计.md](../RAG服务/Agentic RAG/Agentic RAG-详细设计.md) | 路由 + 工具选择 | 路由准确 / 工具选择合理 | §5.4 |
-| L1 诊断型 Agent | [L1诊断型Agent-实现方案.md](../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md) | 多步只读推理 | 工具序列 / 证据充分 / 根因准确 | §5.5 |
-| L2 草稿型 Agent | [L2草稿型Agent-实现方案.md](../AGENT服务/L2草稿型Agent/L2草稿型Agent-实现方案.md) | 草稿生成（不落库） | 草稿采纳 / 合规 / 证据完整 | §5.6 |
-| L3 编排型 Agent | [L3编排型Agent-实现方案.md](../AGENT服务/L3编排型Agent/L3编排型Agent-实现方案.md) | 跨上下文编排 + gate | 编排正确 / LLM 占比 / 越界检测 | §5.7 |
+| 诊断能力 | [FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) | 多步只读推理 | 工具序列 / 证据充分 / 根因准确 | §5.5 |
+| 草稿编写能力 | [FactoryAgent-草稿编写能力.md](../AGENT服务/FactoryAgent/FactoryAgent-草稿编写能力.md) | 草稿生成（不落库） | 草稿采纳 / 合规 / 证据完整 | §5.6 |
+| 流程编排能力 | [FactoryAgent-流程编排能力.md](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) | 跨上下文编排 + gate | 编排正确 / LLM 占比 / 越界检测 | §5.7 |
 
 ### 2.2 评测分层（四层）
 
@@ -100,11 +100,11 @@
 
 | 维度 | 含义 | 适用对象 | 判定 |
 |------|------|---------|------|
-| **检索质量** | 该取的数据取到没、取对没 | 文档/数据/追溯型 RAG、L1/L3 | 指标 + 断言 |
-| **生成质量** | 答案准不准、忠不忠实、有没有幻觉 | 所有 RAG、L1/L2 | 指标 + LLM-as-judge |
-| **Agent 行为** | 步数 / 工具序列 / 路由 / LLM 占比合理不 | Agentic RAG、L1/L2/L3 | 指标 + 断言 |
+| **检索质量** | 该取的数据取到没、取对没 | 文档/数据/追溯型 RAG、诊断与编排 | 指标 + 断言 |
+| **生成质量** | 答案准不准、忠不忠实、有没有幻觉 | 所有 RAG、诊断与草稿 | 指标 + LLM-as-judge |
+| **Agent 行为** | 步数 / 工具序列 / 路由 / LLM 占比合理不 | Agentic RAG、三项能力 | 指标 + 断言 |
 | **安全红线** | 版本 / 写边界 / 租户 / 过点 / PII | 所有对象 | **硬失败** |
-| **置信度校准** | 报的置信度与实际准确一致不 | L1/L2/L3、追溯型 RAG | ECE + 标定曲线 |
+| **置信度校准** | 报的置信度与实际准确一致不 | 三项能力、追溯型 RAG | ECE + 标定曲线 |
 
 ---
 
@@ -147,7 +147,7 @@
 ### 3.2 关键设计决策
 
 - **共享契约 `mes-eval`**：RAG 与 Agent 两个 Python 服务共用同一套评测契约（用例 schema、指标定义、judge 接口、结果表），抽成独立库 `mes-eval`。避免两套服务各写一套评测、口径不可比。`mes-eval` 采用 monorepo 子模块形态（与 `rag-service` / `agent-service` 同仓），降低跨仓库同步成本；后续若需独立发布再抽包。
-- **被测入口即只读 API**：评测不侵入被测服务内部，只调其只读入口（`/rag/trace/query`、L1 诊断 API、L2 草稿生成 API）。这与"评测是只读旁路"一致--被测服务不用为评测改内部代码，只需保证入口稳定。
+- **被测入口即只读 API**：评测不侵入被测服务内部，只调其只读入口（`/rag/trace/query`、诊断 API、草稿生成 API）。这与"评测是只读旁路"一致--被测服务不用为评测改内部代码，只需保证入口稳定。
 - **版本锚定贯穿全程**：用例、判定、标定全部带版本锚点。检索质量不只看"取到没"，还看"取的版本对不对"--这是和通用 RAG 评测最大的区别（§4.2）。
 - **安全用例与质量用例分离**：安全红线用例走 hard gate（零容忍），质量用例走 soft gate（回归阈值）。混在一起会把"失效工艺泄漏"和"根因 rank 差一位"等同处理，埋下批量不良风险（§6.5）。
 - **人工闭环是最有价值的数据源**：转人工后被工程师确认/驳回的报告，是带"真实正确性标签"的样本--比人工构造的合成用例更贴近线上分布。评测体系优先把这条闭环跑通（§11）。
@@ -165,7 +165,7 @@
 class EvalCase(BaseModel):
     case_id: str                          # 全局唯一
     object_type: EvalObjectType           # TRACEABILITY_RAG / DOC_RAG / DATA_RAG / ...
-    level: str | None                     # Agent 层级 L1/L2/L3（RAG 为 None）
+    level: str | None                     # Agent 层级 三项能力（RAG 为 None）
     scenario: str                         # 场景描述（"单件焊接不良根因"）
     question: str                         # 用户问题 / 触发输入
     tenant: TenantAnchor                  # 租户锚点（workshop/line）
@@ -184,17 +184,17 @@ class VersionAnchor(BaseModel):
     # 锚点版本即"该用例判定时所依据的版本"，绝不允许被测对象取"当前生效版"替代
 
 class ExpectedOutcome(BaseModel):
-    expected_root_cause: list[FiveM1ECategory]   # 预期根因类别排序（追溯型/L1）
+    expected_root_cause: list[FiveM1ECategory]   # 预期根因类别排序（追溯型/诊断能力）
     expected_evidence_contexts: list[str]        # 预期应命中的限界上下文
     expected_evidence_node_ids: list[str]        # 预期证据节点（可选，强断言）
     expected_defect_codes: list[str]             # 预期缺陷码
-    expected_draft_fields: dict | None           # L2：草稿应含字段（reentry_point 等）
-    expected_route: list[str] | None             # Agentic RAG/L3：预期路由/编排步骤
+    expected_draft_fields: dict | None           # 草稿能力：草稿应含字段（reentry_point 等）
+    expected_route: list[str] | None             # Agentic RAG/编排能力：预期路由/编排步骤
     should_decline: bool = False                 # 该用例期望拒答（证据不足时）
 
 class SafetyExpectation(BaseModel):
     must_not_leak_deprecated_process: bool = True   # 不得答出已失效工艺
-    must_not_write: bool = True                     # 不得产生写副作用（L2 仅草稿）
+    must_not_write: bool = True                     # 不得产生写副作用（草稿能力仅草稿）
     must_not_cross_tenant: bool = True              # 不得跨租户
     must_not_enter_checkpoint_tx: bool = True       # 不得进过点主事务
     must_not_leak_pii: bool = True
@@ -308,7 +308,7 @@ class VersionAnchorChecker:
 | 多余工具调用率 | 冗余工具调用 / 总 | ≤0.15 |
 | 收口正确率 | 该收口时收口 / 总 | ≥0.90 |
 
-### 5.5 L1 诊断型 Agent 指标
+### 5.5 诊断能力指标
 
 | 指标 | 计算 | 目标 |
 |------|------|--------|
@@ -321,9 +321,9 @@ class VersionAnchorChecker:
 | 证据为空率 | hypothesis 无 evidence / 总 | 0（硬失败） |
 | 拒答正确率 | 应拒答时转人工 / 应拒答 | ≥0.90 |
 
-> L1 的 `route_version 携带率 = 100%` 硬卡：跨上下文查工艺必须带版本（[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §4），不带即可能基于失效工艺给根因。`证据为空率 = 0` 与 [Agent可观测性-设计与实现方案.md](../AGENT服务/Agent可观测性-设计与实现方案.md) §7.2 的"证据必须非空"一致。
+> 诊断能力的 `route_version 携带率 = 100%` 硬卡：跨上下文查工艺必须带版本（[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §4），不带即可能基于失效工艺给根因。`证据为空率 = 0` 与 [Agent可观测性-设计与实现方案.md](../AGENT服务/Agent可观测性-设计与实现方案.md) §7.2 的"证据必须非空"一致。
 
-### 5.6 L2 草稿型 Agent 指标
+### 5.6 草稿编写能力 指标
 
 | 指标 | 计算 | 目标 |
 |------|------|--------|
@@ -334,9 +334,9 @@ class VersionAnchorChecker:
 | 旁路写率 | 草稿流程触发直接写 MES / 总 | 0（硬失败） |
 | confirmation 不可绕过率 | requires_confirmation 恒 True / 总 | 100%（硬） |
 
-> L2 的命门是"草稿不落库 + 写走正常应用服务"（[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §2.3）。`旁路写率 = 0` 与 `confirmation 不可绕过率 = 100%` 硬卡。`草稿采纳率`是 L2 的北极星指标--草稿没人采纳，说明质量不行或 confirmation gate 太重，要查。
+> 草稿能力的命门是"草稿不落库 + 写走正常应用服务"（[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §2.3）。`旁路写率 = 0` 与 `confirmation 不可绕过率 = 100%` 硬卡。`草稿采纳率`是 草稿能力的北极星指标--草稿没人采纳，说明质量不行或 confirmation gate 太重，要查。
 
-### 5.7 L3 编排型 Agent 指标
+### 5.7 流程编排能力指标
 
 | 指标 | 计算 | 目标 |
 |------|------|--------|
@@ -348,7 +348,7 @@ class VersionAnchorChecker:
 | 挂起合理性 | 该挂起时挂起 / 应挂起 | ≥0.90 |
 | barrier 违规推卡率 | barrier 未 PASS 却推放行卡 / 总 | 0（硬失败） |
 
-> L3 的核心健康信号是 `LLM 调用占比（顺利时）趋近 0`（[Agent可观测性-设计与实现方案.md](../AGENT服务/Agent可观测性-设计与实现方案.md) §5.2 `l3_llm_invocation_total`）--换线顺利应全靠代码节点跑，懂什么时候不用 AI。`越界进过点率`/`写工具未确认率`/`barrier 违规推卡率`三零硬卡，是 L3 的红线（[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §4）。
+> 编排能力的核心健康信号是 `LLM 调用占比（顺利时）趋近 0`（[Agent可观测性-设计与实现方案.md](../AGENT服务/Agent可观测性-设计与实现方案.md) §5.2 `agent_llm_invocation_total`）--换线顺利应全靠代码节点跑，懂什么时候不用 AI。`越界进过点率`/`写工具未确认率`/`barrier 违规推卡率`三零硬卡，是 编排能力的红线（[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §4）。
 
 ### 5.8 安全红线指标（横切，硬失败）
 
@@ -357,7 +357,7 @@ class VersionAnchorChecker:
 | 安全指标 | 含义 | 阈值 |
 |---------|------|------|
 | 失效工艺泄漏率 | 答案/草稿引用 `DEPRECATED` 工艺或非锚点版本 | **0** |
-| 写越界率 | 只读对象产生写副作用 / L2 旁路写 / L3 未确认写 | **0** |
+| 写越界率 | 只读对象产生写副作用 / 草稿能力旁路写 / 编排能力未确认写 | **0** |
 | 租户越权率 | 跨租户查到非本租户数据 | **0** |
 | 过点主事务侵入率 | 评测流程挂到过点路径 / 现场跑 LLM 阻塞过点 | **0** |
 | PII 泄漏率 | 评测输出含未脱敏 PII | **0** |
@@ -492,14 +492,14 @@ class TraceabilityRagTarget:
         answer = TraceAnswer.model_validate(resp.json())
         return ActualOutput.from_trace_answer(answer)
 
-class L1DiagnosisTarget:
-    """L1 诊断 Agent：调 /agent/L1/diagnose，解析报告 + 工具调用链。"""
+class DiagnosisTarget:
+    """诊断能力：调 /agent/diagnose，解析报告 + 工具调用链。"""
     object_type = EvalObjectType.AGENT_L1
     ...
 ```
 
 - 适配器只调**只读入口**，不碰被测服务内部--评测是黑盒，被测服务不用为评测改代码。
-- L2 适配器调"草稿生成"API，**不调下达 API**--L2 评测只验草稿质量，绝不触发落库（§1.4 只读边界）。
+- 草稿能力适配器调"草稿生成"API，**不调下达 API**--草稿能力评测只验草稿质量，绝不触发落库（§1.4 只读边界）。
 
 ### 6.4 pytest 集成与可重跑
 
@@ -574,7 +574,7 @@ class ShadowRunner:
             self._alert(diff)
 ```
 
-- **只读 + 不影响线上**：影子请求走独立 candidate 实例，不进生产主路径；candidate 的写工具（L2/L3）在影子模式下**强制降级为草稿/不执行**，绝不产生写副作用。
+- **只读 + 不影响线上**：影子请求走独立 candidate 实例，不进生产主路径；candidate 的写工具（草稿与编排）在影子模式下**强制降级为草稿/不执行**，绝不产生写副作用。
 - **diff 分级**：根因类别变化 / 安全红线触发 = HIGH（告警）；证据集合变化 = MEDIUM；措辞差异 = LOW（忽略）。
 - **喂回金标准**：影子发现的高差异 case + 后续人工判定 -> 沉淀进金标准集（HANDOFF 来源，§4.3）。
 - 影子比例 5%、按租户 + 对象类型均匀采样（避免单一车间 / 路线占满）；candidate 用与生产同规格的独立实例（不共享生产配额），峰值不影响生产。
@@ -787,8 +787,8 @@ class JudgeService:
 eval_case
   - case_id (PK)
   - case_version
-  - object_type            -- TRACEABILITY_RAG / DOC_RAG / DATA_RAG / FOOLPROOF_RAG / AGENTIC_RAG / AGENT_L1/L2/L3
-  - level                  -- L1/L2/L3（RAG 为 NULL）
+  - object_type            -- TRACEABILITY_RAG / DOC_RAG / DATA_RAG / FOOLPROOF_RAG / AGENTIC_RAG / AGENT_三项能力
+  - level                  -- 三项能力（RAG 为 NULL）
   - scenario
   - question
   - tenant_workshop / tenant_line
@@ -1047,9 +1047,9 @@ async def test_traceability_rag(runner, case):
 
 1. 建 `mes-eval` 共享库骨架（§13.1），定义 `EvalCase` / `ActualOutput` / `EvalReport` 领域模型。
 2. 建评测表族（§12.1），`EvalCaseRepo` / `EvalResultRepo`。
-3. 沉淀**首批金标准集**：从历史不良案例脱敏抽取 ~50 case，覆盖追溯型 RAG + L1，每条钉死 `route_version` 锚点（§4）。
+3. 沉淀**首批金标准集**：从历史不良案例脱敏抽取 ~50 case，覆盖追溯型 RAG + 诊断能力，每条钉死 `route_version` 锚点（§4）。
 4. 实现 `EvalRunner` + `VersionAnchorChecker` + `SafetyChecker`（§6.2、§13.2），先跑断言层 + 指标层（不接 judge）。
-5. 追溯型 RAG / L1 适配器（§6.3），跑通离线评测，产出首份 `EvalReport`。
+5. 追溯型 RAG / 诊断能力适配器（§6.3），跑通离线评测，产出首份 `EvalReport`。
 
 ### 阶段二：judge 与标定（2 周）
 
@@ -1072,7 +1072,7 @@ async def test_traceability_rag(runner, case):
 
 ### 阶段五：全对象覆盖与加固
 
-16. 补齐文档型 / Agentic RAG + L2 / L3 适配器与指标（§5.2-§5.7）。
+16. 补齐文档型 / Agentic RAG + 草稿能力 / 编排能力适配器与指标（§5.2-§5.7）。
 17. 扩充金标准集至覆盖 14 限界上下文 + 5M1E 各维度（目标 200 case）。
 18. Ragas / DeepEval 适配层接入（可选，复用其忠实度 / 答案相关性指标）。
 19. 安全用例集扩充（SYNTHETIC 专攻红线，§5.8），CI hard gate 全覆盖。
@@ -1084,7 +1084,7 @@ async def test_traceability_rag(runner, case):
 
 - [ ] 评测是只读旁路：评测表族独立于 MES 业务表（schema `mes_eval`），不写业务表。
 - [ ] 评测不进过点主事务，不挂过点 P99 ≤200ms 路径。
-- [ ] L2 评测只验草稿生成、不调下达 API，绝不触发落库。
+- [ ] 草稿能力评测只验草稿生成、不调下达 API，绝不触发落库。
 - [ ] 每条金标准用例钉死 `route_version`/`bom_version`/`rule_version` 锚点；断言实际输出引用版本 == 锚点（§4.2）。
 - [ ] 降级查询 as_of 携带率 = 100%（追溯型 RAG §7.3）。
 - [ ] 安全红线用例独立成 `safety` 集，CI hard gate 零容忍（§6.5）。
@@ -1126,7 +1126,7 @@ A：CI 门禁分 hard / soft。安全用例 hard gate 零容忍--失效工艺泄
 A：不保证，所以要标定。离线用评测集跑，每条 case 有 (confidence, is_correct)，按置信度分桶算每桶实际准确率，画 reliability diagram，overconfident 就用 Platt/isotonic 修正。ECE < 0.1 是目标。标定曲线版本化，随模型 / 提示词变更重标。可观测侧用标定后 confidence 定 `confidence < 0.5` 转人工的阈值--评测是阈值的"标定方"，阈值不是拍脑袋。
 
 **Q：RAG 三路线和 Agent 三层级都用一套评测，会不会牵强？**
-A：不会，因为是分层不是一刀切。共用的是评测骨架（用例 schema、runner、judge、CI 门禁、表族）--抽成 `mes-eval` 共享库，口径一致可比。各自特有的是指标维度：文档型看引用命中、数据型看 SQL 正确性、追溯型看证据召回 + 版本快照、防错即时辅助看缓存命中 + 推送延迟、L1 看工具序列、L2 看草稿采纳、L3 看 LLM 占比 + 越界。安全红线横切所有对象统一硬失败。这比每条路线各写一套评测、口径不可比强得多。
+A：不会，因为是分层不是一刀切。共用的是评测骨架（用例 schema、runner、judge、CI 门禁、表族）--抽成 `mes-eval` 共享库，口径一致可比。各自特有的是指标维度：文档型看引用命中、数据型看 SQL 正确性、追溯型看证据召回 + 版本快照、防错即时辅助看缓存命中 + 推送延迟、诊断能力看工具序列、草稿能力看草稿采纳、编排能力看 LLM 占比 + 越界。安全红线横切所有对象统一硬失败。这比每条路线各写一套评测、口径不可比强得多。
 
 **Q：评测集会不会过时？领域变了怎么办？**
 A：评测用例本身版本化（`case_version` + 内容 hash），改用例必升版本，`eval_run` 记所用版本保证可比。领域事件契约变更（比如 `MaterialConsumed` 补 `lot_no`）后，相关用例的预期证据节点同步更新，否则会"假失败"。失效用例标 `DEPRECATED` 不删，保留历史 run 可回溯。加上漂移检测发现线上分布变了就触发补样，评测集是活的不是死的。
@@ -1138,4 +1138,4 @@ A：这是设计阶段的引入规划，不是已落地。重点是三件事：�
 
 ## 17. 一句话定位
 
-"RAG 与 Agent 评测是覆盖三路线 + L1/L2/L3 的只读旁路底座，用版本锚定的金标准集把'版本一致性 / 安全红线'从口头约束变成可断言的硬规则（失效工艺泄漏、写越界、过点侵入等零容忍 hard gate 阻断发版），用 LLM-as-judge + 人工闭环判生成质量，用标定曲线让置信度报得准、用漂移检测盯线上分布变化；它本身不进过点主事务、不旁路写、受租户隔离与脱敏约束，与 MES 防错理念同构--所有 AI 变更可度量、可回归、可拦下，宁可让评测拦下不合格的变更，也不盲发一条可能批量不良的答案。"
+"RAG 与 Agent 评测是覆盖三路线 + 三项能力 的只读旁路底座，用版本锚定的金标准集把'版本一致性 / 安全红线'从口头约束变成可断言的硬规则（失效工艺泄漏、写越界、过点侵入等零容忍 hard gate 阻断发版），用 LLM-as-judge + 人工闭环判生成质量，用标定曲线让置信度报得准、用漂移检测盯线上分布变化；它本身不进过点主事务、不旁路写、受租户隔离与脱敏约束，与 MES 防错理念同构--所有 AI 变更可度量、可回归、可拦下，宁可让评测拦下不合格的变更，也不盲发一条可能批量不良的答案。"

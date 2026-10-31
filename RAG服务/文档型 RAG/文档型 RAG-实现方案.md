@@ -37,11 +37,11 @@
 | **可观测兜底** | 答案带引用 + 置信度，低置信度转人工 | `DocAnswer` 强制引用 `chunk_id` + `locator`；`confidence < 0.6` 转人工 |
 | **DEPRECATED 不泄漏** | 失效文档不得召回 | 检索 ChromaDB `where={"state":"PUBLISHED"}` 强制过滤；`rag_doc_deprecated_leak_total` 应为 0，告警兜底（§9.7） |
 
-### 1.3 与详细设计、追溯型 RAG、L1 Agent 的关系
+### 1.3 与详细设计、追溯型 RAG、诊断能力 Agent 的关系
 
 - **与详细设计**：详细设计给全文档类型全景建模与版本治理设计；本文把其中三类文档的摄入管线、重索引消费者、检索 ChromaDB query、ACL 契约补全到可落地代码，并新增实现层内容（依赖、collection 初始化、Docker、测试）。两者互补--详细设计是"地图"，本文是"起步城区施工图"。
 - **与追溯型 RAG**（[追溯型 RAG-实现方案.md](../追溯型 RAG/追溯型 RAG-实现方案.md)）：共享同一套版本契约（`ProcessRouteActivated` 驱动）。追溯型把版本做成 Neo4j 图节点 + `SNAPSHOT_OF_ROUTE` 边；本文把版本做成 ChromaDB metadata 过滤维度（`version_kind`+`version`+`version_ref_id`）。追溯型 §5.4 发布内部 `rag.reindex.request` 事件，本文接收并处理（§5.3）。
-- **与 L1 诊断型 Agent**（[L1诊断型Agent-实现方案.md](../../AGENT服务/L1诊断型Agent/L1诊断型Agent-实现方案.md)）：L1 的 `search_docs` 工具封装本文 `POST /rag/docs/query`（§9.8）。
+- **与诊断能力**（[FactoryAgent-诊断能力.md](../../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（§9.8）。
 
 ### 1.4 与 Java 技术栈的关系
 
@@ -57,14 +57,14 @@
 
 | 层次 | 选型 | 版本 | 选型理由 |
 |------|------|------|---------|
-| 语言 | Python | 3.11+ | 类型提示 + Pydantic 校验，与追溯型 / L1 同栈复用 LLM 抽象 |
+| 语言 | Python | 3.11+ | 类型提示 + Pydantic 校验，与追溯型 / 诊断能力同栈复用 LLM 抽象 |
 | Web 框架 | **FastAPI** | 0.110+ | 异步、原生 OpenAPI，与追溯型一致 |
 | 向量存储 | **ChromaDB** | 0.5+ | 嵌入式 persistent client（Parquet 持久化），随 rag-service 进程，无需独立 DB service；chunk 不可变 + 强制带版本查询过滤（§2.3） |
 | ChromaDB 客户端 | **chromadb** Python SDK + `llama-index-vector-stores-chroma` | - | `ChromaVectorStore` 对接 LlamaIndex；distance=cosine（bge-m3 1024 维） |
 | 治理/审计聚合 | **MySQL**（rag_shared schema） | - | 幂等表 / 位点表落 MySQL；ChromaDB 不做聚合查询 |
 | 检索编排 | **LlamaIndex** `VectorStoreIndex` | 0.10+ | 摄入 / 切分 / 向量检索 / Rerank 上层抽象 |
 | 文档解析 | **unstructured** + pypdf + python-docx | - | PDF / Word / HTML 结构化解析，保留标题层级 |
-| LLM 抽象 | `langchain-core` 的 `BaseChatModel` | 0.2+ | 模型可插拔，与追溯型 / L1 一致 |
+| LLM 抽象 | `langchain-core` 的 `BaseChatModel` | 0.2+ | 模型可插拔，与追溯型 / 诊断能力一致 |
 | Embedding | **bge-m3** | 1.0+ | 1024 维，多语种可本地化，与追溯型同模型 |
 | Rerank | **bge-reranker-v2-m3** | - | cross-encoder 精排，中英文兼顾 |
 | 数据校验 | **Pydantic** | v2 | 请求 / 文档视图 / 答案 DTO 的 schema 即类型 |
@@ -883,7 +883,7 @@ async def query(
     tenant: TenantContext = Depends(tenant_from_token),
     svc: DocumentRetrievalService = Depends(get_retrieval_service),
 ) -> DocAnswer:
-    """问 + 答 + 引用。供工程师 UI / L1 Agent search_docs 调用。"""
+    """问 + 答 + 引用。供工程师 UI / 诊断能力 Agent search_docs 调用。"""
     return await svc.query(req, tenant)
 
 @router.post("/search", response_model=list[ChunkHit])
@@ -892,7 +892,7 @@ async def search(
     tenant: TenantContext = Depends(tenant_from_token),
     retriever: VectorRetriever = Depends(get_retriever),
 ) -> list[ChunkHit]:
-    """只检索 chunks 不综合，供 L1 Agent / UI 直接消费引用片段。"""
+    """只检索 chunks 不综合，供 诊断能力 Agent / UI 直接消费引用片段。"""
     return await retriever.retrieve(
         req.question, tenant, req.version, req.version_kind, req.version_ref_id, top_k=req.top_k
     )
@@ -908,7 +908,7 @@ async def ingest(
     return IngestResponse(version_id=version_id)
 ```
 
-- 三个端点：`/query`（检索 + LLM 综合）给工程师问答 / L1 Agent；`/search`（纯 chunks）给 L1 Agent 与 UI 直接消费引用片段；`/ingest` 给文档摄入。
+- 三个端点：`/query`（检索 + LLM 综合）给工程师问答 / 诊断能力 Agent；`/search`（纯 chunks）给 诊断能力 Agent 与 UI 直接消费引用片段；`/ingest` 给文档摄入。
 - 租户上下文从 token 解析，注入检索链路全程。
 
 ### 9.9 配置与部署
@@ -1042,7 +1042,7 @@ volumes:
 17. 接 ACL 降级查询工艺管理只读 REST（§7），强制版本锚点（`version`+`version_kind`）入参。
 18. 沉淀评测集（典型 SOP / 手册 / 检验标准问答 + 预期引用），回归模型 / 提示词 / 切分变更。
 19. 对接追溯型 RAG：`TraceAnswer.suggested_action` 调 `search_docs(query, version_anchor)`。
-20. 对接 L1 Agent：`search_docs` 工具封装 `/rag/docs/query`。
+20. 对接 诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
 21. 灰度一条产线（设备维修手册 + SOP + 检验标准），收集工程师 / 操作工反馈。
 
 ### 阶段五：扩展（按需）
