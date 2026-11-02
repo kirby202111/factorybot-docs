@@ -118,6 +118,8 @@ class CapabilitySpec(BaseModel):
 | 中断点 | 无 | 无（返回前端确认） | gate 节点 `interrupt` |
 | 评测对象 | 诊断能力 | 草稿编写能力 | 流程编排能力 |
 
+> 上表是三项**内置能力**。另有**图形态④ `fanout_aggregate`**（中心化只读聚合：代码统筹 + 单点裁决 + 多视角并发取证），落地为独立 capability 条目 `aggregate`（语义上属"诊断族"，因 `graphs` 按 capability 装配而单列 key），定义见 [中心化聚合子图](FactoryAgent-中心化聚合子图.md)。它**不是第四层**：同一套只读工具切片、同一条只读断言、同一种产物（证据 + 假设），只多一张图和一份 `EvidencePack` 契约。
+
 ---
 
 ## 4. L1 与 L2 之间的契约
@@ -206,8 +208,9 @@ POST /agent/orchestration/complaint_8d/start
 | ① | 所有 `read_only=False` 工具必须 `requires_confirmation` 且有 `writes_via` | 写路径可能旁路应用服务 |
 | ② | `writes_allowed=False` 的能力不得持有写 client | 只读能力可写 |
 | ③ | 任何能力都不得注册放行/拦截类工具前缀 | 碰过点红线 |
-| ④ | 各 capability 工具集**互斥**（一个工具不能同属两个能力） | 权限切片被破坏 |
+| ④ | 各 capability 的**写**工具集互斥（一个写工具不能同属两个能力）；只读工具允许跨能力共享（如 `diagnosis` 与 `aggregate` 共用只读切片） | 写权限被复制 / 权限切片被破坏 |
 | ⑤ | `supervisor` 图自身不持工具（只有能力节点持） | 编排变成开放 ReAct |
+| ⑥ | `graph_shape=fanout_aggregate` 的能力必须声明 `fanout` 策略，且子会话 spec 继承 `writes_allowed=False` | 聚合退化成"多个可写 Agent 各自落库" |
 
 ---
 
@@ -272,6 +275,7 @@ POST /agent/orchestration/complaint_8d/start
 | 2 | 加草稿（无写 client），共用 registry/session/trace | 不拆（同进程零边际成本） |
 | 3 | 加编排（受限写 + gate + interrupt） | 不拆；若出现"长驻饿死突发"，**只拆编排** |
 | 4 | 能力数继续增长 | 优先按"资源画像"拆，不按业务概念拆 |
+| 5 | 多模块只读聚合需求：加图形态④ `fanout_aggregate`（先 2 路视角，probe 动态收敛） | 不拆；只新增 `CapabilitySpec` 条目 + 一张图，进程与会话表不动。见 [中心化聚合子图](FactoryAgent-中心化聚合子图.md) §11 |
 
 **顺序理由**：能力一个比一个风险高（只读 → 无写 client → 受限写），基础设施却在第一步就位，后两步只加 `CapabilitySpec` 和图装配。
 
@@ -279,4 +283,4 @@ POST /agent/orchestration/complaint_8d/start
 
 ## 12. 一句话总结
 
-> **一个进程、一套运行时、一张工具注册表、一个 checkpointer；三种图形态、三套预算、三份工具切片、三条产物契约。** 共享的是基础设施，隔离的是上下文、状态、权限与预算；能力之间只传可序列化的 artifact——这条守住了，今天是一个服务，明天拆三个服务，只是换一次 transport。
+> **一个进程、一套运行时、一张工具注册表、一个 checkpointer；三种内置图形态（另可按需装配 `fanout_aggregate`）、按能力分档的预算、按能力切的工具切片、按能力签的产物契约。** 共享的是基础设施，隔离的是上下文、状态、权限与预算；能力之间只传可序列化的 artifact——这条守住了，今天是一个服务，明天拆三个服务，只是换一次 transport。
