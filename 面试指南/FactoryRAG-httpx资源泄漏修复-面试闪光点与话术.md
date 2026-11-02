@@ -36,7 +36,7 @@
 
 #### A.1 造资源的不管销毁，管销毁的不知道资源
 
-**识别过程**：看 [build_gateway_service](../FactoryRAG/app/routes/agentic/__init__.py) 装配 E 路线：`diagnosis_http = httpx.AsyncClient(...)` / `draft_http = ...` 两个客户端，紧接着 `L1DelegationClient(http=diagnosis_http, ...)` 包了一层。乍看有传参、有包装，很完备。但两个细节：
+**识别过程**：看 [build_gateway_service](../FactoryRAG/app/routes/agentic/__init__.py) 装配 E 路线：`diagnosis_http = httpx.AsyncClient(...)` / `draft_http = ...` 两个客户端，紧接着 `DelegationClient(http=diagnosis_http, ...)` 包了一层。乍看有传参、有包装，很完备。但两个细节：
 
 - **原始 client 引用装配完即丢**：`diagnosis_http`/`draft_http` 是函数局部变量，传进委托客户端后，build 函数返回 gateway，局部变量引用消失。只有委托客户端内部 `self._http` 持有，而 Container 不持有委托客户端的 httpx 句柄。
 - **dispose 不知道它们存在**：[Container.dispose()](../FactoryRAG/app/shared/web/container.py) 只 `await self._http.aclose()`（MES 客户端）+ engines / embedding / reranker。诊断与草稿 的 `httpx.AsyncClient` 不在关闭清单里。
@@ -74,7 +74,7 @@
 
 #### C.2 移除不再使用的 import httpx
 
-httpx 构造上移到 container 后，`build_gateway_service` 里不再用 httpx，删掉函数内 `import httpx`。`diagnosis_http`/`draft_http` 参数类型标 `Any`（与 `L1DelegationClient` 的 `http: Any` 一致），不为类型标注单独 import httpx。
+httpx 构造上移到 container 后，`build_gateway_service` 里不再用 httpx，删掉函数内 `import httpx`。`diagnosis_http`/`draft_http` 参数类型标 `Any`（与 `DelegationClient` 的 `http: Any` 一致），不为类型标注单独 import httpx。
 
 **为什么是亮点**：两处都体现**契约显式化 + 改动边界跟问题边界对齐**。keyword-only 把"这两个是外部注入的依赖"做成语法契约，不是注释约定。删多余 import 是顺手清理但不越界——没去动诊断与草稿委托客户端本身的逻辑（它们照旧 `self._http.post`）。面试官问"为什么用 keyword-only"，答"diagnosis/draft 是同型注入，位置传参传反了不报错但调错服务，keyword-only 强制具名"。
 
@@ -218,7 +218,7 @@ A：当前调用方就 `_wire_agentic` 一处，但 `build_gateway_service` 是�
 | 缺陷 | 后果 | 修复 |
 |------|------|------|
 | 诊断与草稿 httpx client 装配后引用丢失 | shutdown 连接池泄漏 | 构造上移 container + dispose 收口 |
-| dispose 枚举式不含 诊断与草稿 | 新资源悬空 | dispose 遍历 `_l1`/`_draft_http` |
+| dispose 枚举式不含 诊断与草稿 | 新资源悬空 | dispose 遍历 `_diagnosis`/`_draft_http` |
 | agentic 灰度未启用时 client 为 None | 直接 aclose 会崩 | None 守卫 |
 | diagnosis/draft 同型位置传参易传反 | 调错服务不报错 | keyword-only 注入 |
 | build 函数残留 import httpx | 死 import | 移除 |

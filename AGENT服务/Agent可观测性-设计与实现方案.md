@@ -71,16 +71,13 @@
 
 ## 3. 可观测性分层模型
 
-### 3.1 五层模型
+### 3.1 分层模型
 
-把 Agent 可观测性拆成五层，下层为上层供数，各层可独立演进：
+把 Agent 可观测性按职责分层，下层为上层供数，各层可独立演进：
 
 | 层 | 名称 | 职责 | 技术 | 受众 |
 |----|------|------|------|------|
 | **L0** | 基础设施层 | OTel SDK 初始化、context 传播、exporter | OpenTelemetry Python | SRE |
-| **L1** | 链路层 | trace/span 串联会话->步骤->工具->ACL->下游 | OTel Tracer | SRE + 工程师 |
-| **L2** | 指标层 | 会话/工具/置信度/成本/递归上限等计数与延迟 | prometheus-client | SRE + AI 负责人 |
-| **L3** | 业务视图层 | 证据链可读投影（`tool_call_trace`/`draft_trace`/`node_trace`） | MySQL 平铺表 | 工程师（UI 回溯） |
 | **L4** | 评测质量层 | 离线评测、置信度标定、漂移检测 | pytest + 评测脚本 + 离线统计 | AI 负责人 |
 
 ### 3.2 分层架构图
@@ -93,11 +90,11 @@
 │  ┌────────────┐  依赖    ┌──────────────────────────────────────────┐│
 │  │ Diagnosis   │────────▶│ L4 评测质量层  EvalRunner / Calibration   ││
 │  │ Service     │         │  ──────────────────────────────────────  ││
-│  │ DraftBuilder│         │ L3 业务视图层  ToolTraceRepo / 证据链投影  ││
+│  │ DraftBuilder│         │ 业务视图层     ToolTraceRepo / 证据链投影  ││
 │  │ Supervisor  │         │  ──────────────────────────────────────  ││
-│  └─────┬──────┘         │ L2 指标层     MetricsCollector             ││
+│  └─────┬──────┘         │ 指标层        MetricsCollector             ││
 │        │                │  ──────────────────────────────────────  ││
-│   model_node /           │ L1 链路层     Tracing (OTel spans)         ││
+│   model_node /           │ 链路层        Tracing (OTel spans)         ││
 │   tool_node              │  ──────────────────────────────────────  ││
 │        │                 │ L0 基础设施   OTel SDK / context / exporter││
 │        ▼                 └───────────┬────────────────────────────────┘│
@@ -263,7 +260,7 @@ class ObservabilityContext:
 
 ### 5.1 命名规范与分层
 
-- 前缀 `agent_` 为三层级通用指标；`l2_` / `l3_` 为该层级特有。
+- 前缀 `agent_` 为通用指标；`draft_` / `node_` 为能力特有。
 - label 维度固定：`capability` / `tool` / `status` / `model` / `bounded_context`，新增维度需评审——维度爆炸会撑爆 prometheus。
 - Counter 用 `_total` 后缀；Histogram 用 `_seconds` / `_bytes` 后缀，遵循 [Prometheus 命名规范](https://prometheus.io/docs/practices/naming/)。
 
@@ -293,11 +290,11 @@ class ObservabilityContext:
 | 指标 | 类型 | label | 含义 |
 |------|------|-------|------|
 | `draft_total` | Counter | draft_kind, status | 草稿生成数（返工单/8D/SOP） |
-| `l2_draft_latency_seconds` | Histogram | draft_kind | 草拟延迟（取证据 + 检索 + LLM 综合） |
+| `draft_latency_seconds` | Histogram | draft_kind | 草拟延迟（取证据 + 检索 + LLM 综合） |
 | `draft_low_confidence_total` | Counter | draft_kind | confidence <0.5 草稿数 |
-| `l2_draft_adoption_total` | Counter | draft_kind | 草稿被工程师采纳下达数 |
+| `draft_adoption_total` | Counter | draft_kind | 草稿被工程师采纳下达数 |
 | `draft_rejected_total` | Counter | draft_kind, reason | 工程师驳回数（confirmation gate 拒绝） |
-| `l2_acl_error_total` | Counter | client | 只读 ACL 调用失败次数 |
+| `acl_error_total` | Counter | client | 只读 ACL 调用失败次数 |
 | `draft_trigger_total` | Counter | trigger | 主动触发草拟次数（SOP） |
 
 **流程编排能力新增**
@@ -309,9 +306,9 @@ class ObservabilityContext:
 | `agent_llm_invocation_total` | Counter | capability | 真 LLM 调用数（换线全程 PASS 时为 0） |
 | `orchestration_step_latency_seconds` | Histogram | step | 各步耗时（含 gate 等待） |
 | `orchestration_gate_decision_total` | Counter | step, decision | gate 决策数（decision: APPROVED/REJECTED/SKIPPED） |
-| `l3_agent_confidence_total` | Histogram | capability, confidence | agent 置信度分布（high/medium/low） |
+| `agent_confidence_total` | Histogram | capability, confidence | agent 置信度分布（high/medium/low） |
 | `orchestration_suspended_total` | Counter | scenario | 故障隔离挂起次数 |
-| `l3_write_tool_total` | Counter | tool, confirmed | 写工具调用数（confirmed: true/false） |
+| `write_tool_total` | Counter | tool, confirmed | 写工具调用数（confirmed: true/false） |
 | `orchestration_write_rejected_total` | Counter | tool | 未带有效 confirmation token 被拒次数 |
 
 > `agent_llm_invocation_total` 与 `agent_step_total{node_type=CODE}` 的占比是流程编排能力的核心健康指标——体现"懂什么时候不用 AI"：换线顺利时 LLM 调用应趋近 0，全靠代码节点跑。
@@ -323,8 +320,8 @@ class ObservabilityContext:
 | session_* | `DiagnosisService.diagnose` / `DraftBuilder.build` / `supervisor.run` 入口与出口 |
 | tool_* | `ToolNode.__call__`（[诊断能力 §7.2](FactoryAgent/FactoryAgent-诊断能力.md) 已有雏形） |
 | llm_* / token_* / cost_* | `llm_factory` 出品的 `BaseChatModel` 包装层（统一拦截，见 §8.4） |
-| l2_draft_* | `DraftBuilder` 出口 + confirmation gate 回调 |
-| l3_node_* / gate_* | `supervisor` 节点调度器 + 各 gate |
+| draft_* | `DraftBuilder` 出口 + confirmation gate 回调 |
+| node_* / gate_* | `supervisor` 节点调度器 + 各 gate |
 
 ### 5.4 SLI / SLO 与告警
 

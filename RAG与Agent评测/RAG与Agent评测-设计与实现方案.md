@@ -494,7 +494,6 @@ class TraceabilityRagTarget:
 
 class DiagnosisTarget:
     """诊断能力：调 /agent/diagnose，解析报告 + 工具调用链。"""
-    object_type = EvalObjectType.AGENT_L1
     ...
 ```
 
@@ -927,7 +926,6 @@ mes_eval/
       data_rag.py
       foolproof_rag.py
       agentic_rag.py
-      agent_l1.py / agent_l2.py / agent_l3.py
     persistence/
       models.py                 # SQLAlchemy 评测表
       case_repo.py / result_repo.py / shadow_diff_repo.py / human_label_repo.py

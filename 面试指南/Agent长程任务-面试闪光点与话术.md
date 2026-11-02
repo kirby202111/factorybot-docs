@@ -11,12 +11,12 @@
 | 闪光点 | 一句话 | 出处 |
 |--------|--------|------|
 | **异步驱动 + 中断恢复** | HTTP 只负责启动，`asyncio.create_task` 异步驱动，gate 处 `interrupt` 暂停等人，state 落 MySQL 可跨进程续跑 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
-| **状态外置持久化** | LangGraph `SqlSaver` 以 `thread_id=session_id` 持久化，进程重启从断点恢复，gate 等待状态不丢 | [L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
+| **状态外置持久化** | LangGraph `SqlSaver` 以 `thread_id=session_id` 持久化，进程重启从断点恢复，gate 等待状态不丢 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
 | **confirmation token 绑定 action:target** | 人确认后发 token，绑定具体写动作（`isolation.issue:tenant_001`）+ 过期，防篡改防重放 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.7 |
 | **写不旁路应用服务** | 写落库走各上下文**正常应用服务**，过聚合根不变式 + 事务发件箱，与正常写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认" | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.5 |
 | **步数 + 时长双闸门** | `recursion_limit=40` + `timeout=3600s`，超限标 FAILED 转人工，不硬走 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
 | **gate deadline 挂起** | 每个 confirmation gate 有 deadline，超时自动 `SUSPENDED` 推责任人，不无限阻塞产线 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
-| **barrier 硬防错** | 并行分支汇合后 barrier 按结构化结果确定性分流，未 PASS 绝不推放行卡——编排层防错，非 agent 判定 | [L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
+| **barrier 硬防错** | 并行分支汇合后 barrier 按结构化结果确定性分流，未 PASS 绝不推放行卡——编排层防错，非 agent 判定 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
 | **故障隔离不污染整链** | agent 连续失败 2 次标 `SUSPENDED` 推异常卡，不自动重试到死；低置信度标 `need_human_review` 不自动路由 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
 | **会话全生命周期可审计** | `agent_session` + `agent_step_record`（含 `node_type` CODE/AGENT 区分 + `gate_decision` 谁/何时/基于哪张卡/agent 假设），每一步决策可回溯 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3 |
 | **代码节点 vs agent 节点物理分层** | `orchestration/code_nodes/` 与 `orchestration/agents/` 分开落点，`node_type` 落库可验——换线全程 PASS 时 LLM 调用为 0 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6 |
@@ -52,7 +52,7 @@
 **核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3）：
 
 ```python
-async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
+async def start(self, req: Request, tenant: TenantContext) -> Session:
     session = await self._sessions.create(req, tenant)
     asyncio.create_task(self._drive(session, tenant))  # 异步驱动
     return session  # 立即返回 session_id，不阻塞 HTTP
@@ -68,7 +68,7 @@ async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
 
 #### A.2 状态外置持久化：进程重启不丢状态
 
-**核心机制**（[L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3）：
+**核心机制**（[编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3）：
 
 - LangGraph 的 `SqlSaver` checkpointer 以 `thread_id=session_id` 将 state 持久化到 MySQL。
 - `interrupt` 暂停时，当前 state（包括已执行的步骤、待确认的 gate、agent 产出的假设）全部落库。
@@ -121,7 +121,7 @@ agent_step_record
 
 #### B.1 写动作 confirmation gate（最大闪光点）
 
-**核心机制**（[L3流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §5）：
+**核心机制**（[编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §5）：
 
 ```
 Agent 草拟 intent + draft（动作卡）

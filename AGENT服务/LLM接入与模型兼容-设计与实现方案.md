@@ -141,7 +141,7 @@ ModelResponse.tool_calls[i].id  (模型返回)
 **修复**（[graph_builder.py](../factorybot/app/infrastructure/ai/graph_builder.py)）：
 
 1. **`_extract_json` 容错**：兼容 markdown ```` ```json ```` 代码块 + 前后解释文本，提取首个平衡 `{...}`。
-2. **强化 `L1_SYSTEM_PROMPT`**：明确字段定义 + 枚举（`category` 仅 Man/Machine/Material/Method/Measurement/Environment）+ 类型（`confidence` 0-1 浮点，禁止"高/中/低"）+ 示例 JSON。
+2. **强化 `SYSTEM_PROMPT`**：明确字段定义 + 枚举（`category` 仅 Man/Machine/Material/Method/Measurement/Environment）+ 类型（`confidence` 0-1 浮点，禁止"高/中/低"）+ 示例 JSON。
 3. **失败日志**：`_parse_report` 解析失败时 `get_logger("diagnosis").warning("llm.output.non_json", content_preview=...)`，便于排查模型实际输出。
 
 > 思考模型擅长按明确指令输出，强化 prompt + 示例后 schema 遵循率显著提升。若仍不稳定，终极方案是完成步改用 `ainvoke_structured(DiagnosisReport)`（function calling / json_mode 强 schema）。

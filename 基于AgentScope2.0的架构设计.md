@@ -174,7 +174,7 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 |-------------|--------|---------------------|
 | `infrastructure/cost/` 成本优化 | ModelRouter/CacheControl/ResultCompactor/EarlyStop… | **Offloader + `ToolOffloadMiddleware`**（上下文压缩/超大结果卸载）+ Model 抽象分层路由 + 自定义 Middleware（缓存/早停） |
 | `infrastructure/obs/` 可观测 | ObservabilityContext/Tracing/MetricsCollector… | **`TracingMiddleware`** + Middleware 链 + Studio |
-| `infrastructure/longtask/` 长程任务 | L3Orchestrator/SqlSaver/GateManager/ConfirmationStore… | **SessionManager + AgentState + Permission(gate) + BackgroundTaskManager + SchedulerManager** |
+| `infrastructure/longtask/` 长程任务 | SqlSaver/GateManager/ConfirmationStore… | **SessionManager + AgentState + Permission(gate) + BackgroundTaskManager + SchedulerManager** |
 
 > 关键收益：三大横切能力从"团队自研+长期维护"变成"框架内生+自定义 Middleware 扩展"，团队只写**业务专属 Middleware**（如 MES 脱敏 `Redactor`、成本预算拦截），底座由框架保证。
 

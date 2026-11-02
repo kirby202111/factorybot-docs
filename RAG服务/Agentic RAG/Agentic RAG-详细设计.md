@@ -246,23 +246,23 @@ class SubAgentDelegator:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
 
-    async def delegate_l1(self, question: str, tenant: TenantContext) -> L1Report:
+    async def delegate_diagnosis(self, question: str, tenant: TenantContext) -> Report:
         """委托 诊断能力（多步 5M1E 推理）。"""
         resp = await self._http.post(
             "/agent/diagnose", json={"question": question},
             headers=tenant.headers(), timeout=60.0,  # 诊断能力整会话 ≤60s
         )
         resp.raise_for_status()
-        return L1ReportMapper.to_view(resp.json())
+        return ReportMapper.to_view(resp.json())
 
-    async def delegate_l2(self, draft_kind: str, context: dict, tenant: TenantContext) -> L2Draft:
+    async def delegate_draft(self, draft_kind: str, context: dict, tenant: TenantContext) -> Draft:
         """委托 草稿编写能力（草稿不落库）。"""
         resp = await self._http.post(
             "/agent/draft", json={"kind": draft_kind, "context": context},
             headers=tenant.headers(), timeout=30.0,
         )
         resp.raise_for_status()
-        return L2DraftMapper.to_view(resp.json())
+        return DraftMapper.to_view(resp.json())
 ```
 
 - **委托不是调用工具**：诊断与草稿 是子 Agent（多步推理/草拟），E 把整个问题交给它们处理，不是单次工具调用。
@@ -387,20 +387,20 @@ class TraceRagAclClient:
         return TraceSubgraphMapper.to_view(resp.json())
 
 
-class L1DelegationClient:
+class DelegationClient:
     """诊断子 Agent 委托 ACL。"""
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
-    async def delegate(self, question: str, tenant: TenantContext) -> L1ReportView:
+    async def delegate(self, question: str, tenant: TenantContext) -> ReportView:
         resp = await self._http.post(
             "/agent/diagnose", json={"question": question},
             headers=tenant.headers(), timeout=60.0,
         )
         resp.raise_for_status()
-        return L1ReportMapper.to_view(resp.json())
+        return ReportMapper.to_view(resp.json())
 ```
 
-- 外部 DTO 不进 E 核心，只暴露 `TraceSubgraphView`/`L1ReportView`（ACL 约束）。
+- 外部 DTO 不进 E 核心，只暴露 `TraceSubgraphView`/`ReportView`（ACL 约束）。
 - 委托超时对齐子 Agent（诊断能力 ≤60s）。
 
 ### 7.3 红线继承（只读 + 版本 + 权限）

@@ -58,7 +58,7 @@
 | M2 | 上下文窗口记忆 | `ResultCompactor` / `CacheControl` / `EarlyStop` | 内存（请求级） | 喂模型的消息压缩、prompt 缓存标记 | 单次 LLM 调用 ~ 5min/1h | LLM | 🔧 已实现类，待接线 |
 | M3 | 证据链长期记忆 | `ToolCallTraceRepo` / `NodeTraceRepo` / `OrchestrationStep` | MySQL 平铺表 | 工具调用全文、节点执行记录 | 永久 | 工程师 UI / 审计 | ✅ 已落地并接线 |
 | 自治 | 跨会话缓存 | `ToolResultCache` | Redis | 稳定工具结果的版本化缓存 | 按 tool 策略 TTL | 降本（命中省一次 ACL+回灌） | 🔧 已实现类，灰度接入 |
-| L5 | 会话元数据 & 令牌 | `L3Repo` / `SessionManager` / `ConfirmationStore` | MySQL + Redis | 会话生命周期、失败计数、确认令牌 | 会话级 ~ 30min | 编排器 / 写动作闸门 | ✅ 已落地并接线 |
+| L5 | 会话元数据 & 令牌 | `Repo` / `SessionManager` / `ConfirmationStore` | MySQL + Redis | 会话生命周期、失败计数、确认令牌 | 会话级 ~ 30min | 编排器 / 写动作闸门 | ✅ 已落地并接线 |
 
 > 落地状态图例：✅ 已落地并接线（mock 端到端跑通）/ 🔧 已实现类，待接线（真实模式或灰度启用）/ 📐 设计中。
 
@@ -95,7 +95,7 @@
                               │
    ┌──────────────────────────┴───────────────────────────────────────┐
    │  L5 会话元数据 & 令牌                                              │
-   │  L3Repo(会话状态机/失败计数) · ConfirmationStore(Redis, 30min TTL) │
+   │  Repo(会话状态机/失败计数) · ConfirmationStore(Redis, 30min TTL) │
    └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -463,9 +463,9 @@ class ToolResultCache:
 
 ## 7. L5 会话元数据 & 确认令牌
 
-### 7.1 L3Repo / SessionManager：会话生命周期记忆
+### 7.1 Repo / SessionManager：会话生命周期记忆
 
-[L3Repo](../factorybot/app/infrastructure/persistence/repos.py#L120) 承载：
+[Repo](../factorybot/app/infrastructure/persistence/repos.py#L120) 承载：
 - 会话状态机 `PLANNING -> RUNNING -> SUSPENDED/DONE/FAILED`（[orchestration.py:27](../factorybot/app/domain/orchestration.py#L27)）
 - **失败计数** `failure_count: dict[str,int]`，按 `(session_id, capability)` 追踪 agent 连续失败，≥2 次触发 `SUSPENDED`（agent 故障隔离，不自动重试）
 - `suspend_reason`、gate 决策记录、步骤记录
@@ -475,7 +475,7 @@ class ToolResultCache:
 ### 7.2 失败计数与 agent 故障隔离
 
 ```python
-# L3Repo
+# Repo
 async def increment_failure_count(self, session_id, capability) -> int:
     key = (session_id, capability)
     self._failure_counts[key] = self._failure_counts.get(key, 0) + 1
@@ -553,7 +553,7 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 | `tool_call_trace` | MySQL (app) | 工具调用全文 | trace_id | 永久 | M3 证据链 | ✅ |
 | `node_trace` / `agent_step` | MySQL (app) | 节点/步骤记录 | record_id | 永久 | 编排能力审计 | ✅ |
 | `agent_session` | MySQL (app) | 会话元数据 | session_id | 永久 | L5 生命周期 | ✅ |
-| `failure_count` | MySQL (app, via L3Repo) | 失败计数 | (session_id, capability) | 会话级 | L5 故障隔离 | ✅ |
+| `failure_count` | MySQL (app, via Repo) | 失败计数 | (session_id, capability) | 会话级 | L5 故障隔离 | ✅ |
 | `confirm:{token_id}` | Redis | 确认令牌 payload | token_id | 30min | L5 写动作闸门 | ✅ |
 | `confirm:session:{sid}:{step}` | Redis | 防重复确认 | (session_id, step) | 30min | L5 幂等 | ✅ |
 | `tc:{tenant}:{tool}:{hash}` | Redis | 工具结果缓存 | tenant+tool+args+version_anchor | 按 tool 策略 | 自治 降本 | 🔧 灰度 |
@@ -571,7 +571,7 @@ checkpoint 粒度是 per-node（非 per-tool-call），开销有界。
 | `MemorySaver` (checkpointer) | ✅ | ✅ 编排各场景图 | — |
 | `SqlSaver` (MySQL checkpointer) | 📐 注释示意 | — | 接 `langgraph.checkpoint.mysql.AsyncSqlSaver` + 连接池 |
 | `ToolCallTraceRepo` | ✅ | ✅ ToolNode | 替换为 SQLAlchemy 实现 |
-| `L3Repo` / `SessionManager` | ✅ | ✅ orchestrator | 替换为 SQLAlchemy 实现 |
+| `Repo` / `SessionManager` | ✅ | ✅ orchestrator | 替换为 SQLAlchemy 实现 |
 | `ConfirmationStore` | ✅ | ✅ orchestrator | FakeRedis -> 真 Redis |
 | `ResultCompactor` | ✅ | 🔧 未接线 | ToolNode 回灌前调用 `compact()` |
 | `CacheControl` | ✅ | 🔧 未接线 | ObservableChatModel 外层套 `apply()` |

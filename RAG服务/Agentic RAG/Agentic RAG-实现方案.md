@@ -339,20 +339,20 @@ class TraceRagAclClient:
             return False
 
 
-class L1DelegationClient:
+class DelegationClient:
     """诊断子 Agent 委托 ACL。🔴 traceparent 透传（§4.3）。"""
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
     async def delegate(
         self, question: str, tenant: TenantContext, traceparent: str
-    ) -> L1ReportView:
+    ) -> ReportView:
         resp = await self._http.post(
             "/agent/diagnose", json={"question": question},
             headers={**tenant.headers(), "traceparent": traceparent},  # 透传 trace
             timeout=60.0,
         )
         resp.raise_for_status()
-        return L1ReportMapper.to_view(resp.json())
+        return ReportMapper.to_view(resp.json())
 
     async def ping(self) -> bool:
         try:
@@ -362,7 +362,7 @@ class L1DelegationClient:
             return False
 ```
 
-- 外部 DTO 不进 E 核心，只暴露 `TraceSubgraphView`/`L1ReportView`（ACL 约束）。
+- 外部 DTO 不进 E 核心，只暴露 `TraceSubgraphView`/`ReportView`（ACL 约束）。
 - 所有 ACL 客户端带 `ping()` 供启动断言（§9.4）。
 
 ### 6.3 版本一致性保证
@@ -431,15 +431,15 @@ class ToolExecutor:
 class SubAgentDelegator:
     """委托诊断能力（子图），E 不自己多步推理。"""
 
-    def __init__(self, diagnosis_client: L1DelegationClient, trace_repo: RouteTraceRepo, metrics: MetricsCollector) -> None:
-        self._l1 = diagnosis_client; self._trace_repo = trace_repo; self._metrics = metrics
+    def __init__(self, diagnosis_client: DelegationClient, trace_repo: RouteTraceRepo, metrics: MetricsCollector) -> None:
+        self._diagnosis = diagnosis_client; self._trace_repo = trace_repo; self._metrics = metrics
 
     async def __call__(self, state: AgentState) -> AgentState:
         tenant = state["tenant"]
         traceparent = state.get("traceparent", "")
         t0 = time.perf_counter()
         try:
-            report = await self._l1.delegate(state["question"], tenant, traceparent)
+            report = await self._diagnosis.delegate(state["question"], tenant, traceparent)
             latency_ms = int((time.perf_counter() - t0) * 1000)
             await self._trace_repo.save_ok("诊断能力:diagnose", report, latency_ms)
             state["tool_result"] = report
@@ -679,7 +679,7 @@ services:
       GATEWAY_REDIS_URL: redis://redis:6379/0
       GATEWAY_TRACE_RAG_BASE_URL: http://rag-service:8000
       GATEWAY_DOC_RAG_BASE_URL: http://doc-rag-service:8000
-      GATEWAY_L1_AGENT_BASE_URL: http://agent-service:8000
+      GATEWAY_AGENT_BASE_URL: http://agent-service:8000
     ports: ["8004:8000"]
 ```
 

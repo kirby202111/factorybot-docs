@@ -272,7 +272,7 @@ await graph.ainvoke(Command(resume=token), config={"configurable": {"thread_id":
 
 ```python
 # OrchestrationService.start()
-async def start(self, req: L3Request, tenant: TenantContext) -> L3Session:
+async def start(self, req: Request, tenant: TenantContext) -> Session:
     session = await self._sessions.create(req, tenant)
     asyncio.create_task(self._drive(session, tenant))  # ← 直接创建 Task
     return session  # 立即返回
@@ -760,7 +760,7 @@ PLANNING -> RUNNING -> DONE
 class OrchestrationService:
     async def resume_suspended(self, session_id: str,
                                user_decision: str,  # "RETRY" / "ABORT" / "SKIP"
-                               tenant: TenantContext) -> L3Session:
+                               tenant: TenantContext) -> Session:
         session = await self._sessions.get(session_id)
         if session.status != "SUSPENDED":
             raise InvalidStateError(f"session {session_id} 不是 SUSPENDED 状态")
@@ -793,7 +793,7 @@ class OrchestrationService:
 class FailureTracker:
     """追踪同一个 session 内 agent 调用的连续失败次数。"""
 
-    def __init__(self, repo: L3Repo):
+    def __init__(self, repo: Repo):
         self._repo = repo
 
     async def record_agent_result(self, session_id: str, capability: str,

@@ -49,13 +49,13 @@
 
 ### B. 真实组件最大化，伪造件只替代叶端基础设施（测试哲学）
 
-#### B.1 真 IntentRouter / RouteGraphBuilder / ToolExecutor / Delegator / L1L2Client，只伪造叶端
+#### B.1 真 IntentRouter / RouteGraphBuilder / ToolExecutor / Delegator / SubAgentClient，只伪造叶端
 
-**处理**：14 例测试里，`GatewayService` 的所有协作者都用真的：真 `IntentRouter`（规则优先 + LLM 兜底）、真 `RouteGraphBuilder`（真 langgraph `CompiledStateGraph`）、真 `ToolExecutor`（权限校验 + trace 记录 + handler 调用）、真 `SubAgentDelegator`、真 `L1DelegationClient`/`L2DelegationClient`（真 httpx 调用契约）。只伪造**叶端基础设施**：A/B Port 的 handler（`trace_rag_port.expand` / `doc_rag_port.search` 用 `AsyncMock`）、诊断与草稿 的 httpx（`MagicMock` + `post=AsyncMock`）、Redis（`_FakeCache`）、MySQL session（`AsyncMock` 的 `audit_repo` / `trace_repo`）、obs（`MagicMock`）。与 [_mock_rag_infra.py](../FactoryRAG/tests/_mock_rag_infra.py) 的"真实组件最大化、伪造件只替代基础设施"口径一致。
+**处理**：14 例测试里，`GatewayService` 的所有协作者都用真的：真 `IntentRouter`（规则优先 + LLM 兜底）、真 `RouteGraphBuilder`（真 langgraph `CompiledStateGraph`）、真 `ToolExecutor`（权限校验 + trace 记录 + handler 调用）、真 `SubAgentDelegator`、真 `DelegationClient`/`DraftDelegationClient`（真 httpx 调用契约）。只伪造**叶端基础设施**：A/B Port 的 handler（`trace_rag_port.expand` / `doc_rag_port.search` 用 `AsyncMock`）、诊断与草稿 的 httpx（`MagicMock` + `post=AsyncMock`）、Redis（`_FakeCache`）、MySQL session（`AsyncMock` 的 `audit_repo` / `trace_repo`）、obs（`MagicMock`）。与 [_mock_rag_infra.py](../FactoryRAG/tests/_mock_rag_infra.py) 的"真实组件最大化、伪造件只替代基础设施"口径一致。
 
 **为什么是亮点**：两个判断。一是**真实组件最大化才挖得到集成层 bug**。如果我把 `ToolExecutor`/`Delegator` 也 mock 掉，`GatewayService` 就只剩个空壳路由，`audit_id` 从 state 读出来这条路径根本不跑--bug 就藏住了。真实组件最大化不是为了好看，是为了让集成测试**真能穿过集成层**（图状态在节点间流转、tool_result 物化、trace_repo 写入）。二是**伪造件只替代叶端**--A/B Port 的 handler、httpx、Redis、DB 这些外部依赖用伪造件满足契约，使 application/domain 层逻辑被完整覆盖且零外部依赖可跑。面试官问"为什么不直接 mock GatewayService 的协作者"，答"mock 协作者就只剩空壳路由，集成层的 bug--比如 state 在节点间丢键--根本走不到。真实组件最大化才能让集成测试挖到集成层的 bug"。
 
-**防守话术**："真 IntentRouter / RouteGraphBuilder（真 langgraph）/ ToolExecutor / Delegator / L1L2Client 全用真的，只伪造叶端--Port handler、httpx、Redis、DB、obs。跟 `_mock_rag_infra.py` 口径一致。mock 协作者就剩空壳路由，state 丢键这种集成层 bug 走不到，bug 就藏住。真实组件最大化才能挖到集成层 bug。"
+**防守话术**："真 IntentRouter / RouteGraphBuilder（真 langgraph）/ ToolExecutor / Delegator / SubAgentClient 全用真的，只伪造叶端--Port handler、httpx、Redis、DB、obs。跟 `_mock_rag_infra.py` 口径一致。mock 协作者就剩空壳路由，state 丢键这种集成层 bug 走不到，bug 就藏住。真实组件最大化才能挖到集成层 bug。"
 
 ---
 
@@ -166,7 +166,7 @@ audit_id 断链的修法我没自行假设，列了三个选项和权衡交还�
 
 ### 话术 3：为什么用真实组件而不是 mock 协作者
 
-"mock 协作者就剩空壳路由，集成层的 bug 走不到。audit_id 从 state 读出来这条路径，如果 ToolExecutor 被 mock 掉根本不跑，bug 就藏住。真实组件最大化--真 IntentRouter / RouteGraphBuilder（真 langgraph）/ ToolExecutor / Delegator / L1L2Client，只伪造叶端 Port handler / httpx / Redis / DB / obs--让集成测试真能穿过集成层。跟 `_mock_rag_infra.py` 口径一致。"
+"mock 协作者就剩空壳路由，集成层的 bug 走不到。audit_id 从 state 读出来这条路径，如果 ToolExecutor 被 mock 掉根本不跑，bug 就藏住。真实组件最大化--真 IntentRouter / RouteGraphBuilder（真 langgraph）/ ToolExecutor / Delegator / SubAgentClient，只伪造叶端 Port handler / httpx / Redis / DB / obs--让集成测试真能穿过集成层。跟 `_mock_rag_infra.py` 口径一致。"
 
 ### 话术 4：LangGraph 按声明过滤状态这个坑你怎么定位的
 
