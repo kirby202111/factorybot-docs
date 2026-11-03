@@ -38,7 +38,7 @@
 | **无写 client** | ACL 客户端只有 `query/fetch/search` 动词 | `validate_acl_clients` 扫描方法名前缀 |
 | **不进过点主事务** | 不调过点引擎放行 / 拦截 API | 过点 toolset 只暴露 `query_*`；放行类工具全局禁注册 |
 | **版本一致性** | 查工艺必须带版本锚点 | 工具强制版本入参，ACL 校验 `ACTIVE` |
-| **权限隔离** | 调用前按车间 / 产线 / 角色过滤 | 工具入参强制 `tenant_context`，`ToolNode` 前置拦截 |
+| **权限隔离** | 调用前按车间 / 产线 / 角色过滤 | 工具入参强制 `tenant_context`，`ToolExecHook` 前置拦截（注：本仓库自有钩子，与 LangGraph prebuilt 的 `ToolNode` 无关） |
 | **可观测兜底** | 每步带工具调用链 + 置信度，低置信度转人工 | `agent_step_record` + 置信度阈值 |
 
 ### 1.4 与其它能力的关系
@@ -72,16 +72,16 @@
 用户问题 / 结构化异常："单件 SN-001 焊接不良根因"
   ↓
 [model_node] 需要先拿到该单件的过点轨迹 -> tool_call: query_pass_records
-[tool_node] 执行 -> 过点记录列表，含工艺版本 v3、asset_id...
+[tool_hook] 执行 -> 过点记录列表，含工艺版本 v3、asset_id...
   ↓
 [model_node] 版本 v3，查当时工艺 -> tool_call: query_process_route(v3)
-[tool_node] 执行 -> 工艺步骤、焊接站参数模板
+[tool_hook] 执行 -> 工艺步骤、焊接站参数模板
   ↓
 [model_node] 查同批次锡膏 + 贴片机参数 -> tool_call: query_material_batch + query_device_params
-[tool_node] 执行 -> 锡膏批次 B-77、贴片机参数偏移
+[tool_hook] 执行 -> 锡膏批次 B-77、贴片机参数偏移
   ↓
 [model_node] 查同批次不良率 -> tool_call: query_defect_rate(B-77)
-[tool_node] 执行 -> 同批次不良率 12%，高于基线
+[tool_hook] 执行 -> 同批次不良率 12%，高于基线
   ↓
 [model_node] 无更多 tool call -> 输出 5M1E 假设排序 + 证据链
 ```
@@ -102,31 +102,48 @@
 
 ## 3. 工具集：对齐限界上下文
 
-每个上下文暴露一组只读工具，**边界即工具边界**（[领域总览.md](../../领域模型/领域总览.md) §2）：
+每个上下文暴露一组只读工具，**边界即工具边界**（[领域总览.md](../../领域模型/领域总览.md) §2）。但工具粒度不等于 endpoint 粒度：**tool 数量 = 实体 × 问题类型，不是 API 数量**——同一实体的多查询口径合并为一个 tool 的可选定位维度，分页 / 字段裁剪 / 排序是实现细节不上 schema，由 ACL 内部定死（返回摘要字段 + `_truncated`/`_omitted_count` 标注）。规模治理四层收敛见 [FactoryAgent-总体设计与实现方案.md](FactoryAgent-总体设计与实现方案.md) §5.4。
 
-| 上下文 | 只读工具（示例） | 说明 |
+| 上下文 | 只读工具（实体 × 问题粒度） | 说明 |
 |--------|-----------------|------|
-| 过点执行 | `query_pass_records(serial_no)` / `query_test_results(serial_no)` | 过点记录、TestResult（§5.3 同事务数据） |
-| 工单管理 | `query_work_order(wo_id)` / `query_wo_progress(wo_id)` | 工单状态与进度 |
-| 工艺管理 | `query_process_route(route_id, version)` | **强制版本锚点**（§5.1） |
-| 物料 | `query_material_batch(batch_no)` / `query_bom_version(bom_id, version)` | 批次、BOM 版本 |
+| 过点执行 | `query_pass_records(filter)` | 过点记录 + TestResult（§5.3 同事务数据）；口径：`serial_no` / `wo_id` / `time_range` |
+| 工单管理 | `query_work_orders(filter)` / `get_work_order_detail(wo_id)` | 列表定位（多口径）/ 单工单全景（状态 + 进度 + BOM 版本 + 关联批次） |
+| 工艺管理 | `get_process_route(route_id, version)` / `query_route_audit(route_id)` | **强制版本锚点**（§5.1） |
+| 物料 | `query_material_batch(filter)` / `get_bom_version(bom_id, version)` | 批次（口径：`batch_no` / `material_code` / `wo_id`）、BOM 版本 |
 | 在制品追踪 | `query_wip_position(serial_no)` / `query_kit_status(wo_id)` | 位置与齐套 |
-| 设备数据接入 | `query_device_params(asset_id, time_range)` / `query_equipment_telemetry` | 当时参数、遥测时序 |
-| 设备工装台账 | `query_asset_status(asset_id)` / `query_stencil_lending` / `query_stencil_master_history` | 设备状态、钢网借还与主数据变更 |
-| 返修 / 返工 | `query_repair_history(serial_no)` / `query_rework_orders(wo_id)` | 历史返修返工 |
-| 质量 | `query_defect_rate(batch_no)` / `query_history_8d(keywords)` | 批次不良率、历史同类 8D |
+| 设备数据接入 | `query_device_params(asset_id, time_range)` / `query_equipment_telemetry(asset_id, time_range)` | 当时参数、遥测时序 |
+| 设备工装台账 | `query_asset(filter)` / `query_stencil_history(filter)` | 设备状态（口径：`asset_id` / `asset_type` / `status`）、钢网借还与主数据变更 |
+| 返修 / 返工 | `query_repair_history(filter)` / `query_rework_orders(filter)` | 历史返修返工（口径：`serial_no` / `wo_id` / `batch_no`） |
+| 质量 | `query_defect_rate(filter)` / `search_history_8d(keywords)` | 批次不良率（口径：`batch_no` / `wo_id` / `product_code`）、历史同类 8D |
 | 制造追溯（只读，归属待定） | `trace_lookup` / `record_expand` / `version_resolve` | 追溯读模型（**首位注册**） |
 | 文档知识工具 | `search_docs(query, version_anchor)` | 文档检索与引用 |
 
 > `trace_lookup` 注册在诊断 toolset 首位，system prompt 引导"先查追溯读模型"；固定关联查询覆盖不足时再降级到各上下文 REST 补齐。
 
+**查询口径合并示例（工单）**：Java 侧"按物料查 / 按产品编码查 / 按序列号反查"是多个 endpoint，对模型只是**同一个语义问题的不同入参维度**，收敛为一个 tool：
+
+```python
+class WorkOrderQuery(BaseModel):
+    """工单定位：至少提供一个定位维度（model_validator 校验，否则拒绝）。"""
+    wo_id: str | None = None          # 精确查
+    material_code: str | None = None  # 按物料
+    product_code: str | None = None   # 按产品编码
+    serial_no: str | None = None      # 按序列号反查
+    status: str | None = None         # 状态过滤
+    time_range: TimeRange | None = None  # 强制时间窗 + 记录数上限（既有纪律）
+```
+
+- ACL 承担"语义接口 -> 多 endpoint"路由：按物料与按产品编码在 Java 侧是两个接口，对模型是一次 tool call；组合查询后端不支持时 ACL 内部两跳（先按物料查批次，再按批次查工单），比让模型自己编排两跳更省步数。
+- 口径互斥 / 必须搭配时间窗等复杂约束场景，退化为 `mode` 枚举 + `key` 的显式口径形态（等价于把策略分派搬到 tool 层，与草稿能力"固定步骤链 + 策略分派"同构），schema 仍只有一份。
+
 **工具元数据**：
 
 ```python
 class ToolDescriptor(BaseModel):
-    name: str                          # "query_pass_records"
+    name: str                          # "query_work_orders"
     description: str                   # 给模型看的语义说明
-    bounded_context: str               # "过点执行上下文"
+    bounded_context: str               # "工单管理上下文"
+    tool_group: str = "context:wo"     # Toolkit 分组键（静态装配 + reset_equipped_tools 兜底，总体设计 §5.4）
     capabilities: list[str]            # ["diagnosis", "orchestration"]
     read_only: bool                    # 诊断能力必须 True
     args_schema: type[BaseModel]       # Pydantic 模型，自动转 JSON Schema
@@ -135,7 +152,7 @@ class ToolDescriptor(BaseModel):
 
 **权限与版本**：
 
-- **权限**：`ToolNode` 在调用前从会话拿 `TenantContext`，与 `required_tenant_scopes` 比对，不匹配直接拒绝并落 `DENIED` trace，不进 ACL。
+- **权限**：`ToolExecHook` 在调用前从会话拿 `TenantContext`，与 `required_tenant_scopes` 比对，不匹配直接拒绝并落 `DENIED` trace，不进 ACL。
 - **版本**：`query_process_route` 在 ACL 层强制版本非空且为 `ACTIVE`，否则返回错误让模型重试——避免基于已失效工艺给根因（§5.1）。
 
 ---
@@ -186,8 +203,8 @@ class DiagnosisReport(BaseModel):
 ### 5.1 工具执行钩子（权限 + trace）
 
 ```python
-# app/ai/tool_node.py
-class ToolNode:
+# app/ai/tool_exec_hook.py
+class ToolExecHook:
     """工具执行钩子（挂在 Toolkit 上）：权限校验 -> 调 ACL -> 落 trace。"""
 
     def __init__(self, toolkit: Toolkit, trace_repo: StepRepo,
@@ -324,7 +341,7 @@ async def root_cause_node(state: OrchestrationState) -> OrchestrationState:
 
 1. 装配 ReAct Agent + 一个 LLM provider（AgentScope `Model` 抽象可插拔）。
 2. 实现 2–3 个核心 toolset（过点 / 工艺 / RAG 追溯读模型），跑通提问式闭环。
-3. 落 `ToolNode`：权限过滤 + trace 落库 + 指标埋点。
+3. 落 `ToolExecHook`：权限过滤 + trace 落库 + 指标埋点。
 4. 固化 `DiagnosisReport` / `Hypothesis` / `FiveM1ECategory` 与解析器。
 5. 补全 `open_questions` 与置信度阈值兜底。
 6. 增结构化异常入口（`mode=structured_exception`），供编排能力调用。
@@ -358,7 +375,7 @@ A：因为它不只被"提问"用。换线 mismatch 后判根因、客诉追溯�
 A：`query_process_route` 强制版本入参，ACL 层校验 `ACTIVE`，否则返回错误让模型重试。过点记录本身绑工艺版本（§5.1），模型从过点记录拿到的版本就是当时生产用的版本——版本一致性是从领域模型兜上来的，不是 Agent 自己保证的。
 
 **Q：Agent 调这么多上下文，权限怎么管？**
-A：工具注册时声明 `required_tenant_scopes`，`ToolNode` 调用前按会话 `TenantContext` 过滤，不匹配直接拒绝并落 trace——权限在调用前过滤，不是答完再裁剪。限界上下文边界本身就是天然权限切分面，每个上下文一个 toolset。
+A：工具注册时声明 `required_tenant_scopes`，`ToolExecHook` 调用前按会话 `TenantContext` 过滤，不匹配直接拒绝并落 trace——权限在调用前过滤，不是答完再裁剪。限界上下文边界本身就是天然权限切分面，每个上下文一个 toolset。
 
 **Q：诊断失败会不会误导操作工？**
 A：报告带置信度，`< 0.5` 标 `needs_human_review` 只推工程师；工具连续失败 3 次终止转人工；报告含 disclaimer。诊断全程只读，最坏情况是"没诊断出来"，不产生写副作用——和 MES 防错理念一致，宁可拦下让人判。

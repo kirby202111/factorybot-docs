@@ -230,7 +230,7 @@ agent_step_record
 
 ### 5.1 工具与上下文的映射
 
-**限界上下文边界天然就是工具边界**（[领域总览.md](../../领域模型/领域总览.md) §2），不另造一套工具分类：
+**限界上下文边界天然就是工具边界**（[领域总览.md](../../领域模型/领域总览.md) §2），不另造一套工具分类。工具粒度不等于 endpoint 粒度，按"**实体 × 问题**"合并（多查询口径归一，facade + ACL 路由，见 §5.4 第二层与 [诊断能力 §3](FactoryAgent-诊断能力.md)）：
 
 | 上下文 | 只读工具（示例） | 写工具（仅编排能力可见） |
 |--------|-----------------|------------------------|
@@ -253,6 +253,7 @@ class ToolDescriptor(BaseModel):
     name: str
     description: str                   # 给模型看的语义说明
     bounded_context: str               # 权限过滤 + 可观测维度
+    tool_group: str = "basic"          # Toolkit 分组键（默认与 bounded_context 对齐）：入口静态装配 + reset_equipped_tools 兜底，见 §5.4
     capabilities: list[str]            # 哪些能力可见（诊断/草稿/编排可重叠）
     read_only: bool
     requires_confirmation: bool = False
@@ -296,6 +297,34 @@ def validate_acl_clients(clients: dict[str, object], specs: dict[str, Capability
 ```
 
 四条断言分别覆盖：写动作越界、只读伪装、能力越权、误触放行。**红线靠启动失败兜底，不靠评审时口头承诺。**
+
+### 5.4 工具规模治理：四层收敛
+
+10+ 个上下文 × 每上下文数十 API，若按 1 API = 1 tool 封装，单会话 schema 膨胀到上百工具——上下文税每步都交，且工具越多选择错误率越高（context rot，[Multi-Agent必要性-独立复核与批判.md](../Multi-Agent必要性-独立复核与批判.md)）。四层收敛，优先级从上到下（与降本杠杆同构：结构手段在前，模型兜底在后）：
+
+| 层 | 手段 | 一句话规则 |
+|---|------|-----------|
+| L0 砍量 | 审计 API 目录 | 分页列表 / 批量导出 / 管理后台类不封装；诊断需要的是"以实体为入参的查询"，每上下文 2~5 个问题 |
+| L1 facade 合并 | 实体 × 问题建模 | **tool 数量 = 实体 × 问题类型，不是 API 数量**：多查询口径合并为一个 tool 的可选定位维度（或 `mode` 枚举），分页 / 字段裁剪 / 排序不上 schema；ACL 承担"语义接口 -> 多 endpoint"路由与两跳组合查询（与 `trace_lookup` 读模型 + REST 降级同一模式） |
+| L2 入口静态装配 | 触发源决定可见切片 | 事件类型 / 端点 / flow 节点在会话构建时预装配 `toolboxes` 子集（`tools_for(capability, tenant)` / `tools_for_subtask(spec, tenant)` 既有机制）：`equipment.fault` -> 设备数据接入 + 点检保养 + 维修 + 台账；`defect_rate.spike` -> 质量 + 工艺 + 物料 + 追溯。**不花 token、可预测，是主力手段** |
+| L3 分组 + meta tool 兜底 | `reset_equipped_tools` | 仅开放式提问（自由文本、根因方向不明）启用：basic 组常激活（`trace_lookup` / `fetch_evidence_set` / `search_docs`），每个上下文一个 `tool_group`，未激活组不进 schema；模型经 `reset_equipped_tools` 按需激活 |
+
+L3 实现要点（AgentScope 2.0 `Toolkit` 原生能力，`create_tool_group` / `update_tool_groups` / `enable_meta_tool`）：
+
+- 证据先行：`trace_lookup` 返回的证据集三段锚点往往已指向该激活哪些上下文组，system prompt 引导"先查证据集，再决定激活哪组"，不盲开组。
+- `reset_equipped_tools` 是**全量覆盖语义**（未显式置 true 的非 basic 组一律停用，非增量），prompt 中必须写明。
+- 组切换计入既有"步数与工具调用预算硬上限"（诊断 20 步），另限组切换 ≤2 次，防模型反复横跳。
+- 分组激活与 `ToolExecHook` 的 `TenantContext` 过滤是叠加关系：权限照旧在调用前拦截，不因分组而放松；只读断言与放行类工具禁注册（§5.3）对全部组生效。
+
+**审计裁剪闭环（L0 的运维形态）**：`tool_call_trace` 已按次落库，季度审计三个信号 -> 三种动作：
+
+| 信号 | 动作 |
+|------|------|
+| 零调用 / 极低调用 tool | 下线或并回 facade（注册了但从没被调 = 纯上下文税） |
+| 高 `DENIED` / 参数校验失败率 | 改 description / args_schema，不是加 tool |
+| 高频固定组合调用（如"先查批次再查工单"两跳） | ACL 升级为单 tool 内部两跳，省模型往返 |
+
+审计结论同时回灌 L2 的入口->上下文映射表与 aggregate flow 的 `plan` 映射表（非 LLM 映射表可维护，正是为了这种迭代），形成"装配 -> 观测 -> 裁剪"闭环。收敛目标：单会话可见 tool（basic 组 + 激活 1~2 个上下文组）稳定在 **10~20 个**。
 
 ---
 
