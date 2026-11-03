@@ -10,15 +10,15 @@
 
 | 闪光点 | 一句话 | 出处 |
 |--------|--------|------|
-| **异步驱动 + 中断恢复** | HTTP 只负责启动，`BackgroundTaskManager` 托管异步驱动，gate 处 Permission 拦截等人，`AgentState` 落 Redis 可跨进程续跑 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
+| **异步驱动 + 中断恢复** | HTTP 只负责启动，`BackgroundTaskManager` 托管异步驱动，gate 处 Permission 拦截等人，`AgentState` 落 Redis 可跨进程续跑 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6.4 |
 | **状态外置持久化** | `AgentState` + `SessionService`（Redis-backed）按 `session_id` 持久化，进程重启由任意副本从断点恢复，gate 等待状态不丢 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-统一架构与流程图.md) §3 |
-| **确认凭证绑定 action:target** | 人确认后由 Permission 签发凭证，绑定具体写动作（`isolation.issue:tenant_001`）+ 过期，防篡改防重放 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.7 |
-| **写不旁路应用服务** | 写落库走各上下文**正常应用服务**，过聚合根不变式 + 事务发件箱，与正常写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认" | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.5 |
-| **步数 + 时长双闸门** | 步数与工具调用预算上限 40 + `timeout=3600s`，超限标 FAILED 转人工，不硬走 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
-| **gate deadline 挂起** | 每个 confirmation gate 有 deadline，超时自动 `SUSPENDED` 推责任人，不无限阻塞产线 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
+| **确认凭证绑定 action:target** | 人确认后由 Permission 签发凭证，绑定具体写动作（`isolation.issue:tenant_001`）+ 过期，防篡改防重放 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §4.3 |
+| **写不旁路应用服务** | 写落库走各上下文**正常应用服务**，过聚合根不变式 + 事务发件箱，与正常写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认" | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §4.3 |
+| **步数 + 时长双闸门** | 步数与工具调用预算上限 40 + `timeout=3600s`，超限标 FAILED 转人工，不硬走 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6.4 |
+| **gate deadline 挂起** | 每个 confirmation gate 有 deadline，超时自动 `SUSPENDED` 推责任人，不无限阻塞产线 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §4.2 |
 | **barrier 硬防错** | `asyncio.gather` 并发分支汇合后 barrier 按结构化结果确定性分流，未 PASS 绝不推放行卡——编排层防错，非 agent 判定 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-统一架构与流程图.md) §3 |
-| **故障隔离不污染整链** | agent 连续失败 2 次标 `SUSPENDED` 推异常卡，不自动重试到死；低置信度标 `need_human_review` 不自动路由 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
-| **会话全生命周期可审计** | `agent_session` + `agent_step_record`（含 `node_type` CODE/AGENT 区分 + `gate_decision` 谁/何时/基于哪张卡/agent 假设），每一步决策可回溯 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3 |
+| **故障隔离不污染整链** | agent 连续失败 2 次标 `SUSPENDED` 推异常卡，不自动重试到死；低置信度标 `need_human_review` 不自动路由 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7 |
+| **会话全生命周期可审计** | `agent_session` + `agent_step_record`（含 `node_type` CODE/AGENT 区分 + `gate_decision` 谁/何时/基于哪张卡/agent 假设），每一步决策可回溯 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5 |
 | **代码节点 vs agent 节点物理分层** | `flows/` 应用层编排里确定性步骤与 Agent 步骤分开声明，`node_type` 落库可验——换线全程 PASS 时 LLM 调用为 0 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6 |
 
 > 这组是长程任务设计的"门面"。被问"Agent 跑一半人没确认怎么办"或"进程重启了 task 状态还在吗"时，直接甩"异步托管 + AgentState/SessionService 持久化 + Permission gate + 事件系统确认续跑 + 双闸门 + 故障隔离"六件套。
@@ -49,7 +49,7 @@
 
 #### A.1 异步驱动：HTTP 只负责"启动"
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6.4）：
 
 ```python
 async def start(self, req: Request, tenant: TenantContext) -> Session:
@@ -82,7 +82,7 @@ async def start(self, req: Request, tenant: TenantContext) -> Session:
 
 #### A.3 会话状态表设计
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5）：
 
 ```sql
 agent_session
@@ -166,7 +166,7 @@ class ToolRegistry:
 
 #### B.3 放行能力从架构层切掉
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.5）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §4.4）：
 
 ```python
 # Permission 校验：任何 capability 下均无放行/拦截类工具
@@ -186,7 +186,7 @@ for cap in ("root_cause", "fault_impact", "traceability", "draft_sop", "draft_8d
 
 #### C.1 步数 + 时长双闸门
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6.4）：
 
 ```python
 await asyncio.wait_for(
@@ -209,7 +209,7 @@ await asyncio.wait_for(
 
 #### C.2 gate deadline：每个确认点都有超时
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §4.2）：
 
 - 每个 confirmation gate 有独立 deadline，超时自动挂起 `SUSPENDED`，推责任人。
 - 不无限阻塞——不会因为某个 gate 的人休假导致整条产线的 agent 会话卡住。
@@ -219,7 +219,7 @@ await asyncio.wait_for(
 
 #### C.3 故障隔离：agent 失败不污染整链
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7）：
 
 | 触发条件 | 动作 | 观测 |
 |---------|------|------|
@@ -249,7 +249,7 @@ await asyncio.wait_for(
 
 #### D.1 全生命周期落库
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5）：
 
 - `agent_session`：会话级（哪个场景、哪个工单、当前状态、起止时间）。
 - `agent_step_record`：步骤级（代码节点还是 agent 节点、哪个能力、gate 决策、谁确认的、agent 假设 + 置信度）。
@@ -261,7 +261,7 @@ await asyncio.wait_for(
 
 #### D.2 动作卡带证据链
 
-**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.4）：
+**核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5）：
 
 ```python
 class ActionCard(BaseModel):
@@ -294,7 +294,7 @@ class ActionCard(BaseModel):
 
 **Q：你这套 Agent 系统里，哪个模块是长程任务？为什么它是长程？**
 
-A：流程编排能力。它处理的是跨多个限界上下文、含人工确认的完整业务流程——一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等处置确认，全程可能 30 分钟到 1 小时。收口入口/诊断与草稿 都是短程——收口入口单次问答，诊断能力多步只读推理秒级完成，草稿能力草拟后即结束。只有 编排能力涉及"启动 -> 等人确认 -> 继续 -> 再等人确认 -> 完成"的异步长链。
+A：流程编排能力。它处理的是跨多个限界上下文、含人工确认的完整业务流程——一次换线从首件触发到最终放行，中间要等人确认工艺、等钢网齐套核对、等处置确认，全程可能 30 分钟到 1 小时。收口入口/诊断与草稿都是短程——收口入口单次问答，诊断能力多步只读推理秒级完成，草稿能力草拟后即结束。只有编排能力涉及"启动 -> 等人确认 -> 继续 -> 再等人确认 -> 完成"的异步长链。
 
 **Q：长程任务的状态怎么管理？HTTP 请求一直等到结束吗？**
 
@@ -385,7 +385,7 @@ A：不会。三层隔离：
 
 **Q：为什么不用 Saga 做长程任务的补偿回滚？**
 
-A：两个原因。一是 编排能力的写动作个个过 confirmation gate，人的确认就是 commit point——Saga 的补偿语义是"自动撤销"，但人确认过的事不应该自动撤销，那是推翻人的决策。二是 MES 场景下补偿事务的副作用太大——比如"撤销工艺激活"可能把已经在跑的新工艺在制品打回旧工艺，这个风险远大于"不撤销、让人处置"。
+A：两个原因。一是编排能力的写动作个个过 confirmation gate，人的确认就是 commit point——Saga 的补偿语义是"自动撤销"，但人确认过的事不应该自动撤销，那是推翻人的决策。二是 MES 场景下补偿事务的副作用太大——比如"撤销工艺激活"可能把已经在跑的新工艺在制品打回旧工艺，这个风险远大于"不撤销、让人处置"。
 
 设计选择：**不引入 Saga，靠"草稿不落库 + 人确认 = commit"控制写边界**。这也和 [领域总览.md](../领域模型/领域总览.md) §5.3 的"过点主事务零分布式事务"一脉相承——能不跨事务就不跨，能用单点确认就不搞分布式协调。
 
@@ -395,7 +395,7 @@ A：AgentScope 的 Permission gate + 事件系统 HITL confirmation 是**会话�
 
 而且 gate 是显式的声明——在 `flows/` 的编排代码里看得到"这里有个 gate 等人"，Permission 拦截与确认事件都进事件流，可审计、可追踪。消息队列的"暂停/恢复"是隐式的——你看不到哪些步骤会等人。
 
-**Q：为什么 编排能力的 timeout 是 3600 秒而不是更长或更短？**
+**Q：为什么编排能力的 timeout 是 3600 秒而不是更长或更短？**
 
 A：3600 秒（1 小时）是**设计目标**，不是硬上限。选取基于两个假设：换线/故障复产/客诉 8D 的最长路径（含人工确认）在经验上不会超过 1 小时；超过 1 小时说明某环节出了问题（人休假、系统卡死、agent 循环），应挂起转人工而非继续等。
 
@@ -412,12 +412,12 @@ A：会话层骨架够用，但要先切清职责：`AgentState` + `SessionServi
 
 **Q：和传统工作流引擎（Camunda、Temporal）比，编排能力这套有什么不同？为什么不用它们？**
 
-A：传统工作流引擎做的是"确定性步骤编排 + 人工任务 + 补偿"——换线 5 步的顺序、gate 等人、超时挂起，这些工作流引擎都能做。但 编排能力多了一个工作流引擎做不了的东西：**在非确定决策点嵌入 agent 能力**。
+A：传统工作流引擎做的是"确定性步骤编排 + 人工任务 + 补偿"——换线 5 步的顺序、gate 等人、超时挂起，这些工作流引擎都能做。但编排能力多了一个工作流引擎做不了的东西：**在非确定决策点嵌入 agent 能力**。
 
 - 工作流引擎能做：plan -> 查首件 -> gate -> 查工艺 -> gate -> 查钢网/齐套 -> barrier -> 放行 -> gate。
 - 工作流引擎做不了：钢网 mismatch 时，自适应取证（查钢网借还记录 -> 查到 ST-A 借出未还 -> 自适应查上工单收线记录），根因推理（产线拿错 / 未还库 / 台账改名 / 工艺录错），草拟处置卡（路由给谁 + 建议动作）。
 
-所以 编排能力不是"用 AgentScope 替代工作流引擎"，而是**混合分工**："工作流引擎能做的（跨天 gate、步骤状态机、重试补偿、审计时间线）就交给引擎（`[选型待定，见 ADR-05/§14]`），引擎调用的单个节点内部才跑 Agent 推理与工具；工作流引擎做不了的非确定决策点由 agent 能力补"。如果某场景完全确定、没有非确定决策点，那就不该上 编排能力，直接上工作流引擎就够了——这是"懂什么时候不用 AI"的体现。
+所以编排能力不是"用 AgentScope 替代工作流引擎"，而是**混合分工**："工作流引擎能做的（跨天 gate、步骤状态机、重试补偿、审计时间线）就交给引擎（`[选型待定，见 ADR-05/§14]`），引擎调用的单个节点内部才跑 Agent 推理与工具；工作流引擎做不了的非确定决策点由 agent 能力补"。如果某场景完全确定、没有非确定决策点，那就不该上编排能力，直接上工作流引擎就够了——这是"懂什么时候不用 AI"的体现。
 
 ---
 

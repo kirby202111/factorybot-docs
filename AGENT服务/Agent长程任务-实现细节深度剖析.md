@@ -97,7 +97,7 @@ run_ctx = {
 
 **为什么用 `session_id` 作恢复键**：
 - `session_id` 是会话隔离键——不同会话的 `AgentState` 完全隔离。
-- 一个 编排能力会话 = 一份 `AgentState` + 一条 Session store 记录，天然一一对应。
+- 一个编排能力会话 = 一份 `AgentState` + 一条 Session store 记录，天然一一对应。
 - 恢复时只需知道 `session_id`，**任意副本**都能从 Session store 找回状态并续跑；不需要"同进程""同线程"这类前提。
 - 单会话的步数与工具调用次数由预算上限封顶（超限即 FAILED），不依赖图递归计数器。
 
@@ -929,7 +929,7 @@ async def lifespan(app: FastAPI):
 
 ### 14.1 场景① 换线（CHANGEOVER）：快路径 + mismatch 慢路径
 
-换线是 编排能力的高频场景，也是"懂什么时候不用 AI"的典型——全程 PASS 时纯代码骨架跑完，LLM 调用为 0；只有钢网/程序 mismatch 时才触发 RootCauseAgent (A)。本节演练两条路径。
+换线是编排能力的高频场景，也是"懂什么时候不用 AI"的典型——全程 PASS 时纯代码骨架跑完，LLM 调用为 0；只有钢网/程序 mismatch 时才触发 RootCauseAgent (A)。本节演练两条路径。
 
 #### 14.1.1 业务背景
 
@@ -1043,7 +1043,7 @@ SMT-1 线 L-01，14:30 贴片机 ASSET-01 报警停机（温控阀故障）。�
 |------|------|------|------|------|
 | T+0 | `start` HTTP | session 写 MySQL（status=PLANNING），**点火在 pod-1**，BackgroundTaskManager 托管 _drive | session.status=PLANNING | agent_session 行 |
 | T+1s | `plan`（CODE） | 按 scenario=COMPLAINT_8D 决定步骤序列 | current_step=PLAN | st-1 |
-| T+2s | `traceability`（**AGENT C**，嵌入 诊断能力） | _run_agent("traceability")：能力节点子会话 id=`...001:traceability`，C 复用诊断能力（跨能力委托=**显式服务调用**，传 `session_id` + `evidence_set_id` + `traceparent`；AgentScope 2.0 **无 Handoffs/Routing 移交原语**，共享的是证据集与 trace 上下文，不是消息流）：<br>① **版本钉死（ACL 代码做，非 agent）**：从过点记录强取批次 P 用的 route_version=v3（不是当前 v5），后续工艺查询强制 v3——agent 只消费钉死后的版本<br>② 汇聚跨上下文证据：过点 TestResult、设备遥测、锡膏批次 B-77、同批次不良率<br>③ **5M1E 假设排序（LLM 加权推理，规则引擎做不了）**：料因（B-77 在别处也有不良）置信度高、机因（设备参数漂移幅度小）置信度中<br>④ 输出排序假设 + 证据链 + 置信度 | agent_hypothesis={hypotheses:[{cause:"料-锡膏B-77",confidence:high},{cause:"机-设备漂移",confidence:medium}], evidence_chain:[...]}, agent_confidence=high | 主编排 st-2；能力节点状态落子会话；step=TRACEABILITY, **node_type=AGENT**, capability=C, tool_call_traces 落库 |
+| T+2s | `traceability`（**AGENT C**，嵌入诊断能力） | _run_agent("traceability")：能力节点子会话 id=`...001:traceability`，C 复用诊断能力（跨能力委托=**显式服务调用**，传 `session_id` + `evidence_set_id` + `traceparent`；AgentScope 2.0 **无 Handoffs/Routing 移交原语**，共享的是证据集与 trace 上下文，不是消息流）：<br>① **版本钉死（ACL 代码做，非 agent）**：从过点记录强取批次 P 用的 route_version=v3（不是当前 v5），后续工艺查询强制 v3——agent 只消费钉死后的版本<br>② 汇聚跨上下文证据：过点 TestResult、设备遥测、锡膏批次 B-77、同批次不良率<br>③ **5M1E 假设排序（LLM 加权推理，规则引擎做不了）**：料因（B-77 在别处也有不良）置信度高、机因（设备参数漂移幅度小）置信度中<br>④ 输出排序假设 + 证据链 + 置信度 | agent_hypothesis={hypotheses:[{cause:"料-锡膏B-77",confidence:high},{cause:"机-设备漂移",confidence:medium}], evidence_chain:[...]}, agent_confidence=high | 主编排 st-2；能力节点状态落子会话；step=TRACEABILITY, **node_type=AGENT**, capability=C, tool_call_traces 落库 |
 | T+20s | `supplier_trace` ‖ `isolation_scope`（并行） | 左 `supplier_trace`（CODE，版本钉死后查）：查 B-77 供应商批次、在库品。右 `isolation_scope`（代码或复用 B 逻辑）：判同批次在库品隔离范围 | （并行） | st-3(parent=st-2)；step=SUPPLIER_TRACE/ISOLATION_SCOPE, node_type=CODE |
 | T+25s | `gate_isolation`（CODE） | _gate：build_action_card（隔离集 + 每批次理由 + agent_hypothesis + evidence）-> push 给王工 -> **Permission gate 拦截，会话挂起待人确认**。AgentState 落 Session store st-4，本次驱动结束等待确认事件 | current_step=GATE_ISOLATION | **st-4(parent=st-3) 写入 Session store**，pod-1 的本次驱动结束、协程让出；step=ISOLATION, status=GATE_WAITING |
 | T+25s~T+10min | ⚠️ **pod-1 被 OOM Kill**（跨进程恢复演示） | 14:35 pod-1 因内存压力被 K8s OOM Kill，_drive 协程销毁。**但 AgentState 已在 Redis-backed Session store（st-4），不在进程内存**——session 在 DB 仍 RUNNING，gate 步骤仍 GATE_WAITING。期间王工在另一终端确认隔离 | （pod-1 进程已死） | Session store 的 st-4 仍在 |
@@ -1067,7 +1067,7 @@ SMT-1 线 L-01，14:30 贴片机 ASSET-01 报警停机（温控阀故障）。�
 
 #### 14.4.1 业务背景
 
-工艺路线 RR-B 从 v4 升 v5，回流焊温区 3 从 240℃ 调到 245℃（为改善 0201 元件立碑）。工艺变更发布后，订阅 `ProcessRouteActivated` 事件触发 编排能力：要草拟新 SOP + 核对操作工资质 + 新工艺首件验证（痛点 D，见痛点文档 §D.1）。
+工艺路线 RR-B 从 v4 升 v5，回流焊温区 3 从 240℃ 调到 245℃（为改善 0201 元件立碑）。工艺变更发布后，订阅 `ProcessRouteActivated` 事件触发编排能力：要草拟新 SOP + 核对操作工资质 + 新工艺首件验证（痛点 D，见痛点文档 §D.1）。
 
 触发：Kafka 监听器收 `ProcessRouteActivated{route_id:RR-B, version:v5}` -> 调 `POST /agent/orchestration/process_change/start`。session id=`S-PC-20260712-001`，scenario=PROCESS_CHANGE。
 

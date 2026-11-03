@@ -55,7 +55,7 @@
 
 #### B.1 真 IntentRouter / RouteGraphBuilder / ToolExecutor / Delegator / SubAgentClient，只伪造叶端
 
-**处理**：14 例测试里，`GatewayService` 的所有协作者都用真的：真 `IntentRouter`（规则优先 + LLM 兜底）、真 `RouteGraphBuilder`（真 langgraph `CompiledStateGraph`）、真 `ToolExecutor`（权限校验 + trace 记录 + handler 调用）、真 `SubAgentDelegator`、真 `DelegationClient`/`DraftDelegationClient`（真 httpx 调用契约）。只伪造**叶端基础设施**：A/B Port 的 handler（`trace_rag_port.expand` / `doc_rag_port.search` 用 `AsyncMock`）、诊断与草稿 的 httpx（`MagicMock` + `post=AsyncMock`）、Redis（`_FakeCache`）、MySQL session（`AsyncMock` 的 `audit_repo` / `trace_repo`）、obs（`MagicMock`）。与 [_mock_rag_infra.py](../FactoryRAG/tests/_mock_rag_infra.py) 的"真实组件最大化、伪造件只替代基础设施"口径一致。
+**处理**：14 例测试里，`GatewayService` 的所有协作者都用真的：真 `IntentRouter`（规则优先 + LLM 兜底）、真 `RouteGraphBuilder`（真 langgraph `CompiledStateGraph`）、真 `ToolExecutor`（权限校验 + trace 记录 + handler 调用）、真 `SubAgentDelegator`、真 `DelegationClient`/`DraftDelegationClient`（真 httpx 调用契约）。只伪造**叶端基础设施**：A/B Port 的 handler（`trace_rag_port.expand` / `doc_rag_port.search` 用 `AsyncMock`）、诊断与草稿的 httpx（`MagicMock` + `post=AsyncMock`）、Redis（`_FakeCache`）、MySQL session（`AsyncMock` 的 `audit_repo` / `trace_repo`）、obs（`MagicMock`）。与 [_mock_rag_infra.py](../FactoryRAG/tests/_mock_rag_infra.py) 的"真实组件最大化、伪造件只替代基础设施"口径一致。
 
 **为什么是亮点**：两个判断。一是**真实组件最大化才挖得到集成层 bug**。如果我把 `ToolExecutor`/`Delegator` 也 mock 掉，`GatewayService` 就只剩个空壳路由，`audit_id` 从 state 读出来这条路径根本不跑--bug 就藏住了。真实组件最大化不是为了好看，是为了让集成测试**真能穿过集成层**（图状态在节点间流转、tool_result 物化、trace_repo 写入）。二是**伪造件只替代叶端**--A/B Port 的 handler、httpx、Redis、DB 这些外部依赖用伪造件满足契约，使 application/domain 层逻辑被完整覆盖且零外部依赖可跑。面试官问"为什么不直接 mock GatewayService 的协作者"，答"mock 协作者就只剩空壳路由，集成层的 bug--比如 state 在节点间丢键--根本走不到。真实组件最大化才能让集成测试挖到集成层的 bug"。
 
@@ -67,7 +67,7 @@
 
 #### C.1 audit_id/trace_id 没声明就被丢，traceparent/session_id 声明了活下来
 
-**识别过程**：第一个测试 `test_chat_trace_fact_routes_to_a_tool` 断言 `trace_repo.save_ok` 收到的 `audit_id` 非空，失败--实际是 `''`。`ToolExecutor` 读 `state.get("audit_id", "")`，默认空串，说明 state 里没这个键。但 `GatewayService._run_graph` 明明把 `audit_id` 放进了 `initial` state。用一段探针脚本（伪 tool 节点打印收到的 state keys）证实：tool 节点收到的 keys 恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在其中。根因：`AgentState` 漏声明 `audit_id`/`trace_id`，而 LangGraph `StateGraph(AgentState)` **按 TypedDict 声明字段过滤状态**，未声明的键在节点间被丢弃。`traceparent`/`session_id` 声明了所以活下来（这也解释了为什么 诊断能力委托的 traceparent header 一直正常、没人发现 audit_id 丢了）。
+**识别过程**：第一个测试 `test_chat_trace_fact_routes_to_a_tool` 断言 `trace_repo.save_ok` 收到的 `audit_id` 非空，失败--实际是 `''`。`ToolExecutor` 读 `state.get("audit_id", "")`，默认空串，说明 state 里没这个键。但 `GatewayService._run_graph` 明明把 `audit_id` 放进了 `initial` state。用一段探针脚本（伪 tool 节点打印收到的 state keys）证实：tool 节点收到的 keys 恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在其中。根因：`AgentState` 漏声明 `audit_id`/`trace_id`，而 LangGraph `StateGraph(AgentState)` **按 TypedDict 声明字段过滤状态**，未声明的键在节点间被丢弃。`traceparent`/`session_id` 声明了所以活下来（这也解释了为什么诊断能力委托的 traceparent header 一直正常、没人发现 audit_id 丢了）。
 
 **后果链**：`ToolExecutor`/`Delegator` 读 `audit_id=""` -> `route_trace` 行 `audit_id` 为空 -> `AnswerAuditRepo.find_by_id(audit_id)` 用 `WHERE RouteTraceModel.audit_id == audit_id` 关联 -> **返回空 route_traces** -> `GET /agent/explain/{audit_id}`（正是 P0 #3 那个端点）只显示审计行、没有工具/委托证据。证据链断裂。
 
@@ -75,7 +75,7 @@
 
 **为什么是亮点**：这是"框架隐式契约"的典型坑。LangGraph `StateGraph` 的状态过滤是**隐式行为**--你传一个 dict 进去，它静默地只保留 TypedDict 声明的键，不报错不警告。`traceparent`/`session_id` 声明了活下来，给人"状态透传没问题"的错觉，`audit_id`/`trace_id` 漏声明就静默丢失。**识别出"`traceparent` 活下来不是因为我透传对了，是因为它碰巧声明了；`audit_id` 丢不是因为没传，是因为没声明"**，体现的是对框架状态模型的把握，不是"再加一个字段"的本能反应。而且这个 bug 直接断了 MES 的核心关注点--追溯性（`/agent/explain/{audit_id}` 是证据链入口）。面试官问"你怎么发现的"，答"第一个测试断言 audit_id 非空就失败了，写探针脚本看 tool 节点收到的 keys，发现恰好是 AgentState 声明的那几个，audit_id 没声明被 StateGraph 滤掉了"。
 
-**防守话术**："`AgentState` 漏声明 `audit_id`/`trace_id`，LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键节点间被丢。`traceparent`/`session_id` 声明了活下来，所以 诊断能力委托的 traceparent 一直正常、没人发现 audit_id 丢了。`ToolExecutor` 读到空串，route_trace 挂不上 answer_audit，`/agent/explain/{audit_id}` 证据链断。`_FallbackGraph` 走 plain dict 不过滤，既有测试全绿但生产裸奔--虚假安心。"
+**防守话术**："`AgentState` 漏声明 `audit_id`/`trace_id`，LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键节点间被丢。`traceparent`/`session_id` 声明了活下来，所以诊断能力委托的 traceparent 一直正常、没人发现 audit_id 丢了。`ToolExecutor` 读到空串，route_trace 挂不上 answer_audit，`/agent/explain/{audit_id}` 证据链断。`_FallbackGraph` 走 plain dict 不过滤，既有测试全绿但生产裸奔--虚假安心。"
 
 ---
 
@@ -108,9 +108,9 @@
 
 **处理**：`_route_taken(intent, tool_result)` 改为以 `tool_result is None` 为失败信号统一返回 "HUMAN"（UNKNOWN 仍 HUMAN）。所尝试的工具/委托记在 `tool_chain`（如 `["诊断能力:diagnose"]`/`["delegation:failed"]`/`["query_traceability_graph"]`），不靠 `route_taken` 表达。三条转人工路径现在一致：`route_taken="HUMAN"` + `detail["reason"]`。
 
-**为什么是亮点**：两个判断。一是**死代码识别**--`state["answer"]` 被写但不被读，是典型的"作者意图没落到消费侧"。`_build_answer` 重算 summary 把它架空了。识别出"写入侧精心构造、消费侧从不读取"的死代码，比删几行更有价值。二是**语义一致性**--`route_taken` 在失败时该表达"结果"（HUMAN）还是"尝试"（诊断能力/A）是设计选择，但不能同一个字段两种语义。统一成"结果"（HUMAN），"尝试"让 `tool_chain` 表达，职责切干净。面试官问"你怎么发现这两个 bug"，答"写失败路径测试时读 _build_answer，发现它从不读 state['answer']，而 ToolExecutor 写了一堆--死代码；再断言 route_taken 时发现节点内失败是 诊断能力、图级失败是 HUMAN，同一语义两种表示"。
+**为什么是亮点**：两个判断。一是**死代码识别**--`state["answer"]` 被写但不被读，是典型的"作者意图没落到消费侧"。`_build_answer` 重算 summary 把它架空了。识别出"写入侧精心构造、消费侧从不读取"的死代码，比删几行更有价值。二是**语义一致性**--`route_taken` 在失败时该表达"结果"（HUMAN）还是"尝试"（诊断能力/A）是设计选择，但不能同一个字段两种语义。统一成"结果"（HUMAN），"尝试"让 `tool_chain` 表达，职责切干净。面试官问"你怎么发现这两个 bug"，答"写失败路径测试时读 _build_answer，发现它从不读 state['answer']，而 ToolExecutor 写了一堆--死代码；再断言 route_taken 时发现节点内失败是诊断能力、图级失败是 HUMAN，同一语义两种表示"。
 
-**防守话术**："`_build_answer` 一律用 `_materialize(tool_result)` 算 summary，从不读 `state['answer']`，ToolExecutor/Delegator 写的失败原因全成死代码，summary 退化为通用文案。修：`tool_result is None` 走失败分支用 `state['answer']` 作 summary + 进 `detail['reason']`。route_taken 原来节点内失败保留 诊断能力/A、图级失败才 HUMAN，同一语义两种表示；改成以 `tool_result is None` 统一 HUMAN，所尝试路线记 tool_chain。`_materialize` 的 None 分支移除，契约收紧。"
+**防守话术**："`_build_answer` 一律用 `_materialize(tool_result)` 算 summary，从不读 `state['answer']`，ToolExecutor/Delegator 写的失败原因全成死代码，summary 退化为通用文案。修：`tool_result is None` 走失败分支用 `state['answer']` 作 summary + 进 `detail['reason']`。route_taken 原来节点内失败保留诊断能力/A、图级失败才 HUMAN，同一语义两种表示；改成以 `tool_result is None` 统一 HUMAN，所尝试路线记 tool_chain。`_materialize` 的 None 分支移除，契约收紧。"
 
 ---
 
@@ -174,7 +174,7 @@ audit_id 断链的修法我没自行假设，列了三个选项和权衡交还�
 
 ### 话术 4：LangGraph 按声明过滤状态这个坑你怎么定位的
 
-"第一个测试断言 `audit_id` 非空就红了 `assert ''`。`ToolExecutor` 读 `state.get('audit_id','')` 得空串，说明 state 里没这键，但 `_run_graph` 明明放进了 initial。我写了个探针脚本--伪 tool 节点打印收到的 state keys--发现恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在。LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键静默丢弃。`traceparent`/`session_id` 声明了活下来，所以 诊断能力委托的 traceparent 一直正常、没人发现 audit_id 丢了。"
+"第一个测试断言 `audit_id` 非空就红了 `assert ''`。`ToolExecutor` 读 `state.get('audit_id','')` 得空串，说明 state 里没这键，但 `_run_graph` 明明放进了 initial。我写了个探针脚本--伪 tool 节点打印收到的 state keys--发现恰好是 `AgentState` TypedDict 声明的那 8 个，`audit_id`/`trace_id` 不在。LangGraph `StateGraph` 按 TypedDict 声明过滤状态，没声明的键静默丢弃。`traceparent`/`session_id` 声明了活下来，所以诊断能力委托的 traceparent 一直正常、没人发现 audit_id 丢了。"
 
 ### 话术 5：三个 bug 都是怎么发现的
 

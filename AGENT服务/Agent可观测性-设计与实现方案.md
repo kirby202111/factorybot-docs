@@ -492,7 +492,7 @@ class Hypothesis(BaseModel):
 ```
 
 - `evidence` 存的是 `tool_call_trace.trace_id` 列表，UI 点开即拉对应行的入参出参。
-- 证据**必须非空**：`ReportParser` 校验每条 hypothesis 至少引用 1 条 trace，否则判 schema 失败重试——没有证据的假设不许输出（与 诊断能力 §5.3 的 Pydantic 强约束一致）。
+- 证据**必须非空**：`ReportParser` 校验每条 hypothesis 至少引用 1 条 trace，否则判 schema 失败重试——没有证据的假设不许输出（与诊断能力 §5.3 的 Pydantic 强约束一致）。
 - 草稿能力的 `evidence_refs` 同样引用 `trace_id` + `evidence_set_id`（[草稿能力 §8.3](FactoryAgent/FactoryAgent-草稿编写能力.md)），编排能力动作卡的 `evidence` 引用 `trace_id` 列表 + `agent_hypothesis`。
 - **追溯口径唯一**：跨能力/跨服务的证据引用一律写 `evidence_set_id`，需要细节时由 `fetch_evidence_set(evidence_set_id)` 回查**关系型证据子集**；**不引入**图/子图/快照边之类的表达（[ADR-03](../架构设计v2/00-架构决策记录ADR.md)：坚决不用图检索）。
 

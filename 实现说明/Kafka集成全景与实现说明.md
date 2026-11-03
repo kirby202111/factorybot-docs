@@ -86,7 +86,7 @@
 | 服务 | 语言栈 | Kafka 角色 | topic | 边界 |
 |---|---|---|---|---|
 | rag-service | Python（aiokafka） | **只读投影消费者**：订阅 `mes.*/process.*/material.*/quality.*` 增量构建 MySQL 关系型追溯读模型（`trace_*` 关系表 + 外键 + 固定关联查询） | 复用既有领域事件 topic | 只读投影，`ReadOnlyProjectionGate` 禁止历史覆盖性删除/改写；不订 `dc.*` 原始流 |
-| agent-service | Python（aiokafka） | **主动触发消费者**：订阅 `ProcessRouteActivated` / `equipment.fault` / 不良率突增等只读事件，触发 草稿能力草拟 / 流程编排 | 复用既有领域事件 topic | 只读旁路，物理隔离不进过点主事务 |
+| agent-service | Python（aiokafka） | **主动触发消费者**：订阅 `ProcessRouteActivated` / `equipment.fault` / 不良率突增等只读事件，触发草稿能力草拟 / 流程编排 | 复用既有领域事件 topic | 只读旁路，物理隔离不进过点主事务 |
 | agent-service | Python（aiokafka） | **动作卡生产者**：编排能力 confirmation gate 的动作卡 WebSocket（实时）+ Kafka 持久兜底 | `agent.action_cards`（key=`session_id`） | 双通道，Kafka 兜底离线可达可回溯 |
 
 ---
@@ -345,7 +345,7 @@ rag-service 的 `ReadModelProjector` 订阅领域事件流，增量构建 / 更�
 
 **实施重难点与技术挑战**
 
-1. **投影滞后与降级**：读模型允许秒级最终一致，但 诊断若在投影滞后窗口内查询，会拿到不完整读模型。靠 诊断能力 ACL 降级查询上下文只读 REST 补齐（如 `CONSUMED_BATCH` 关联行尚未投影时降级调 `GET /api/material/consumption`）。降级阈值 🔴 待定。
+1. **投影滞后与降级**：读模型允许秒级最终一致，但 诊断若在投影滞后窗口内查询，会拿到不完整读模型。靠诊断能力 ACL 降级查询上下文只读 REST 补齐（如 `CONSUMED_BATCH` 关联行尚未投影时降级调 `GET /api/material/consumption`）。降级阈值 🔴 待定。
 2. **`CONSUMED_BATCH` 关联 gap**：批次反向扩展依赖 `CONSUMED_BATCH` 关联（物料消耗明细行），但该关联对应的事件契约（物料消耗明细）尚不明确 🔴。MVP 用降级 REST 兜底，待物料上下文明确消耗明细事件后改投影。
 3. **`event_id` 幂等与位点**：读模型投影侧 `event_id` 幂等表 + consumer offset 都落 MySQL，重启从断点续消费。幂等记录与读模型写入须同事务，否则重启会重复写读模型行。
 4. **读模型 schema 演进**：MySQL 读模型 schema（表 / 列 / 索引）随业务演进，已有列 / 索引不能破坏性变更。需读模型 schema 版本化 + 兼容性策略。
@@ -359,9 +359,9 @@ rag-service 的 `ReadModelProjector` 订阅领域事件流，增量构建 / 更�
 
 agent-service 订阅只读领域事件，把 Agent 从"被动问答"变"主动巡检 / 编排"：
 
-- 订阅 `ProcessRouteActivated`（工艺升版 v4->v5）-> 触发 编排能力 `process_change` 编排（草拟新 SOP + 核对操作工资质 + 新工艺首件验证）/ 触发 草稿能力 SOP 草拟
-- 订阅 `equipment.fault`（设备故障，Kafka topic 或维修看板手动触发）-> 触发 编排能力 `fault_response` 故障复产编排
-- 订阅不良率突增事件 -> 触发 诊断能力同批次诊断（`DefectRateSpikeListener`）
+- 订阅 `ProcessRouteActivated`（工艺升版 v4->v5）-> 触发编排能力 `process_change` 编排（草拟新 SOP + 核对操作工资质 + 新工艺首件验证）/ 触发草稿能力 SOP 草拟
+- 订阅 `equipment.fault`（设备故障，Kafka topic 或维修看板手动触发）-> 触发编排能力 `fault_response` 故障复产编排
+- 订阅不良率突增事件 -> 触发诊断能力同批次诊断（`DefectRateSpikeListener`）
 
 **Kafka 核心使用方式与作用**
 
@@ -399,7 +399,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 **架构闪光点**
 
 1. **双通道互补**：WebSocket 的实时性 + Kafka 的持久性。实时通道失败（责任人未连 WS）不影响持久通道；持久通道消费侧（前端拉取 / 重连补送）兜底。
-2. **Kafka 兜底离线 / 重连补送**：与 编排能力长程任务的等待人确认 / 续跑同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `session_id` 续跑（会话经 `AgentState` + `SessionService` 恢复）。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
+2. **Kafka 兜底离线 / 重连补送**：与编排能力长程任务的等待人确认 / 续跑同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `session_id` 续跑（会话经 `AgentState` + `SessionService` 恢复）。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
 3. **跨语言 Python 生产**：agent-service（Python aiokafka）生产 `agent.action_cards`，是本系统唯一的 Python->Kafka 生产路径（其余 Python 服务都是消费）。partition_key=`session_id` 保证同一编排会话的动作卡有序。
 
 **实施重难点与技术挑战**

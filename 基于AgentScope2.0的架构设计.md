@@ -187,7 +187,7 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 
 ### 3.1 `agent-service` 模块结构（AgentScope 2.0 重构）
 
-agent-service 仍是单一 Python 微服务，三项能力 共存；但执行内核从"自研 StateGraph + code_nodes"改为"AgentScope `Agent` + `Toolkit` + Middleware + Permission"，**编排形状本身仍是应用层 Python 代码**（框架不再提供 pipeline 原语）。
+agent-service 仍是单一 Python 微服务，三项能力共存；但执行内核从"自研 StateGraph + code_nodes"改为"AgentScope `Agent` + `Toolkit` + Middleware + Permission"，**编排形状本身仍是应用层 Python 代码**（框架不再提供 pipeline 原语）。
 
 ```
 agent_service/app/
@@ -289,7 +289,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | 草稿能力检索文档 | `query_rag(query, version_anchor, RETRIEVAL_ONLY)` Tool | Agent -> RAG | 8D/SOP 草拟检索适用版本的历史文档 |
 | 编排能力受限写 | ACL 写 Tool -> 应用服务 REST（header `X-Confirmation-Token` + `X-Confirmed-By`） | Agent -> MES | **由 Permission gate 放行后**才可调用，走聚合根不变式 + 事务发件箱 |
 | RAG 读模型同步 | Kafka 领域事件流 | MES -> RAG | 幂等更新文档索引和 MySQL 关系型追溯读模型 |
-| 主动触发 | `ProcessRouteActivated`/`equipment.fault` -> 事件系统 | MES -> Agent | 触发 草稿能力异步草拟 / 编排能力故障复产 |
+| 主动触发 | `ProcessRouteActivated`/`equipment.fault` -> 事件系统 | MES -> Agent | 触发草稿能力异步草拟 / 编排能力故障复产 |
 | 动作卡推送 | 事件系统 + `AGUIProtocolMiddleware` + Kafka 兜底 | Agent -> 前端 | 实时 + 离线双通道 |
 | 评测接入 | EvalTarget 适配器 | mes-eval -> Agent/RAG | 统一跑集判定 |
 | 跨语言追踪 | W3C `traceparent` | Agent -> MES | 由 `TracingMiddleware` 注入 |
@@ -363,7 +363,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | 7 | **执行隔离用 Workspace（Local/Docker/E2B）+ WorkspaceManager** | 受限写/代码执行沙箱化；多租户 agent-level isolation 内生 |
 | 8 | **前端推送用事件系统 + AGUIProtocolMiddleware 替代自研 WS/SSE 编排** | 动作卡实时渲染 + HITL 确认同源，Kafka 仍作离线兜底 |
 | 9 | **评测栈自建：`py-openjudge` 作 judge + 自研 `EvalRunner`/CI 门禁** | ⚠️ `agentscope.evaluate` 2.0 已删且未回归，**不存在内生评测**；Ragas/DeepEval 作为检索指标的可选实现保留 |
-| 10 | **RAG 路线 E 的"路由"由单 Agent 的 ReAct + `Toolkit` 工具选择承担** | ⚠️ AgentScope 无 Handoffs/Routing 原语；跨能力委托是显式服务调用 + `evidence_set_id` 传递，不是框架移交机制 |
+| 10 | **Agentic 能力的"路由"由单 Agent 的 ReAct + `Toolkit` 工具选择承担** | ⚠️ AgentScope 无 Handoffs/Routing 原语；跨能力委托是显式服务调用 + `evidence_set_id` 传递，不是框架移交机制 |
 | 11 | **消息/内容用 Content Block（Pydantic）+ Msg（usage/时间戳/block id）** | 天然可校验/序列化/计费/溯源，替代零散结构化输出 |
 | 12 | **跨语言仍 Python Agent + Java MES；预留 AgentScope Java 2.0 同构扩展** | 物理边界安全不变；未来跨语言扩展无需换框架心智 |
 | 13 | **安全红线不变、承载升级**（诊断能力只读/草稿能力不持写/编排能力 gated write） | "能不能写"的语义不变；"如何强制"= 网关一次性令牌（主闸）+ Permission/HITL（叠加层），自研断言并入这两层 |
@@ -396,7 +396,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 - **Toolkit + MCP + Skills**：新增工具/接入外部 MCP 服务/封装领域技能，均标准化；工具边界仍对齐 14 个限界上下文。
 - **Permission 策略即配置**：新增写场景 = 声明一条 gated 规则（`PermissionRule`），闸门自动生效；网关令牌仍是主闸。
 - **Model 抽象**：新增/替换 provider 无需改业务；降级过评测门禁即可上线。
-- **`flows/` 可组合**：新增 编排能力场景 = 用普通 Python 组装已有 Agent + 确定性节点，复用度高、无框架 DSL 学习成本。
+- **`flows/` 可组合**：新增编排能力场景 = 用普通 Python 组装已有 Agent + 确定性节点，复用度高、无框架 DSL 学习成本。
 
 ---
 
@@ -421,7 +421,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 
 | AgentScope 2.0 能力 | 本架构落点 |
 |---------------------|-----------|
-| 统一 `Agent` 类（reply_stream/reply） | 三项能力 各 Agent |
+| 统一 `Agent` 类（reply_stream/reply） | 三项能力各 Agent |
 | Content Block / `Msg`（Pydantic, usage, block id） | 消息与证据溯源、计费 |
 | Permission 系统（`PermissionEngine`/`Rule`/`Mode`/`Decision`） | 写动作三层防线的**叠加层**（主闸是网关一次性令牌） |
 | Middleware（`TracingMiddleware`/`AGUIProtocolMiddleware`/`ToolOffloadMiddleware` + 自定义） | 可观测/前端流/成本/脱敏/审计 |
@@ -431,7 +431,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | `Toolkit` + MCP + Skills | ACL 工具 / 外部服务 / 领域技能 |
 | `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate` + `Task`/`TaskContext` | 任务清单与进度跟踪（无独立 Plan 模块） |
 | Model + Embedding | provider 可插拔 + RAG 向量化 |
-| RAG 模块 | 文档型 RAG（路线 B）——⚠️ 无 ChromaDB 适配器，且该模块曾被整体删除过一次，需版本 pin + 降级预案 |
+| RAG 模块 | 文档检索能力——⚠️ 无 ChromaDB 适配器，且该模块曾被整体删除过一次，需版本 pin + 降级预案 |
 | `event.RequireUserConfirmEvent` | HITL 确认与续跑 |
 
 **已核实为不存在/已删除，本架构不写进生产路径：**
@@ -451,7 +451,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 
 - `整体技术选型与模块划分.md` — 全仓总览（已对齐本文 AgentScope 2.0 口径）
 - `架构设计v2/00-架构决策记录ADR.md` — **本文每条选型背后的判定依据、证据分级与被证伪项**（ADR-01…ADR-12）
-- `AGENT服务/` — 三项能力 分层与三大横切能力设计
+- `AGENT服务/` — 三项能力分层与三大横切能力设计
 - `RAG服务/` — 统一 RAG 的文档检索、关系型制造追溯与 Agentic 检索编排
 - `RAG与Agent评测/` — 检索/追溯/编排/端到端与 Agent 分层评测
 - `领域模型/`、`实现说明/` — MES 主体（Java）14 个限界上下文与基础设施

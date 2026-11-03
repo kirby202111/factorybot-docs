@@ -1,9 +1,9 @@
 # Agentic RAG 实现方案（Python 技术栈：3 意图路由 MVP）
 
-> 本文是 [RAG服务引入路线.md](RAG服务引入路线.md) §2.5 路线 E（Agentic RAG）的**实现层落地**，与 [Agentic RAG-详细设计.md](./Agentic RAG-详细设计.md) 的关系：
+> 本文是 [RAG服务引入路线.md](RAG服务引入路线.md) §3「Agentic 的正确定位」所述 **Agentic 能力**的**实现层落地**，与 [Agentic RAG-详细设计.md](./Agentic RAG-详细设计.md) 的关系：
 > - **详细设计**是全意图收口的**设计层**（广）--意图路由、工具与跨能力显式委托、统一输出的全景；
-> - **本文**是 3 类意图（追溯事实 + 根因诊断 + 文档查询）的**实现层**（深）--把详细设计的骨架补全到可落地的 MVP，新增**依赖清单、ACL 只读 REST 契约、AgentScope 路由编排代码、Docker 部署、测试策略**等实现层内容，并对个别委托契约按 诊断与草稿 落地口径细化（如 诊断能力委托超时与 trace 透传，§4.3 🔴）。
-> 其余意图（草稿生成 草稿能力委托）按 §11 相同范式扩展，MVP 不展开。
+> - **本文**是 3 类意图（追溯事实 + 根因诊断 + 文档查询）的**实现层**（深）--把详细设计的骨架补全到可落地的 MVP，新增**依赖清单、ACL 只读 REST 契约、AgentScope 路由编排代码、Docker 部署、测试策略**等实现层内容，并对个别委托契约按诊断与草稿落地口径细化（如诊断能力委托超时与 trace 透传，§4.3 🔴）。
+> 其余意图（草稿生成草稿能力委托）按 §11 相同范式扩展，MVP 不展开。
 >
 > **技术栈**：Python（FastAPI + AgentScope 2.0 + Pydantic）。Agent 服务与三大 MES 服务（Java/Spring）跨语言共存，通过 REST 解耦，互不侵入。
 > **底座口径**：与 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §3.2 对齐（`agentscope>=2.0.0`、Python 3.12+）--路由收口用 AgentScope 统一 `Agent`（内置 ReAct）+ `Toolkit`，跨请求会话用 `AgentState` + `SessionService`（Redis-backed，2.0.5 起由 `SessionManager` 改名而来），意图分诊由**单 Agent 的 ReAct + `Toolkit` 工具选择**承担，跨能力委托是**显式服务调用**（只传 `evidence_set_id`/`session_id`/`traceparent`，不传消息历史）--框架并未提供 `Handoffs` / `Routing` 这类原语。框架只决定"怎么实现"，不改变本文的只读、版本与证据约束。
@@ -13,47 +13,47 @@
 
 ## 1. 设计目标与边界
 
-### 1.1 定位（E = AGENT 路线 收口入口收口型）
+### 1.1 定位（E = rag-service 的 Agentic 收口入口）
 
-[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §2.1 明确 **收口入口收口型问答 Agent = RAG 路线 E**。E 是统一入口收口层，不造新能力，全部调 A/B 工具 + 用显式服务调用委托 诊断与草稿 Agent。E 是最后一步，等 A/B + 诊断能力-编排能力成型后收口（[RAG服务引入路线.md](RAG服务引入路线.md) §3）。
+[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §6 明确 **rag-service 的 Agentic 能力就是 Agent 的收口形态**。它是统一入口收口层，不造新能力，全部调文档检索与制造追溯的工具 + 用显式服务调用委托诊断与草稿 Agent。这是最后一步，等文档检索与制造追溯 + 诊断能力-编排能力成型后收口（[RAG服务引入路线.md](RAG服务引入路线.md) §3「Agentic 的正确定位」）。
 
 ### 1.2 目标（4 意图 MVP）
 
-把 A/B 检索 + 诊断收口成统一入口，跑通"NL -> 意图路由 -> 工具/委托 -> 统一答案"闭环。**MVP 范围**：聚焦 3 类高频意图：
+把文档检索、制造追溯与诊断收口成统一入口，跑通"NL -> 意图路由 -> 工具/委托 -> 统一答案"闭环。**MVP 范围**：聚焦 3 类高频意图：
 
 | 意图 | 路由到 | 形态 | MVP 典型问题 |
 |------|--------|------|-------------|
-| **`TRACE_FACT`**（追溯事实） | A 工具 `query_traceability` | 工具直答 | "SN-001 过了哪几站""这批用了哪批锡膏" |
+| **`TRACE_FACT`**（追溯事实） | 制造追溯工具 `query_traceability` | 工具直答 | "SN-001 过了哪几站""这批用了哪批锡膏" |
 | **`ROOT_CAUSE`**（根因诊断） | 诊断能力（显式服务调用委托） | 委托 | "SN-001 焊接不良根因" |
-| **`DOC_LOOKUP`**（文档查询） | B 工具 `search_docs` | 工具直答 | "SPI 报警怎么处置" |
+| **`DOC_LOOKUP`**（文档查询） | 文档检索工具 `search_docs` | 工具直答 | "SPI 报警怎么处置" |
 
-> 其余意图（`DRAFT_REQUEST` 委托 草稿能力、轻量组合）按 §11 相同范式扩展，MVP 不展开。
+> 其余意图（`DRAFT_REQUEST` 委托草稿能力、轻量组合）按 §11 相同范式扩展，MVP 不展开。
 
 ### 1.3 硬边界（一开口就要讲）
 
 | 边界 | 说明 | 落地（MVP 具体动作） |
 |------|------|----------------------|
-| **收口不造新能力** | E 只做路由 + 委托，不重建检索/推理 | E 无向量库/图谱，全部调 A/B + 委托 诊断能力 |
-| **只读（继承 诊断能力）** | E 全程只读，无写工具 | `ReadOnlyToolGate` 启动断言；写工具不注册（§9.4） |
-| **不进过点主事务** | E 不调过点放行/拦截 API | 过点 toolset 不暴露 `pass/judge`（继承 诊断能力 §1.2） |
-| **版本一致性** | 查工艺带版本锚点（`version`+`version_kind`） | A/B 工具强制版本锚点（`version`+`version_kind`）入参，ACL 校验（继承 A/B/诊断能力） |
-| **权限隔离** | 工具调用前按 `tenant_scope` 过滤 | 路由 + 工具调用都带 `TenantContext`（继承 诊断能力 §4.3） |
-| **委托而非重复** | 深度诊断委托诊断能力，E 不多步推理 | E 的步数与工具调用预算只允许轻量组合（最多 1-2 次工具调用），深度场景用显式服务调用委托 诊断能力 |
+| **收口不造新能力** | E 只做路由 + 委托，不重建检索/推理 | E 无向量库/图谱，全部调两项检索能力 + 委托诊断能力 |
+| **只读（继承诊断能力）** | E 全程只读，无写工具 | `ReadOnlyToolGate` 启动断言；写工具不注册（§9.4） |
+| **不进过点主事务** | E 不调过点放行/拦截 API | 过点 toolset 不暴露 `pass/judge`（继承诊断能力 §1.2） |
+| **版本一致性** | 查工艺带版本锚点（`version`+`version_kind`） | 检索工具强制版本锚点（`version`+`version_kind`）入参，ACL 校验（继承文档检索、制造追溯与诊断能力） |
+| **权限隔离** | 工具调用前按 `tenant_scope` 过滤 | 路由 + 工具调用都带 `TenantContext`（继承诊断能力 §4.3） |
+| **委托而非重复** | 深度诊断委托诊断能力，E 不多步推理 | E 的步数与工具调用预算只允许轻量组合（最多 1-2 次工具调用），深度场景用显式服务调用委托诊断能力 |
 | **可观测兜底** | 答案带工具链 + 来源 + 置信度 | `AnswerAudit` 落库 + `/explain` 回溯；低置信度转人工 |
-| **依赖可达性** | E 收口前提：A/B + 诊断能力必须可达 | `assert_dependencies_reachable` 启动断言（§9.4） |
+| **依赖可达性** | E 收口前提：两项检索能力与诊断能力必须可达 | `assert_dependencies_reachable` 启动断言（§9.4） |
 
-### 1.4 与详细设计、A/B、三项能力 的关系
+### 1.4 与详细设计、检索能力、Agent 三项能力的关系
 
 - **与详细设计**：详细设计给全意图收口全景；本文把 4 类高频意图的路由编排、ACL、代码补全到可落地。
-- **与 A/B**：E 封装 A(`query_traceability`)/B(`search_docs`) 为工具调用，不重建检索能力。
+- **与检索能力**：E 封装制造追溯（`query_traceability`）与文档检索（`search_docs`）为工具调用，不重建检索能力。
 - **与诊断能力**：深度诊断用**显式服务调用**委托诊断能力（`httpx` 直调 `/agent/diagnose`，只传 `evidence_set_id`/`session_id`/`traceparent`，不传消息历史），E 不自己多步推理。框架无 `Handoffs` 移交机制，委托就是普通的服务间调用。
 - **与 草稿与编排**：MVP 不含 草稿委托 / 流程编排（§11 扩展）。
 
 ### 1.5 与 Java 技术栈的关系
 
-- E 服务用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只通过 REST 调 A/B RAG 服务 + 诊断能力 Agent 服务的只读接口。
-- 跨语言物理边界天然强制只读（与 诊断能力同构，[FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) §1.3）。
-- E 是纯编排层，复用 A/B + 诊断能力的既有契约，不造新契约。
+- E 服务用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只通过 REST 调 rag-service 的检索接口与 agent-service 诊断能力的只读接口。
+- 跨语言物理边界天然强制只读（与诊断能力同构，[FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) §1.3）。
+- E 是纯编排层，复用检索能力与诊断能力的既有契约，不造新契约。
 
 ---
 
@@ -63,12 +63,12 @@
 
 | 层次 | 选型 | 版本 | 选型理由 |
 |------|------|------|---------|
-| 语言 | Python | 3.12+ | 与 三项能力 同栈，复用 AgentScope + Model 抽象 |
+| 语言 | Python | 3.12+ | 与三项能力同栈，复用 AgentScope + Model 抽象 |
 | Web 框架 | **FastAPI** | 0.110+ | 异步、原生 OpenAPI，统一问答入口 |
-| Agent 底座 | **AgentScope 2.0** | `agentscope>=2.0.0` | 统一 `Agent` 类（内置 ReAct，`reply` / `reply_stream`）+ `Toolkit` 承载路由 -> 工具/委托 -> 收口：分诊由单 Agent 的 ReAct + `Toolkit` 工具选择承担，跨能力委托为显式服务调用（框架无 `Routing`/`Handoffs` 原语）；与 诊断能力同底座 |
-| LLM 抽象 | AgentScope `Model` | 2.0+ | provider 可插拔（DashScope / Ollama / OpenAI 兼容），与 诊断能力一致 |
+| Agent 底座 | **AgentScope 2.0** | `agentscope>=2.0.0` | 统一 `Agent` 类（内置 ReAct，`reply` / `reply_stream`）+ `Toolkit` 承载路由 -> 工具/委托 -> 收口：分诊由单 Agent 的 ReAct + `Toolkit` 工具选择承担，跨能力委托为显式服务调用（框架无 `Routing`/`Handoffs` 原语）；与诊断能力同底座 |
+| LLM 抽象 | AgentScope `Model` | 2.0+ | provider 可插拔（DashScope / Ollama / OpenAI 兼容），与诊断能力一致 |
 | 数据校验 | **Pydantic** | v2 | 意图/工具入参/统一答案 schema 即类型 |
-| HTTP 客户端 | **httpx** | 0.27+（异步） | 调 A/B RAG + 诊断能力 Agent 只读 REST |
+| HTTP 客户端 | **httpx** | 0.27+（异步） | 调 rag-service 检索 + agent-service 诊断只读 REST |
 | 持久化 | **SQLAlchemy 2.0 (async) + asyncmy** | 2.0+ | 路由 trace、答案审计 |
 | 会话状态 | AgentScope `AgentState` + `SessionService`（Redis-backed；2.0.5 起由 `SessionManager` 改名） | 2.0+ | 跨请求会话恢复；与 `redis-py` 共用 Redis 实例 |
 | 缓存 | **redis-py (async)** | 5.0+ | 相同问题短缓存 |
@@ -79,19 +79,19 @@
 ### 2.2 为什么 E 用 AgentScope 轻量编排
 
 - E 的核心是"路由 + 轻量组合"：多数问题单工具即答。用 AgentScope 统一 `Agent`（内置 ReAct）+ `Toolkit` 承载"路由 -> 工具/委托 -> 收口"；分诊由单 Agent 的 ReAct + `Toolkit` 工具选择承担（框架无 `Routing`/`Handoffs` 原语）。2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 模块已删除：固定顺序在应用层用 `await` 串联，并行用 `asyncio.gather` 并发多个**各自独立**的 `Agent.reply()`、结论在应用层显式合并；这类编排代码在本仓库归 `flows/` 目录。
-- 与 诊断能力同底座：可复用 `AgentState` + `SessionService` 的会话恢复与事件系统 / `TracingMiddleware` 的 trace 机制，委托 诊断能力时 `traceparent` 透传（§4.3）。
-- AgentScope 没有"递归步数上限"这类单一参数：E 的"不做深度推理"靠应用层独立计算**工具调用次数、时长与证据预算**（MVP 上限：最多 1-2 次工具调用、整问答 70s）来保证，预算超限即降级转人工；深度场景用显式服务调用委托 诊断能力。
+- 与诊断能力同底座：可复用 `AgentState` + `SessionService` 的会话恢复与事件系统 / `TracingMiddleware` 的 trace 机制，委托诊断能力时 `traceparent` 透传（§4.3）。
+- AgentScope 没有"递归步数上限"这类单一参数：E 的"不做深度推理"靠应用层独立计算**工具调用次数、时长与证据预算**（MVP 上限：最多 1-2 次工具调用、整问答 70s）来保证，预算超限即降级转人工；深度场景用显式服务调用委托诊断能力。
 
 ### 2.3 为什么 E 不重建检索能力
 
-- A/B 已建好检索能力，诊断能力已建好诊断能力。E 重建等于重复造轮子 + 多份事实源。
+- 两项检索能力已建好检索，诊断能力已建好多步诊断。E 重建等于重复造轮子 + 多份事实源。
 - E 的价值在"路由判断"，把问题送到对的能力。委托而非重复：深度诊断委托诊断能力，E 不自己推理。
-- E 也不依赖 AgentScope 的 `rag/` 模块接检索：该模块虽真实，但适配器只有 Qdrant / MilvusLite / Elasticsearch / MongoDB，**无 ChromaDB 适配器**，且 2.0.0 曾被整体删除、2.0.5 才回归。E 只按 A/B 的只读 HTTP 契约接入检索，把"框架 RAG 抽象可能被删"的风险挡在适配层外，需 pin 版本 + 降级预案。
+- E 也不依赖 AgentScope 的 `rag/` 模块接检索：该模块虽真实，但适配器只有 Qdrant / MilvusLite / Elasticsearch / MongoDB，**无 ChromaDB 适配器**，且 2.0.0 曾被整体删除、2.0.5 才回归。E 只按 rag-service 的只读 HTTP 契约接入检索，把"框架 RAG 抽象可能被删"的风险挡在适配层外，需 pin 版本 + 降级预案。
 
 ### 2.4 部署形态
 
 - E 是统一入口，部署在办公网/车间网均可访问的位置。LLM 视安全策略二选一。
-- E 依赖 A/B + 诊断能力可达性：下游故障时降级（§10.3），不硬答。
+- E 依赖 rag-service 与 agent-service 可达性：下游故障时降级（§10.3），不硬答。
 - MVP 用 `docker-compose` 本地起 MySQL + Redis + agent-gateway-service（§9.9）。
 
 ### 2.5 依赖清单（pyproject.toml 片段）
@@ -140,7 +140,7 @@ dependencies = [
 │         ▼                       ▼                       ▼          │
 │  ┌──────────────┐    ┌──────────────────┐    ┌──────────────┐    │
 │  │ IntentRouter │    │ ToolExecutor     │    │  AgentDelegator   │ │
-│  │ NL -> 3 意图  │    │ A/B 工具调用    │    │ 显式调用委托 诊断能力 │ │
+│  │ NL -> 3 意图  │    │ 检索工具调用   │    │ 显式调用委托诊断能力 │ │
 │  └──────────────┘    └────────┬─────────┘    └──────┬───────┘    │
 │                               │                     │            │
 │                       ┌───────▼─────────┐           │            │
@@ -155,7 +155,7 @@ dependencies = [
         ┌─────────────┼───────────────────────────────┼────────┐
         ▼             ▼                 ▼
   ┌──────────┐  ┌──────────┐    ┌──────────┐
-  │ A 追溯RAG │  │ B 文档RAG │    │ 诊断   │
+  │ 制造追溯  │  │ 文档检索  │    │ 诊断   │
   │ /rag/trace│  │ /rag/docs │    │ /agent/   │
   └──────────┘  └──────────┘    │ diagnose  │
                                 └──────────┘
@@ -164,9 +164,9 @@ dependencies = [
 ### 3.1 关键设计决策
 
 - **路由即核心**：`IntentRouter` 规则优先 + LLM 兜底，路由准确率是健康度核心。
-- **工具与委托分离**：`ToolExecutor`（A/B 单步直答）与 `AgentDelegator`（显式服务调用委托 诊断能力）解耦（SRP）。
+- **工具与委托分离**：`ToolExecutor`（检索工具单步直答）与 `AgentDelegator`（显式服务调用委托诊断能力）解耦（SRP）。
 - **统一输出**：所有路径收敛到 `AgentAnswer`。
-- **trace 从 E 发起**：`trace_id` 从 E 生成，透传到 诊断能力/A/B。
+- **trace 从 E 发起**：`trace_id` 从 E 生成，透传到诊断能力与检索工具。
 
 ---
 
@@ -176,9 +176,9 @@ dependencies = [
 
 | 意图 | 路由到 | 形态 |
 |------|--------|------|
-| `TRACE_FACT` | A 工具 `query_traceability` | 工具直答 |
+| `TRACE_FACT` | 制造追溯工具 `query_traceability` | 工具直答 |
 | `ROOT_CAUSE` | 诊断能力（显式服务调用委托） | 委托 |
-| `DOC_LOOKUP` | B 工具 `search_docs` | 工具直答 |
+| `DOC_LOOKUP` | 文档检索工具 `search_docs` | 工具直答 |
 
 > 全意图分类见 [详细设计](./Agentic RAG-详细设计.md) §4.1。
 
@@ -188,9 +188,9 @@ dependencies = [
 IntentRouter.classify(question)
    │
    ├─ 1. 规则优先
-   │     ├─ 含"根因/5M1E/为什么不良" -> ROOT_CAUSE -> 委托 诊断能力
-   │     ├─ 含"怎么处置/SOP/怎么修" -> DOC_LOOKUP -> B 工具
-   │     └─ 含"过了哪几站/用了哪批/位置" -> TRACE_FACT -> A 工具
+   │     ├─ 含"根因/5M1E/为什么不良" -> ROOT_CAUSE -> 委托诊断能力
+   │     ├─ 含"怎么处置/SOP/怎么修" -> DOC_LOOKUP -> 文档检索工具
+   │     └─ 含"过了哪几站/用了哪批/位置" -> TRACE_FACT -> 制造追溯工具
    ├─ 2. LLM 兜底（以 Content Block（Pydantic BaseModel）强制枚举返回）
    └─ 3. 仍不确定 -> UNKNOWN -> 转人工
 ```
@@ -199,7 +199,7 @@ IntentRouter.classify(question)
 
 ### 4.3 诊断能力委托的 trace 透传与超时
 
-> 🔴 **契约待对齐：诊断能力委托的 trace 透传**。MVP 假设 诊断能力的 `/agent/diagnose` 接受 `traceparent` header 并透传到其工具调用（诊断能力 §8.2 已声明 OpenTelemetry 透传 `traceparent` 到下游 Java 服务）。E 委托诊断能力时注入 `traceparent`，使 E -> 诊断能力 -> A/B/各上下文 REST 的 trace 全链路串联。待与 诊断能力实现确认 `traceparent` header 的接收与透传。MVP 兜底：若 诊断能力未透传，E 侧仍记录委托的 span，但 诊断能力内部 trace 断裂（降级可观测）。
+> 🔴 **契约待对齐：诊断能力委托的 trace 透传**。MVP 假设诊断能力的 `/agent/diagnose` 接受 `traceparent` header 并透传到其工具调用（诊断能力 §8.2 已声明 OpenTelemetry 透传 `traceparent` 到下游 Java 服务）。E 委托诊断能力时注入 `traceparent`，使 E -> 诊断能力 -> 检索工具/各上下文 REST 的 trace 全链路串联。待与诊断能力实现确认 `traceparent` header 的接收与透传。MVP 兜底：若诊断能力未透传，E 侧仍记录委托的 span，但诊断能力内部 trace 断裂（降级可观测）。
 >
 > **超时**：诊断能力整会话 ≤60s（[诊断能力](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) §5.1），E 委托超时设 60s（略留余量到 70s 整问答超时）。诊断能力超时返回 `DiagnosisReport.partial`，E 据此转人工。
 
@@ -207,27 +207,27 @@ IntentRouter.classify(question)
 
 ## 5. 工具注册与统一答案
 
-### 5.1 工具注册（MVP A/B 两工具，只读白名单）
+### 5.1 工具注册（MVP 两个检索工具，只读白名单）
 
-| 工具名 | 封装的路线 | 入参 | 版本校验 |
+| 工具名 | 所属能力 | 入参 | 版本校验 |
 |--------|-----------|------|---------|
-| `query_traceability` | A 追溯型 | seed, as_of, version, version_kind | 历史回放带版本锚点 |
-| `search_docs` | B 文档型 | query, version, version_kind | 强制版本锚点过滤 |
+| `query_traceability` | 制造追溯 | seed, as_of, version, version_kind | 历史回放带版本锚点 |
+| `search_docs` | 文档检索 | query, version, version_kind | 强制版本锚点过滤 |
 
 ```python
 class ToolDescriptor(BaseModel):
     name: str
     description: str
-    route: str                        # "A" / "B"
+    route: str                        # "traceability" / "doc_search"
     read_only: bool                   # E 必须 True
     args_schema: type[BaseModel]
     required_tenant_scopes: list[str]
 ```
 
 - 两工具均注册为 AgentScope `Tool` 并挂进同一个 `Toolkit`；外部检索服务也可按需用 MCP 接入。
-- `read_only=False` 启动时拒绝注册（继承 诊断能力 `ReadOnlyToolGate`）。
-- 工具调用前按 `TenantContext` 权限过滤（继承 诊断能力 §4.3）。
-- A/B 工具强制版本锚点（`version`+`version_kind`）入参（继承 A/B/诊断能力版本一致性）。
+- `read_only=False` 启动时拒绝注册（继承诊断能力 `ReadOnlyToolGate`）。
+- 工具调用前按 `TenantContext` 权限过滤（继承诊断能力 §4.3）。
+- 检索工具强制版本锚点（`version`+`version_kind`）入参（继承文档检索、制造追溯与诊断能力的版本一致性）。
 
 ### 5.2 统一答案（AgentAnswer）
 
@@ -235,14 +235,14 @@ class ToolDescriptor(BaseModel):
 class AnswerSource(BaseModel):
     source_type: str          # "trace_record" / "sop_doc" / "diagnosis_hypothesis"
     ref: str                  # "evidence_id=..." / "SOP:WELD-014@v3" / "audit_id=..."
-    route: str                # "A" / "B" / "诊断能力"
+    route: str                # "traceability" / "doc_search" / "diagnosis"
 
 class AgentAnswer(BaseModel):
     question: str
     intent: str               # 命中的 IntentCategory
-    route_taken: str          # "A" / "诊断能力" / "B"
+    route_taken: str          # "traceability" / "diagnosis" / "doc_search"
     summary: str
-    detail: dict              # 路线相关结构化详情
+    detail: dict              # 能力相关结构化详情
     evidence_set_id: str      # 本次证据集标识，供回查证据集（关系型证据子集，非图引用）
     sources: list[AnswerSource]
     confidence: float
@@ -259,7 +259,7 @@ class AgentAnswer(BaseModel):
 
 ### 5.3 红线继承
 
-E 继承 诊断能力全部红线：① 只读闸（`ReadOnlyToolGate`）；② 版本闸（A/B 工具强制版本锚点 `version`+`version_kind`）；③ 权限闸（`TenantContext` 前置过滤）；④ 不进过点主事务闸（过点 toolset 不暴露 `pass/judge`）。
+E 继承诊断能力全部红线：① 只读闸（`ReadOnlyToolGate`）；② 版本闸（检索工具强制版本锚点 `version`+`version_kind`）；③ 权限闸（`TenantContext` 前置过滤）；④ 不进过点主事务闸（过点 toolset 不暴露 `pass/judge`）。
 
 ---
 
@@ -322,17 +322,17 @@ class GatewayService:
 - 编排与路由/执行/委托分离（SRP）；超时或预算超限降级转人工。
 - E 的"轻量组合"不靠框架的递归上限参数，而靠 `budget` 里独立计算的工具调用次数与时长；超限即抛 `BudgetExceededError`。
 
-### 6.2 ACL 防腐层（A/B + 诊断能力只读 REST 契约）
+### 6.2 ACL 防腐层（检索与诊断能力只读 REST 契约）
 
 | 协作方 | 只读 REST | 用途 | 超时 |
 |--------|----------|------|------|
-| A 追溯型 RAG | `POST /rag/trace/expand` | 关系型证据子集展开 | 5s |
-| B 文档型 RAG | `GET /rag/docs/search` | SOP 片段 | 2s |
+| 制造追溯 | `POST /rag/trace/expand` | 关系型证据子集展开 | 5s |
+| 文档检索 | `GET /rag/docs/search` | SOP 片段 | 2s |
 | 诊断能力 | `POST /agent/diagnose` | 深度诊断委托 | 60s（🔴 traceparent 透传 §4.3） |
 
 ```python
 class TraceRagAclClient:
-    """A 追溯型 RAG 只读 ACL。"""
+    """制造追溯只读 ACL。"""
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
     async def query_traceability(
@@ -385,7 +385,7 @@ class DelegationClient:
 
 ### 6.3 版本一致性保证
 
-继承 A/B/诊断能力：A/B 工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验。E 不另搞版本管理。
+继承文档检索、制造追溯与诊断能力：检索工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验。E 不另搞版本管理。
 
 ---
 
@@ -396,7 +396,7 @@ class DelegationClient:
 ```text
 [应用层分诊] 意图分类（已在 GatewayService 调 IntentRouter，intent 随消息透传）
       │
-      ├─ TRACE_FACT/DOC_LOOKUP ──▶ [Toolkit 工具] 调 A/B ──▶ [收口 Agent]
+      ├─ TRACE_FACT/DOC_LOOKUP ──▶ [Toolkit 工具] 调检索工具 ──▶ [收口 Agent]
       ├─ ROOT_CAUSE ──▶ [显式服务调用] 诊断 Agent ──▶ [收口 Agent]
       └─ UNKNOWN ──▶ [收口 Agent] 转人工兜底
 ```
@@ -409,7 +409,7 @@ class DelegationClient:
 
 ```python
 class ToolExecutor:
-    """调 A/B 工具，权限校验 + trace。工具以 AgentScope `Tool` 注册进 `Toolkit`（继承 诊断能力口径）。"""
+    """调检索工具，权限校验 + trace。工具以 AgentScope `Tool` 注册进 `Toolkit`（继承 诊断能力口径）。"""
 
     def __init__(self, registry: ToolRegistry, trace_repo: RouteTraceRepo, metrics: MetricsCollector) -> None:
         self._registry = registry; self._trace_repo = trace_repo; self._metrics = metrics
@@ -475,7 +475,7 @@ class AgentDelegator:
         return state
 ```
 
-- 委托超时/失败降级转人工（继承 诊断能力 §8.3）；`state` 是本服务自定义的编排数据结构，不是框架的图状态对象。
+- 委托超时/失败降级转人工（继承诊断能力 §8.3）；`state` 是本服务自定义的编排数据结构，不是框架的图状态对象。
 
 ---
 
@@ -491,7 +491,7 @@ agent_gateway_service/
       gateway_service.py       # GatewayService（按 flows/ 的串联形状驱动，不含框架 pipeline 原语）
       intent_router.py         # IntentRouter（规则优先 + LLM 兜底）
     flows/                     # 编排形状：顺序 await 串联 + asyncio.gather（2.0.0 起 pipeline/msghub 模块已删除）
-      route_flow.py            # 分诊 -> A/B 工具 / 显式服务调用 -> 收口（§6.1 的三段）
+      route_flow.py            # 分诊 -> 检索工具 / 显式服务调用 -> 收口（§6.1 的三段）
     domain/
       intent.py                # IntentCategory 枚举
       answer.py                # AgentAnswer / AnswerSource
@@ -505,8 +505,8 @@ agent_gateway_service/
       session/
         session_service.py     # AgentState + SessionService（Redis-backed；2.0.5 起由 SessionManager 改名）
       acl/
-        trace_rag.py           # A 追溯型
-        doc_rag.py             # B 文档型
+        trace_rag.py           # 制造追溯
+        doc_rag.py             # 文档检索
         diagnosis_delegation.py       # 诊断能力委托（显式服务调用；🔴 traceparent 透传 §4.3）
       persistence/
         models.py              # answer_audit / route_trace
@@ -524,9 +524,9 @@ agent_gateway_service/
   docker-compose.yml
 ```
 
-- `domain/tool.ReadOnlyToolGate` 启动断言（继承 诊断能力）。
+- `domain/tool.ReadOnlyToolGate` 启动断言（继承诊断能力）。
 - `flows/` 只放应用层编排形状：顺序 `await` 串联、并行 `asyncio.gather` 并发**各自独立**的 `Agent.reply()` 后在应用层显式合并结论（2.0 无 `pipeline`/`msghub` 原语可依赖，也没有共享消息上下文）。
-- `infrastructure/acl/` 防腐层，调 A/B + 诊断能力，外部 DTO 经 Mapper 转内部视图。
+- `infrastructure/acl/` 防腐层，调检索与诊断能力，外部 DTO 经 Mapper 转内部视图。
 
 ---
 
@@ -617,17 +617,17 @@ class RouteAgentFactory:
 class ReadOnlyToolGate(Exception):
     """启动时发现非只读工具，拒绝启动。"""
 class DependencyUnreachableGate(Exception):
-    """启动时发现 A/B + 诊断能力依赖不可达，拒绝启动（E 收口前提）。"""
+    """启动时发现检索与诊断能力依赖不可达，拒绝启动（E 收口前提）。"""
 
 async def assert_dependencies_reachable(clients: dict[str, object]) -> None:
-    """E 是收口入口，下游 A/B + 诊断能力必须可达，否则退化为套壳。"""
+    """E 是收口入口，下游检索与诊断能力必须可达，否则退化为套壳。"""
     unreachable = []
     for name, client in clients.items():
         if not await client.ping():
             unreachable.append(name)
     if unreachable:
         raise DependencyUnreachableGate(
-            f"依赖不可达: {unreachable}（E 收口要求 A/B + 诊断能力成型）"
+            f"依赖不可达: {unreachable}（E 收口要求检索与诊断能力成型）"
         )
 
 @asynccontextmanager
@@ -640,7 +640,7 @@ async def lifespan(app: FastAPI):
     yield
 ```
 
-- `assert_dependencies_reachable` 体现"E 是收口，依赖必须就绪"--E 不该在 A/B + 诊断能力没就绪时启动。
+- `assert_dependencies_reachable` 体现"E 是收口，依赖必须就绪"--E 不该在检索与诊断能力没就绪时启动。
 
 ### 9.5 FastAPI 入口
 
@@ -668,7 +668,7 @@ async def explain(audit_id: str, tenant: TenantContext = Depends(tenant_from_tok
 class Settings(BaseSettings):
     audit_dsn: str = "mysql+asyncmy://root:root@mysql:3306/agent_gateway?charset=utf8mb4"
     redis_url: str = "redis://redis:6379/0"
-    # A/B RAG + 诊断能力 Agent 只读 REST
+    # rag-service 检索 + agent-service 诊断只读 REST
     trace_rag_base_url: str = "http://rag-service:8000"
     doc_rag_base_url: str = "http://doc-rag-service:8000"
     diagnosis_agent_base_url: str = "http://agent-service:8000"
@@ -711,7 +711,7 @@ services:
     ports: ["8004:8000"]
 ```
 
-- MVP 用 `docker-compose` 本地起 MySQL + Redis + agent-gateway-service，验证"统一入口 -> 路由 -> A/B/诊断能力 -> 统一答案"闭环。
+- MVP 用 `docker-compose` 本地起 MySQL + Redis + agent-gateway-service，验证"统一入口 -> 路由 -> 检索/诊断能力 -> 统一答案"闭环。
 
 ---
 
@@ -740,10 +740,10 @@ services:
 ### 10.3 兜底
 
 - **路由失败**：`UNKNOWN` 意图 -> 转人工"该问题暂不支持"。
-- **下游不可达**：A/B/诊断能力故障 -> 降级"该路线暂时不可用"或切换备选路线。
+- **下游不可达**：检索/诊断能力故障 -> 降级"该能力暂时不可用"或切换备选能力。
 - **低置信度**：`confidence < 0.6` -> `needs_human_review=True`。
-- **委托超时**：诊断能力超时 -> 降级"诊断未完成，已转人工"（继承 诊断能力 §8.3）。
-- **预算超限**：轻量组合的工具调用次数/时长/证据量超预算 -> 降级"建议改用 诊断能力深度诊断"或转人工。
+- **委托超时**：诊断能力超时 -> 降级"诊断未完成，已转人工"（继承诊断能力 §8.3）。
+- **预算超限**：轻量组合的工具调用次数/时长/证据量超预算 -> 降级"建议改用诊断能力深度诊断"或转人工。
 
 ---
 
@@ -758,9 +758,9 @@ services:
 
 ### 阶段二：工具与委托（2-3 周）
 
-5. 实现 `ToolExecutor` + `ToolRegistry`（A/B 工具封装为 AgentScope `Tool` 并注册进 `Toolkit`）（§7.2）。
-6. 实现 ACL 客户端（A/B RAG）（§6.2）。
-7. 实现 `AgentDelegator`（显式服务调用委托 诊断能力 + traceparent 透传）（§7.3、§4.3 🔴）。
+5. 实现 `ToolExecutor` + `ToolRegistry`（检索工具封装为 AgentScope `Tool` 并注册进 `Toolkit`）（§7.2）。
+6. 实现 ACL 客户端（rag-service 检索）（§6.2）。
+7. 实现 `AgentDelegator`（显式服务调用委托诊断能力 + traceparent 透传）（§7.3、§4.3 🔴）。
 8. 验证 E -> 诊断能力 -> A/各上下文 REST 的 trace 全链路串联。
 
 ### 阶段三：统一输出与可观测（1-2 周）
@@ -776,60 +776,60 @@ services:
 14. 灰度统一入口试点，收集"路由是否准、答案是否对"反馈。
 15. 确认 🔴 决策点（§4.3 traceparent 透传、§11 草稿与编排 纳入时机、路由规则覆盖）。
 
-> **前提**：E 必须在 A/B + 诊断能力成型后启动（[RAG服务引入路线.md](RAG服务引入路线.md) §3）。E 是收口，不是起步。
+> **前提**：E 必须在两项检索能力与诊断能力成型后启动（[RAG服务引入路线.md](RAG服务引入路线.md) §3）。E 是收口，不是起步。
 
 ---
 
 ## 12. 约束落地检查清单
 
-- [ ] E 无自有检索/推理能力，全部调 A/B + 委托 诊断能力（§1.3 收口不造新能力）。
-- [ ] 所有注册工具 `read_only=True`，`ReadOnlyToolGate` 启动断言生效（继承 诊断能力）。
-- [ ] `assert_dependencies_reachable` 启动断言：A/B + 诊断能力不可达时拒绝启动（E 收口前提）。
+- [ ] E 无自有检索/推理能力，全部调两项检索能力 + 委托诊断能力（§1.3 收口不造新能力）。
+- [ ] 所有注册工具 `read_only=True`，`ReadOnlyToolGate` 启动断言生效（继承诊断能力）。
+- [ ] `assert_dependencies_reachable` 启动断言：检索与诊断能力不可达时拒绝启动（E 收口前提）。
 - [ ] E 不调过点引擎放行/拦截 API，
-- [ ] A/B 工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验（继承 A/B/诊断能力版本一致性）。
-- [ ] 工具调用前按 `TenantContext` 权限过滤，拒绝记录可观测（继承 诊断能力）。
+- [ ] 检索工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验（继承文档检索、制造追溯与诊断能力的版本一致性）。
+- [ ] 工具调用前按 `TenantContext` 权限过滤，拒绝记录可观测（继承诊断能力）。
 - [ ] 深度诊断用显式服务调用委托诊断能力，E 不自己多步推理；应用层预算（工具次数 / 时长 / 证据量）限制轻量组合规模。
 - [ ] 所有路径收敛到 `AgentAnswer` 统一格式，带 `route_taken` + `tool_chain` + `sources`。
-- [ ] `trace_id` 从 E 发起，委托 诊断能力时透传 `traceparent`（🔴 §4.3），全链路可回溯。
+- [ ] `trace_id` 从 E 发起，委托诊断能力时透传 `traceparent`（🔴 §4.3），全链路可回溯。
 - [ ] 路由失败/下游不可达/低置信度/委托超时 -> 转人工兜底，不硬答。
 - [ ] 答案带 `disclaimer`：辅助信息，最终处置需工程师确认。
-- [ ] E 在 A/B + 诊断能力成型后启动，不提前做（避免套壳）。
+- [ ] E 在两项检索能力与诊断能力成型后启动，不提前做（避免套壳）。
 
 ---
 
 ## 13. 面试防守 Q&A
 
 **Q：MVP 选了哪三类意图？为什么？**
-A：选了追溯事实（`TRACE_FACT`->A 工具）、根因诊断（`ROOT_CAUSE`->显式服务调用委托 诊断能力）、文档查询（`DOC_LOOKUP`->B 工具）三类。原因：① 这三类覆盖了 A/B + 诊断能力的核心能力，验证"统一入口 -> 路由 -> 工具/委托 -> 统一答案"完整闭环；② 覆盖了两种路由形态--单步工具直答（A/B）与跨能力显式调用（诊断能力），验证 E 的"广深分工"；③ 这三类是工程师最高频场景。其余意图（草稿委托、轻量组合）按相同范式扩展。
+A：选了追溯事实（`TRACE_FACT`->制造追溯工具）、根因诊断（`ROOT_CAUSE`->显式服务调用委托诊断能力）、文档查询（`DOC_LOOKUP`->文档检索工具）三类。原因：① 这三类覆盖了检索与诊断能力的核心能力，验证"统一入口 -> 路由 -> 工具/委托 -> 统一答案"完整闭环；② 覆盖了两种路由形态--单步工具直答（检索）与跨能力显式调用（诊断能力），验证 E 的"广深分工"；③ 这三类是工程师最高频场景。其余意图（草稿委托、轻量组合）按相同范式扩展。
 
-**Q：E 和 诊断能力怎么分工？是不是重复了？**
-A：不重复，广深分工。E 是"广而浅"的路由收口（意图分类 -> 选工具 / 显式服务调用委托 -> 轻量组合），诊断能力是"深而专"的追溯多步诊断（≤10 步 5M1E 推理）。简单追溯事实（"过了哪几站"）E 调 A 工具直答；深度根因诊断（"为什么不良"）E 显式调用诊断能力。E 的轻量组合只允许 1-2 次工具调用（应用层独立计算次数、时长与证据预算），深度多步委托诊断能力。这 reconcile 了 RAG 路线 §2.5"E 能多步推理"和 AGENT 路线 §2.1"收口入口没有跨上下文多步推理"--E 的"多步"是轻量组合，深度推理委托诊断能力。
+**Q：E 和诊断能力怎么分工？是不是重复了？**
+A：不重复，广深分工。E 是"广而浅"的路由收口（意图分类 -> 选工具 / 显式服务调用委托 -> 轻量组合），诊断能力是"深而专"的追溯多步诊断（≤10 步 5M1E 推理）。简单追溯事实（"过了哪几站"）调制造追溯工具直答；深度根因诊断（"为什么不良"）E 显式调用诊断能力。E 的轻量组合只允许 1-2 次工具调用（应用层独立计算次数、时长与证据预算），深度多步委托诊断能力。这 reconcile 了 RAG 引入路线 §3"Agentic 在预算内完成多步组合"和 AGENT 引入路线 §2.1"诊断能力自己决定下一步查什么"--E 的"多步"是轻量组合，深度推理委托诊断能力。
 
-**Q：E 怎么判断该走哪条路线？**
+**Q：E 怎么判断该走哪项能力？**
 A：意图路由规则优先 + LLM 兜底。高频问题关键词命中直定意图（"根因/5M1E"->诊断能力，"怎么处置/SOP"->B，"过了哪几站"->A），命中不了才走 LLM 结构化输出分类（`IntentCategory` 固化为 Enum）。路由准确率是 E 的核心健康度指标。UNKNOWN 转人工不硬答。
 
-**Q：委托 诊断能力时怎么保证 trace 不断？**
-A：E 委托诊断能力时注入 `traceparent` header，诊断能力接收后透传到其工具调用与下游 Java REST，使 E -> 诊断能力 -> A/各上下文 REST 的 trace 全链路串联（🔴 待与 诊断能力实现确认 `traceparent` 接收与透传，§4.3）。MVP 兜底：若 诊断能力未透传，E 侧仍记录委托 span，但 诊断能力内部 trace 断裂（降级可观测）。`AnswerAudit` 记录 `trace_id`，`/explain` 可回溯。
+**Q：委托诊断能力时怎么保证 trace 不断？**
+A：E 委托诊断能力时注入 `traceparent` header，诊断能力接收后透传到其工具调用与下游 Java REST，使 E -> 诊断能力 -> A/各上下文 REST 的 trace 全链路串联（🔴 待与诊断能力实现确认 `traceparent` 接收与透传，§4.3）。MVP 兜底：若诊断能力未透传，E 侧仍记录委托 span，但诊断能力内部 trace 断裂（降级可观测）。`AnswerAudit` 记录 `trace_id`，`/explain` 可回溯。
 
 **Q：E 路由错了怎么办？**
-A：三重兜底。一是路由准确率作为核心指标监控 + 评测集回归；二是 诊断能力委托有超时（≤60s）和置信度阈值，诊断能力发现问题不属于诊断范畴返回低置信度，E 据此转人工；三是 UNKNOWN 和路由失败都转人工不硬答。`AnswerAudit` 记录每次路由决策，工程师可回溯"为什么走了 诊断能力"，反馈调优规则。
+A：三重兜底。一是路由准确率作为核心指标监控 + 评测集回归；二是诊断能力委托有超时（≤60s）和置信度阈值，诊断能力发现问题不属于诊断范畴返回低置信度，E 据此转人工；三是 UNKNOWN 和路由失败都转人工不硬答。`AnswerAudit` 记录每次路由决策，工程师可回溯"为什么走了诊断能力"，反馈调优规则。
 
 **Q：上线了吗？**
-A：这是设计阶段规划，不是已落地，且 E 是三条路线里最后做的。重点是四条架构判断：① E = 收口入口收口型，不造新能力，全部调 A/B + 显式调用委托诊断能力；② 意图路由规则优先 + LLM 兜底；③ 广深分工--E 轻量组合（应用层工具次数/时长预算），深度委托诊断能力；④ 继承全部只读红线 + 依赖可达性启动断言。E 必须在 A/B + 诊断能力成型后启动，否则退化为套壳。诚实 + 体现架构判断力，比硬吹"已上线 Agentic RAG"得分高。
+A：这是设计阶段规划，不是已落地，且 E 是这几项能力里最后做的。重点是四条架构判断：① E = 统一入口收口层，不造新能力，全部调检索工具 + 显式调用委托诊断能力；② 意图路由规则优先 + LLM 兜底；③ 广深分工--E 轻量组合（应用层工具次数/时长预算），深度委托诊断能力；④ 继承全部只读红线 + 依赖可达性启动断言。E 必须在检索与诊断能力成型后启动，否则退化为套壳。诚实 + 体现架构判断力，比硬吹"已上线 Agentic RAG"得分高。
 
 ---
 
 ## 14. 一句话定位
 
-"Agentic RAG MVP 把 A/B 检索 + 诊断收口成统一入口--3 类意图（追溯事实/根因诊断/文档查询）规则优先 + LLM 兜底路由：单步意图调 A/B 工具直答，深度根因用显式服务调用委托诊断能力（`traceparent` 透传串联 trace）。E 不造新能力，全部调 A/B + 显式调用委托诊断能力；广深分工--E 只做轻量组合（应用层独立计算工具次数、时长与证据预算），跨上下文深度多步委托诊断能力；继承全部只读红线（`ReadOnlyToolGate`/版本/权限/不进过点主事务）+ 依赖可达性启动断言，所有路径收敛到带 `route_taken`+`tool_chain`+`sources` 的统一答案。E 是最后一步，等 A/B + 诊断能力成型后收口。"
+"Agentic RAG MVP 把文档检索、制造追溯与诊断收口成统一入口--3 类意图（追溯事实/根因诊断/文档查询）规则优先 + LLM 兜底路由：单步意图调检索工具直答，深度根因用显式服务调用委托诊断能力（`traceparent` 透传串联 trace）。E 不造新能力，全部调检索工具 + 显式调用委托诊断能力；广深分工--E 只做轻量组合（应用层独立计算工具次数、时长与证据预算），跨上下文深度多步委托诊断能力；继承全部只读红线（`ReadOnlyToolGate`/版本/权限/不进过点主事务）+ 依赖可达性启动断言，所有路径收敛到带 `route_taken`+`tool_chain`+`sources` 的统一答案。E 是最后一步，等检索与诊断能力成型后收口。"
 
 ---
 
-## 15. 与 A/B、三项能力 的契约对齐与待办
+## 15. 与检索能力、Agent 三项能力的契约对齐与待办
 
 | 契约 | 状态 | 待办 |
 |------|------|------|
-| 诊断能力 `/agent/diagnose` 接受并透传 `traceparent` | 🔴 待对齐 | 与 诊断能力实现确认 trace 透传（§4.3） |
+| 诊断能力 `/agent/diagnose` 接受并透传 `traceparent` | 🔴 待对齐 | 与诊断能力实现确认 trace 透传（§4.3） |
 | A `/rag/trace/expand` 契约 | 🔴 待对齐 | 与制造追溯读模型确认 expand 端点入参（seed/as_of/version/version_kind）与返回的 `evidence_set_id` |
 | B `/rag/docs/search` 契约 | 🔴 待对齐 | 与文档型 RAG 确认 search 端点入参 |
 | 草稿委托（`DRAFT_REQUEST`） | ⏳ §11 | 草稿能力就绪后纳入显式服务调用委托 |

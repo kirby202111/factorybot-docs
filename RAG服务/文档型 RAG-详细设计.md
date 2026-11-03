@@ -49,7 +49,7 @@
 
 - RAG 服务用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只订阅 Kafka 只读事件、调只读 REST 查文档绑定关系。
 - 跨语言的物理边界反而是好事：RAG 服务无法共享 Java 事务 / 内存，天然强制只读、不进过点主事务、不旁路应用服务写路径。
-- 复用 [实现说明](../实现说明/) 既有的 Kafka topic、REST 只读接口、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §4.3）、消费侧幂等模式（§6 同事务幂等 + 手动 ack），不造新契约。
+- 复用 [实现说明](../实现说明/) 既有的 Kafka topic、REST 只读接口、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [Outbox设计方案.md](../实现说明/业务事件/Outbox设计方案.md) §3.1 表字段 / §7.6 事件 Header）、消费侧幂等模式（同文 §8.2 手动 ack 与 §8.3 同事务幂等），不造新契约。
 
 ---
 
@@ -388,7 +388,7 @@ DocumentIngestionService
 
 ### 5.5 幂等与去重
 
-事件经各上下文 Transactional Outbox **至少一次**投递（[消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §1），RAG 侧必须幂等消费，否则重复投递会产生重复重索引 / 重复 chunk。
+事件经各上下文 Transactional Outbox **至少一次**投递（[Outbox设计方案.md](../实现说明/业务事件/Outbox设计方案.md) §7.8 可靠性边界），RAG 侧必须幂等消费，否则重复投递会产生重复重索引 / 重复 chunk。
 
 - **重索引幂等**：`event_id + consumer_group` 幂等表（MySQL，与制造追溯读模型的消费幂等同构），重复投递的重索引事件被挡住。chunk 不可变让幂等更容易：同一 `event_id` + `(doc_id, version, chunk_seq)` 去重，可安全重跑。
 - **摄入幂等**：`file_content_hash` 唯一约束--同一文件重复摄入不产生重复 chunk。
@@ -521,7 +521,7 @@ class DocAnswer(BaseModel):
 ### 6.6 与制造追溯、诊断能力 Agent 的协同
 
 - **与制造追溯（关系型读模型）协同**：追溯证据的处置建议可调本文 `search_docs(query, version_anchor)` 补 SOP 片段（一次请求内的典型组合见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §5.3 典型组合，跨能力委托传 `evidence_set_id`）--制造追溯给"哪批锡膏、哪台设备"（事实链，来自固定关联查询），本文给"SPI 报警怎么处置"（处置知识），两者版本过滤都对齐 `ProcessRouteActivated`。
-- **与 诊断能力 Agent 协同**：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（[FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）；诊断能力在 `trace_lookup` 的关系型读模型查询基础上，按需要调本文补充处置知识。
+- **与诊断能力 Agent 协同**：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（[FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）；诊断能力在 `trace_lookup` 的关系型读模型查询基础上，按需要调本文补充处置知识。
 - **不互相替代**：制造追溯答"是什么、为什么"（事实链），本文答"怎么办"（处置知识）。简单处置用本文够了，复杂根因诊断用制造追溯 + 诊断能力。
 
 ---
@@ -606,7 +606,7 @@ class DocAnswer(BaseModel):
 15. 接 ACL 降级查询各上下文只读 REST（查文档绑定关系，§7 实现方案）。
 16. 沉淀评测集（典型 SOP / 手册问答 + 预期引用），回归模型 / 提示词 / 切分变更。
 17. 对接制造追溯（关系型读模型）：追溯证据的处置建议调 `search_docs(query, version_anchor)`，跨能力委托传 `evidence_set_id`。
-18. 对接 诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
+18. 对接诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
 19. 灰度一条产线（设备维修手册 + SOP + 检验标准），收集工程师 / 操作工反馈。
 
 ### 阶段五：扩展（按需）

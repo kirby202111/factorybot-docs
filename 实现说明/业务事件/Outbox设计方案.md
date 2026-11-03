@@ -2,7 +2,7 @@
 
 > **定位**：本文是本 MES 项目 Transactional Outbox 的**权威完整方案**，自包含地覆盖表结构、与 Kafka 的交互、限流与背压、可观测、重放与补偿、运维清理。
 >
-> **与既有文档的关系**：原《[消息处理实现说明](消息处理实现说明.md)》《[MySQL配置说明](MySQL配置说明.md)》《[Kafka配置说明](Kafka配置说明.md)》三篇的内容已整合并入本文，**以本文为准**。三篇旧文顶部已加废弃指引，建议后续归档或删除，避免双份事实源。
+> **与既有文档的关系**：原《业务事件消息处理实现说明》《业务事件 MySQL 配置说明》《业务事件 Kafka 配置说明》三篇的内容已整合并入本文，**本文是唯一事实源**，三篇旧文已从仓库删除。对应位置：整体实现与事务边界见 §2/§5/§10，表结构见 §3，领取与状态 SQL 见 §6.3，应用配置属性见 §6.6，Kafka 交互与 Header 见 §7，消费侧参数、ack 顺序、幂等与 DLT 见 §8，清理归档见 §12。
 >
 > **适用边界**：仅用于**低频业务契约事件**（过点 / 工单 / 维修 / 物料 / 质量 / 工艺版本生效 / 资产生命周期等）。**高频设备原始采集数据不走 Outbox**，走"边缘缓冲 + Kafka 直连"（见 [领域总览](../../领域模型/领域总览.md) §5.3、[设备数据接入上下文](../../领域模型/设备管理服务/事件风暴/设备数据接入上下文.md)）。这条架构级排除是 Outbox 不被写爆的根本前提，详见 §9.1。
 >
@@ -448,6 +448,37 @@ next_retry_at = now + min(max_retry_delay, initial_retry_delay * 2^retry_count) 
 
 - **不可恢复错误**直接进 `DEAD_LETTER`，不重试：序列化失败、topic 不存在、payload schema 非法等（对应 §8.4 消费侧的 `addNotRetryableExceptions` 思路）。
 - 🔴 `max_retry_count=20`、`initial_retry_delay=5s`、`max_retry_delay=30m` 为默认值，按业务 SLA 调整。
+
+### 6.6 应用配置属性
+
+使用 Outbox Publisher 的服务可增加如下应用配置：
+
+```yaml
+app:
+  outbox:
+    publisher:
+      enabled: true
+      instance-id: ${HOSTNAME:${random.uuid}}
+      fixed-delay: 1000
+      batch-size: 100
+      lock-timeout: 5m
+      max-retry-count: 20
+      initial-retry-delay: 5s
+      max-retry-delay: 30m
+      cleanup:
+        enabled: true
+        sent-retention: 7d
+        batch-size: 1000
+```
+
+说明：
+
+| 配置 | 建议 | 说明 |
+|---|---:|---|
+| `fixed-delay` | `1000` | 后台轮询间隔，单位毫秒。 |
+| `batch-size` | `100` | 单轮领取数量，按吞吐和 DB 压力调整。 |
+| `lock-timeout` | `5m` | `PUBLISHING` 超时恢复阈值。 |
+| `sent-retention` | `7d` | `SENT` 数据保留时间。 |
 
 ---
 

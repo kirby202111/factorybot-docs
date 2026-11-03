@@ -2,7 +2,7 @@
 
 > 本文是 MES Agent 服务（`agent-service`）的总纲：**一个 Agent，三项能力**——诊断、草稿编写、流程编排。
 > 面向场景：面试中被问"你这套 Agent 怎么设计 / 为什么不是多个 Agent 分级"时，输出**能力矩阵 + 统一运行时 + 写边界 + 渐进启用**。
-> **与 RAG 的关系**：Agent 是 [RAG服务引入路线.md](../../RAG服务/RAG服务引入路线.md) 路线 E（Agentic RAG 收口）的展开。RAG 解决"问得到"，Agent 解决"做得完"——多步规划、主动触发、可控写回。
+> **与 RAG 的关系**：Agent 是 [RAG服务引入路线.md](../../RAG服务/RAG服务引入路线.md) §3「Agentic 的正确定位」所述 **Agentic 能力**的展开。RAG 解决"问得到"，Agent 解决"做得完"——多步规划、主动触发、可控写回。
 > **口径纪律**：说"规划 / 设计取舍"，不说"已上线 Agent"；不编业务效果数字。MES 对误写零容忍（错发一张返工单可能批量报废），写动作的闸门始终在人手里。
 > **配套**：[诊断能力](FactoryAgent-诊断能力.md)、[草稿编写能力](FactoryAgent-草稿编写能力.md)、[流程编排能力](FactoryAgent-流程编排能力.md)、[统一架构与流程](FactoryAgent-统一架构与流程图.md)、[能力边界与选型决策卡](FactoryAgent-能力边界与选型决策卡.md)、[现场痛点与能力嵌入点](FactoryAgent-现场痛点与能力嵌入点.md)。
 > **底座口径**：Agent 底座为 **AgentScope 2.0**（详见 `../../基于AgentScope2.0的架构设计.md` 与 `../../架构设计v2/00-架构决策记录ADR.md`）。本文所有编排形状都是**应用层 Python 代码**（顺序 `await` + `asyncio.gather`），框架不提供、本文也不写任何 pipeline / 图 DSL 原语。

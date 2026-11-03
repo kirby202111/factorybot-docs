@@ -47,7 +47,7 @@
 
 - RAG 服务用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只订阅 Kafka 只读事件、调只读 REST 查文档绑定关系。
 - 跨语言的物理边界反而是好事：RAG 服务无法共享 Java 事务 / 内存，天然强制只读、不进过点主事务、不旁路应用服务写路径。
-- 复用 [实现说明](../实现说明/) 既有的 Kafka topic、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §4.3）、消费侧幂等模式（§6 同事务幂等 + 手动 ack），不造新契约。
+- 复用 [实现说明](../实现说明/) 既有的 Kafka topic、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [Outbox设计方案.md](../实现说明/业务事件/Outbox设计方案.md) §3.1 表字段 / §7.6 事件 Header）、消费侧幂等模式（同文 §8.2 手动 ack 与 §8.3 同事务幂等），不造新契约。
 
 ---
 
@@ -400,7 +400,7 @@ async def publish_version(self, version_id: str) -> None:
 
 ### 5.4 幂等与去重
 
-事件经各上下文 Transactional Outbox **至少一次**投递（[消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §1），RAG 侧必须幂等消费。
+事件经各上下文 Transactional Outbox **至少一次**投递（[Outbox设计方案.md](../实现说明/业务事件/Outbox设计方案.md) §7.8 可靠性边界），RAG 侧必须幂等消费。
 
 - **重索引幂等**：`event_id + consumer_group` 幂等表（§4.2），重复投递被挡住。
 - **摄入幂等**：`file_content_hash` 唯一约束--同文件重复摄入抛唯一约束冲突，跳过。
@@ -910,7 +910,7 @@ async def ingest(
     return IngestResponse(version_id=version_id)
 ```
 
-- 三个端点：`/query`（检索 + LLM 综合）给工程师问答 / 诊断能力 Agent；`/search`（纯 chunks）给 诊断能力 Agent 与 UI 直接消费引用片段；`/ingest` 给文档摄入。
+- 三个端点：`/query`（检索 + LLM 综合）给工程师问答 / 诊断能力 Agent；`/search`（纯 chunks）给诊断能力 Agent 与 UI 直接消费引用片段；`/ingest` 给文档摄入。
 - 租户上下文从 token 解析，注入检索链路全程。
 
 ### 9.9 配置与部署
@@ -1044,7 +1044,7 @@ volumes:
 17. 接 ACL 降级查询工艺管理只读 REST（§7），强制版本锚点（`version`+`version_kind`）入参。
 18. 沉淀评测集（典型 SOP / 手册 / 检验标准问答 + 预期引用），回归模型 / 提示词 / 切分变更。评测栈**自建**（自研 `EvalRunner` + 断言 / 指标 / judge 三层 + pass^k + CI 门禁，judge 用独立包 `py-openjudge`）--AgentScope 2.0 已删除 `agentscope.evaluate`，不依赖框架评测模块（[基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §8 附录速查表）。
 19. 与制造追溯协同：追溯读模型从目标过点记录解析出当时的版本锚点后，文档检索按同一版本锚点召回对应版本 SOP 片段（同一 rag-service 内的 `document_search` 工具调用，不是跨路线调用；见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §5.3 典型组合）。
-20. 对接 诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
+20. 对接诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
 21. 灰度一条产线（设备维修手册 + SOP + 检验标准），收集工程师 / 操作工反馈。
 
 ### 阶段五：扩展（按需）
