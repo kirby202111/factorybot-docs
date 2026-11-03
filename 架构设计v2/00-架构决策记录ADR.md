@@ -233,7 +233,7 @@
 | 4b | `AGUIProtocolMiddleware`、`ToolOffloadMiddleware`、`Offloader`、`AgentState`、`BackgroundTaskManager`、`SchedulerManager`、`TracingMiddleware`、`Toolkit`、4 个 `Task*` 工具 | ✅ **已核实真实存在**（源码路径见 ADR-01 表）。旧文档这部分没编 |
 | 4c | `SessionManager` | ⚠️ 2.0.5 起**改名 `SessionService`**，按旧名写不可导入 |
 | 4d | "Plan 模块" | ⚠️ 无 `agentscope.plan`；官方"Plan"= 4 个 Task 工具 + `agent.state.tasks_context` |
-| 4e | Handoffs / Routing 承载统一入口路由（Agentic 能力） | ❌ **无此原语**。入口路由必须自建（普通分发函数或 `classifier` + `ModelRouterMiddleware` 做模型路由，都不是 agent 移交） |
+| 4e | Handoffs / Routing 承载统一入口路由（早期把它当第四项能力 E） | ❌ **无此原语**。入口路由必须自建，且归属**独立入口网关** `agent-gateway-service`（普通分发函数 / 规则 + LLM 兜底分类器；`ModelRouterMiddleware` 做的是模型路由，不是能力移交），不归 Agentic RAG |
 | 4f | 智能体评测 + OpenJudge = "框架内生评测栈"，Studio 做研发期观测 | ❌ `agentscope.evaluate` 在 2.0 已删未回归；Studio 已归档；OpenJudge 是独立包 `py-openjudge`，框架内无引用 |
 | 4g | ChromaDB "经 AgentScope RAG 模块接入" | ❌ RAG 模块只有 Qdrant / MilvusLite / Elasticsearch / MongoDB，**无 Chroma 适配器**；且该模块 2.0.0 曾被整体删除、2.0.5 才回归 |
 | 4h | "AgentScope Java 2.0 同构 API，可平滑跨语言扩展" | ⚠️ Java 2.0 真实但独立仓库/独立排期/自有抽象，FAQ 原文"each with its own repository and release schedule"，**非 1:1 同构** |

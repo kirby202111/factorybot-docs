@@ -311,7 +311,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | **草稿能力** | 固定链 + 策略分派 | `Agent` + 策略化 draft agents，产草稿不落库 | `nowrite_policy`，`requires_confirmation` 恒 True |
 | **编排能力** | Pipeline 代码图 | **`flows/` 应用层编排（顺序 `await` + `asyncio.gather` 并发独立 Agent）+ 确定性节点 + 能力节点** | `gated_write_policy` + HITL |
 
-> 统一入口路由（Agentic RAG 收口）归 rag-service 的路由层，不是第四项能力。
+> 统一入口路由归独立的 `agent-gateway-service`（入口网关，负责意图分诊 + 跨能力委托），不是第四项能力；rag-service 的 Agentic 只做检索内编排（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)）。
 
 ### 4.2 能力间数据流
 
@@ -363,7 +363,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | 7 | **执行隔离用 Workspace（Local/Docker/E2B）+ WorkspaceManager** | 受限写/代码执行沙箱化；多租户 agent-level isolation 内生 |
 | 8 | **前端推送用事件系统 + AGUIProtocolMiddleware 替代自研 WS/SSE 编排** | 动作卡实时渲染 + HITL 确认同源，Kafka 仍作离线兜底 |
 | 9 | **评测栈自建：`py-openjudge` 作 judge + 自研 `EvalRunner`/CI 门禁** | ⚠️ `agentscope.evaluate` 2.0 已删且未回归，**不存在内生评测**；Ragas/DeepEval 作为检索指标的可选实现保留 |
-| 10 | **Agentic 能力的"路由"由单 Agent 的 ReAct + `Toolkit` 工具选择承担** | ⚠️ AgentScope 无 Handoffs/Routing 原语；跨能力委托是显式服务调用 + `evidence_set_id` 传递，不是框架移交机制 |
+| 10 | **检索内工具选择由 Agentic RAG 的单 Agent ReAct + `Toolkit` 承担；入口意图分诊归独立网关** | ⚠️ AgentScope 无 Handoffs/Routing 原语；网关分派是确定性 HTTP 调用 + 兜底分类，跨能力委托是显式服务调用 + `evidence_set_id` 传递，不是框架移交机制 |
 | 11 | **消息/内容用 Content Block（Pydantic）+ Msg（usage/时间戳/block id）** | 天然可校验/序列化/计费/溯源，替代零散结构化输出 |
 | 12 | **跨语言仍 Python Agent + Java MES；预留 AgentScope Java 2.0 同构扩展** | 物理边界安全不变；未来跨语言扩展无需换框架心智 |
 | 13 | **安全红线不变、承载升级**（诊断能力只读/草稿能力不持写/编排能力 gated write） | "能不能写"的语义不变；"如何强制"= 网关一次性令牌（主闸）+ Permission/HITL（叠加层），自研断言并入这两层 |
@@ -410,7 +410,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | **第 3 步** | 横切能力替换 | obs->TracingMiddleware、cost->Offloader/`ToolOffloadMiddleware`、longtask->`SessionService`/Permission |
 | **试点** | 编排能力换线编排 | `flows/changeover.py` 顺序 `await` + 网关令牌（主闸）+ Permission gate + 事件系统 HITL，confirmation 做扎实 |
 | **扩展** | 编排能力其余场景 | `asyncio.gather` 并发独立 Agent 承载故障复产；客诉 8D / 工艺变更为顺序调用（跨天部分待工作流引擎） |
-| **收口** | 统一入口 + E Agentic RAG | 单 Agent + `Toolkit` 工具选择承载分诊，跨能力委托为显式调用 + `evidence_set_id` 传递 |
+| **收口** | 独立入口网关 `agent-gateway-service` | 意图分诊用规则 + LLM 兜底分类器（不是 Agent ReAct），跨能力委托为显式调用 + `evidence_set_id` 传递；检索内工具选择归 Agentic RAG（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)） |
 
 > 迁移策略：**端点契约不变**（`/agent/diagnose` 等），每层迁移后用 mes-eval（自研 runner + `py-openjudge`）对齐旧基线，通过评测门禁才切流量，保证平滑替换、可回滚。
 > **两条前置**：① 单 Agent 基线先跑通并测出准确率——基线 >45% 后加 Agent 是负回报（《复核》数据），不要用"上了多 Agent"当作里程碑；② 版本 pin 与 API 漂移检查列入 CI，`agentscope` 2.0.x 已出现过模块删除与改名（`pipeline`/`MsgHub` 删、`SessionManager`→`SessionService`）。

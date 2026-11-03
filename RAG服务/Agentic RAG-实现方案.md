@@ -1,59 +1,61 @@
-# Agentic RAG 实现方案（Python 技术栈：3 意图路由 MVP）
+# Agentic RAG 实现方案（Python 技术栈：检索内多跳编排 MVP）
 
-> 本文是 [RAG服务引入路线.md](RAG服务引入路线.md) §3「Agentic 的正确定位」所述 **Agentic 能力**的**实现层落地**，与 [Agentic RAG-详细设计.md](./Agentic RAG-详细设计.md) 的关系：
-> - **详细设计**是全意图收口的**设计层**（广）--意图路由、工具与跨能力显式委托、统一输出的全景；
-> - **本文**是 3 类意图（追溯事实 + 根因诊断 + 文档查询）的**实现层**（深）--把详细设计的骨架补全到可落地的 MVP，新增**依赖清单、ACL 只读 REST 契约、AgentScope 路由编排代码、Docker 部署、测试策略**等实现层内容，并对个别委托契约按诊断与草稿落地口径细化（如诊断能力委托超时与 trace 透传，§4.3 🔴）。
-> 其余意图（草稿生成草稿能力委托）按 §11 相同范式扩展，MVP 不展开。
+> 本文是 [RAG服务引入路线.md](RAG服务引入路线.md) §3「Agentic 的正确定位」所述 **Agentic 能力**的**实现层落地**，与 [Agentic RAG-详细设计.md](./Agentic%20RAG-详细设计.md) 的关系：
+> - **详细设计**是**设计层**--检索编排、工具注册、统一输出、包结构与约束的全景；
+> - **本文**是**实现层**--把设计补全到可落地的 MVP，包含依赖清单、ACL 只读 REST 契约、AgentScope 编排代码、Docker 部署、测试策略与待办契约。
 >
-> **技术栈**：Python（FastAPI + AgentScope 2.0 + Pydantic）。Agent 服务与三大 MES 服务（Java/Spring）跨语言共存，通过 REST 解耦，互不侵入。
-> **底座口径**：与 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §3.2 对齐（`agentscope>=2.0.0`、Python 3.12+）--路由收口用 AgentScope 统一 `Agent`（内置 ReAct）+ `Toolkit`，跨请求会话用 `AgentState` + `SessionService`（Redis-backed，2.0.5 起由 `SessionManager` 改名而来），意图分诊由**单 Agent 的 ReAct + `Toolkit` 工具选择**承担，跨能力委托是**显式服务调用**（只传 `evidence_set_id`/`session_id`/`traceparent`，不传消息历史）--框架并未提供 `Handoffs` / `Routing` 这类原语。框架只决定"怎么实现"，不改变本文的只读、版本与证据约束。
+> **边界先行**：本文只实现**检索内编排**（文档检索 + 制造追溯），**不实现意图路由**、**不实现跨能力委托**。统一入口与分诊见 [Agent入口网关-意图路由.md](../AGENT服务/Agent入口网关-意图路由.md)。
+>
+> **技术栈**：Python（FastAPI + AgentScope 2.0 + Pydantic）。与三大 MES 服务（Java/Spring）跨语言共存，通过 REST 解耦，互不侵入。
+> **底座口径**：与 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §3.2 对齐（`agentscope>=2.0.0`、Python 3.12+）--统一 `Agent`（内置 ReAct）+ `Toolkit` 承载检索内工具选择；`AgentState` + `SessionService`（Redis-backed，2.0.5 起由 `SessionManager` 改名而来）承载跨请求会话。框架并未提供 `Handoffs` / `Routing` 这类原语，本文也不需要它们。
 > **口径纪律**：Agentic RAG 在本项目中是**设计阶段的引入规划**，不是线上已落地能力。讲法遵循 [项目亮点与指标卡片.md](../面试指南/项目亮点与指标卡片.md) §0 的口径纪律--说"规划方向 / 设计取舍"，不说"我们已经做了 Agentic RAG"。
 
 ---
 
 ## 1. 设计目标与边界
 
-### 1.1 定位（E = rag-service 的 Agentic 收口入口）
+### 1.1 定位（rag-service 的检索内编排）
 
-[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §6 明确 **rag-service 的 Agentic 能力就是 Agent 的收口形态**。它是统一入口收口层，不造新能力，全部调文档检索与制造追溯的工具 + 用显式服务调用委托诊断与草稿 Agent。这是最后一步，等文档检索与制造追溯 + 诊断能力-编排能力成型后收口（[RAG服务引入路线.md](RAG服务引入路线.md) §3「Agentic 的正确定位」）。
+Agentic RAG 不是入口层，不判断"该找检索还是诊断/草稿"；它只解决一次检索请求内部的编排：**证据够不够、还要不要追加一次查询、追加查哪个上下文、什么时候停**。入口分诊与跨能力委托在网关（[Agent入口网关-意图路由.md](../AGENT服务/Agent入口网关-意图路由.md)）。
 
-### 1.2 目标（4 意图 MVP）
+### 1.2 MVP 范围
 
-把文档检索、制造追溯与诊断收口成统一入口，跑通"NL -> 意图路由 -> 工具/委托 -> 统一答案"闭环。**MVP 范围**：聚焦 3 类高频意图：
+跑通"检索请求 -> 起点判定 -> 单跳/多跳 -> 证据收口 -> `RagAnswer`"闭环，聚焦三种形态：
 
-| 意图 | 路由到 | 形态 | MVP 典型问题 |
-|------|--------|------|-------------|
-| **`TRACE_FACT`**（追溯事实） | 制造追溯工具 `query_traceability` | 工具直答 | "SN-001 过了哪几站""这批用了哪批锡膏" |
-| **`ROOT_CAUSE`**（根因诊断） | 诊断能力（显式服务调用委托） | 委托 | "SN-001 焊接不良根因" |
-| **`DOC_LOOKUP`**（文档查询） | 文档检索工具 `search_docs` | 工具直答 | "SPI 报警怎么处置" |
+| 形态 | 触发条件 | MVP 典型问题 |
+|------|---------|-------------|
+| **单跳追溯** | 有种子（SN/批次/工单），只问事实链 | "SN-001 过了哪几站""这批用了哪批锡膏" |
+| **单跳文档** | 纯知识类问题，无制造对象 | "SPI 报警怎么处置""首件检验流程" |
+| **多跳组合** | 需要"事实 + 当时版本 + 处置依据" | "这个批次当时用哪版工艺，对应处置要求是什么" |
 
-> 其余意图（`DRAFT_REQUEST` 委托草稿能力、轻量组合）按 §11 相同范式扩展，MVP 不展开。
+> 三种形态都只调两个只读工具；MVP 不接第三个数据源，也不做跨能力调用。
 
 ### 1.3 硬边界（一开口就要讲）
 
 | 边界 | 说明 | 落地（MVP 具体动作） |
 |------|------|----------------------|
-| **收口不造新能力** | E 只做路由 + 委托，不重建检索/推理 | E 无向量库/图谱，全部调两项检索能力 + 委托诊断能力 |
-| **只读（继承诊断能力）** | E 全程只读，无写工具 | `ReadOnlyToolGate` 启动断言；写工具不注册（§9.4） |
-| **不进过点主事务** | E 不调过点放行/拦截 API | 过点 toolset 不暴露 `pass/judge`（继承诊断能力 §1.2） |
-| **版本一致性** | 查工艺带版本锚点（`version`+`version_kind`） | 检索工具强制版本锚点（`version`+`version_kind`）入参，ACL 校验（继承文档检索、制造追溯与诊断能力） |
-| **权限隔离** | 工具调用前按 `tenant_scope` 过滤 | 路由 + 工具调用都带 `TenantContext`（继承诊断能力 §4.3） |
-| **委托而非重复** | 深度诊断委托诊断能力，E 不多步推理 | E 的步数与工具调用预算只允许轻量组合（最多 1-2 次工具调用），深度场景用显式服务调用委托诊断能力 |
-| **可观测兜底** | 答案带工具链 + 来源 + 置信度 | `AnswerAudit` 落库 + `/explain` 回溯；低置信度转人工 |
-| **依赖可达性** | E 收口前提：两项检索能力与诊断能力必须可达 | `assert_dependencies_reachable` 启动断言（§9.4） |
+| **不做意图分诊** | 不判断"该找检索还是诊断/草稿" | 无分类器、无 `IntentCategory`；入口分派在网关 |
+| **不做跨能力委托** | 不调诊断/草稿/编排 | ACL 只有制造追溯与文档检索两个客户端 |
+| **只读** | 无写工具 | `ReadOnlyToolGate` 启动断言；写工具不注册（§9.4） |
+| **不进过点主事务** | 不调过点放行/拦截 API | 过点 toolset 不暴露 `pass/judge` |
+| **版本一致性** | 查工艺带 `version`+`version_kind` | 检索工具强制版本锚点入参，ACL 校验 |
+| **权限隔离** | 工具调用前按 `tenant_scope` 过滤 | `TenantContext` 前置过滤 |
+| **查询有界** | 不允许无限展开 | 工具次数 ≤2、证据条数 ≤20、检索时长 ≤15s |
+| **证据约束** | 制造事实来自记录，处置建议来自适用文档 | `sources` 强制引用；缺证据显式标注 |
+| **依赖可达性** | 编排前提：两个检索能力必须可达 | `assert_dependencies_reachable` 启动断言（§9.4） |
 
-### 1.4 与详细设计、检索能力、Agent 三项能力的关系
+### 1.4 与其他文档、检索能力的关系
 
-- **与详细设计**：详细设计给全意图收口全景；本文把 4 类高频意图的路由编排、ACL、代码补全到可落地。
-- **与检索能力**：E 封装制造追溯（`query_traceability`）与文档检索（`search_docs`）为工具调用，不重建检索能力。
-- **与诊断能力**：深度诊断用**显式服务调用**委托诊断能力（`httpx` 直调 `/agent/diagnose`，只传 `evidence_set_id`/`session_id`/`traceparent`，不传消息历史），E 不自己多步推理。框架无 `Handoffs` 移交机制，委托就是普通的服务间调用。
-- **与 草稿与编排**：MVP 不含 草稿委托 / 流程编排（§11 扩展）。
+- **与详细设计**：详细设计给全景（起点判定、停止条件、工具注册、统一输出）；本文补全依赖、ACL、代码、部署与测试。
+- **与入口网关**：网关把 `RETRIEVAL_REQUEST` 转成 `RetrievalRequest`（问题 + 种子 + 版本锚点 + `session_id`）调本文；本文回 `RagAnswer`，由网关转成统一答案。**不传消息历史**。
+- **与制造追溯 / 文档检索**：封装为两个只读工具，不重建检索能力。
+- **与诊断 / 草稿 / 编排**：MVP 不接触；需要这些能力的问题由网关分派，不进本文。
 
 ### 1.5 与 Java 技术栈的关系
 
-- E 服务用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只通过 REST 调 rag-service 的检索接口与 agent-service 诊断能力的只读接口。
+- 本文模块用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只通过 REST 调制造追溯与文档检索的只读接口。
 - 跨语言物理边界天然强制只读（与诊断能力同构，[FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) §1.3）。
-- E 是纯编排层，复用检索能力与诊断能力的既有契约，不造新契约。
+- 复用两项检索能力的既有契约，不造新契约。
 
 ---
 
@@ -63,42 +65,46 @@
 
 | 层次 | 选型 | 版本 | 选型理由 |
 |------|------|------|---------|
-| 语言 | Python | 3.12+ | 与三项能力同栈，复用 AgentScope + Model 抽象 |
-| Web 框架 | **FastAPI** | 0.110+ | 异步、原生 OpenAPI，统一问答入口 |
-| Agent 底座 | **AgentScope 2.0** | `agentscope>=2.0.0` | 统一 `Agent` 类（内置 ReAct，`reply` / `reply_stream`）+ `Toolkit` 承载路由 -> 工具/委托 -> 收口：分诊由单 Agent 的 ReAct + `Toolkit` 工具选择承担，跨能力委托为显式服务调用（框架无 `Routing`/`Handoffs` 原语）；与诊断能力同底座 |
-| LLM 抽象 | AgentScope `Model` | 2.0+ | provider 可插拔（DashScope / Ollama / OpenAI 兼容），与诊断能力一致 |
-| 数据校验 | **Pydantic** | v2 | 意图/工具入参/统一答案 schema 即类型 |
-| HTTP 客户端 | **httpx** | 0.27+（异步） | 调 rag-service 检索 + agent-service 诊断只读 REST |
-| 持久化 | **SQLAlchemy 2.0 (async) + asyncmy** | 2.0+ | 路由 trace、答案审计 |
-| 会话状态 | AgentScope `AgentState` + `SessionService`（Redis-backed；2.0.5 起由 `SessionManager` 改名） | 2.0+ | 跨请求会话恢复；与 `redis-py` 共用 Redis 实例 |
-| 缓存 | **redis-py (async)** | 5.0+ | 相同问题短缓存 |
-| 可观测 | **OpenTelemetry Python** + `prometheus-client` | - | trace 从 E 发起串联 |
+| 语言 | Python | 3.12+ | 与 agent-service 同栈，复用 AgentScope + Model 抽象 |
+| Web 框架 | **FastAPI** | 0.110+ | 异步、原生 OpenAPI |
+| Agent 底座 | **AgentScope 2.0** | `agentscope>=2.0.0` | 统一 `Agent` 类（内置 ReAct）+ `Toolkit` 承载检索内工具选择；2.0 无 `Routing`/`Handoffs`，本文也不需要 |
+| LLM 抽象 | AgentScope `Model` | 2.0+ | provider 可插拔（DashScope / Ollama / OpenAI 兼容） |
+| 数据校验 | **Pydantic** | v2 | 工具入参 / `RagAnswer` / 状态 schema 即类型 |
+| HTTP 客户端 | **httpx** | 0.27+（异步） | 调制造追溯与文档检索只读 REST |
+| 持久化 | **SQLAlchemy 2.0 (async) + asyncmy** | 2.0+ | 检索 trace、答案审计 |
+| 会话状态 | AgentScope `AgentState` + `SessionService`（Redis-backed；2.0.5 起由 `SessionManager` 改名） | 2.0+ | 多跳过程与跨请求续跑 |
+| 缓存 | **redis-py (async)** | 5.0+ | 相同检索请求短缓存 |
+| 可观测 | **OpenTelemetry Python** + `prometheus-client` | - | trace 从检索入口发起 |
 | 配置 | pydantic-settings | 2.0+ | 环境变量统一管理 |
-| 部署 | 独立微服务 `agent-gateway-service`（uvicorn + gunicorn worker） | - | K8s 部署；MVP 可 docker-compose 本地起 |
+| 部署 | rag-service 内 `agentic` 模块（可独立进程 `agentic-rag-service`） | - | 归属 rag-service 能力边界，不对外承担统一入口 |
 
-### 2.2 为什么 E 用 AgentScope 轻量编排
+### 2.2 为什么用 AgentScope 轻量编排
 
-- E 的核心是"路由 + 轻量组合"：多数问题单工具即答。用 AgentScope 统一 `Agent`（内置 ReAct）+ `Toolkit` 承载"路由 -> 工具/委托 -> 收口"；分诊由单 Agent 的 ReAct + `Toolkit` 工具选择承担（框架无 `Routing`/`Handoffs` 原语）。2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 模块已删除：固定顺序在应用层用 `await` 串联，并行用 `asyncio.gather` 并发多个**各自独立**的 `Agent.reply()`、结论在应用层显式合并；这类编排代码在本仓库归 `flows/` 目录。
-- 与诊断能力同底座：可复用 `AgentState` + `SessionService` 的会话恢复与事件系统 / `TracingMiddleware` 的 trace 机制，委托诊断能力时 `traceparent` 透传（§4.3）。
-- AgentScope 没有"递归步数上限"这类单一参数：E 的"不做深度推理"靠应用层独立计算**工具调用次数、时长与证据预算**（MVP 上限：最多 1-2 次工具调用、整问答 70s）来保证，预算超限即降级转人工；深度场景用显式服务调用委托诊断能力。
+- 固定查询计划覆盖不了现场：先追溯拿到工艺版本，才知道该查哪版 SOP。需要模型在**极小工具面**内选下一步。
+- 但动作空间被硬限制：`Toolkit` 只有两个只读工具，预算 ≤2 次；模型不能自由探索任意关系。
+- 2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 已删除：顺序组合用 `await` 串联，并行用 `asyncio.gather` 并发独立 `Agent.reply()` 后在应用层合并；编排代码归 `flows/`。
+- 与诊断能力同底座：可复用 `AgentState` + `SessionService` 与 `TracingMiddleware`，但**不复用其工具集**。
 
-### 2.3 为什么 E 不重建检索能力
+### 2.3 为什么不做意图分诊与委托
 
-- 两项检索能力已建好检索，诊断能力已建好多步诊断。E 重建等于重复造轮子 + 多份事实源。
-- E 的价值在"路由判断"，把问题送到对的能力。委托而非重复：深度诊断委托诊断能力，E 不自己推理。
-- E 也不依赖 AgentScope 的 `rag/` 模块接检索：该模块虽真实，但适配器只有 Qdrant / MilvusLite / Elasticsearch / MongoDB，**无 ChromaDB 适配器**，且 2.0.0 曾被整体删除、2.0.5 才回归。E 只按 rag-service 的只读 HTTP 契约接入检索，把"框架 RAG 抽象可能被删"的风险挡在适配层外，需 pin 版本 + 降级预案。
+- **定位**：Agentic RAG 只决定"检索内还查不查"；判断"该找哪项能力"是跨能力职责（[RAG服务引入路线.md](RAG服务引入路线.md) §3）。
+- **依赖方向**：若本文委托诊断，rag-service 会反向依赖 agent-service；网关又依赖 rag-service，形成环。放在网关，依赖保持单向。
+- **变化频率**：入口分诊随渠道/话术/权限策略变化；检索编排随数据模型/证据契约变化，不应绑在一起。
+- **结构保证**：`infrastructure/acl/` 只有两个检索客户端，物理上不存在诊断/草稿调用路径。
 
 ### 2.4 部署形态
 
-- E 是统一入口，部署在办公网/车间网均可访问的位置。LLM 视安全策略二选一。
-- E 依赖 rag-service 与 agent-service 可达性：下游故障时降级（§10.3），不硬答。
-- MVP 用 `docker-compose` 本地起 MySQL + Redis + agent-gateway-service（§9.9）。
+- 作为 rag-service 的 `agentic` 模块部署（可独立进程/独立扩缩容），只暴露 `/rag/agentic/query` 与 `/rag/explain/{audit_id}`。
+- 不提供 `/agent/chat`；统一问答入口在网关。
+- LLM 视安全策略二选一（云端 API 或本地模型）。
+- 依赖制造追溯与文档检索可达；不可达时启动断言失败。
+- MVP 用 `docker-compose` 本地起 MySQL + Redis + agentic-rag-service（§9.6）。
 
 ### 2.5 依赖清单（pyproject.toml 片段）
 
 ```toml
 [project]
-name = "agent-gateway-service"
+name = "agentic-rag-service"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
@@ -124,94 +130,109 @@ dependencies = [
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
-│ agent-gateway-service（统一入口，Python + FastAPI + AgentScope）   │
+│ agentic-rag-service（rag-service 的检索编排模块）                  │
 │                                                                    │
-│  ┌──────────────┐  ┌──────────────────────────────────────────┐  │
-│  │ FastAPI      │─▶│ GatewayService                            │  │
-│  │ /agent/chat  │  │  构建路由 Agent + 驱动                    │  │
-│  └──────────────┘  └────────────┬─────────────────────────────┘  │
-│                                 │                                  │
-│                      ┌──────────▼──────────┐                       │
-│                      │ AgentScope 路由编排  │                       │
-│                      │ router->tool/delegate│                       │
-│                      └──────────┬──────────┘                       │
-│                                 │                                  │
-│         ┌───────────────────────┼───────────────────────┐          │
-│         ▼                       ▼                       ▼          │
-│  ┌──────────────┐    ┌──────────────────┐    ┌──────────────┐    │
-│  │ IntentRouter │    │ ToolExecutor     │    │  AgentDelegator   │ │
-│  │ NL -> 3 意图  │    │ 检索工具调用   │    │ 显式调用委托诊断能力 │ │
-│  └──────────────┘    └────────┬─────────┘    └──────┬───────┘    │
-│                               │                     │            │
-│                       ┌───────▼─────────┐           │            │
-│                       │ ToolRegistry    │           │            │
-│                       │ (只读白名单)     │           │            │
-│                       └─────────────────┘           │            │
-│  ┌──────────────────┐  ┌──────────────────┐         │            │
-│  │ AnswerAudit(MySQL)│ │ QueryCache(Redis)│         │            │
-│  └──────────────────┘  └──────────────────┘         │            │
-└─────────────────────────────────────────────────────┼────────────┘
-                      │ httpx 只读 REST               │
-        ┌─────────────┼───────────────────────────────┼────────┐
-        ▼             ▼                 ▼
-  ┌──────────┐  ┌──────────┐    ┌──────────┐
-  │ 制造追溯  │  │ 文档检索  │    │ 诊断   │
-  │ /rag/trace│  │ /rag/docs │    │ /agent/   │
-  └──────────┘  └──────────┘    │ diagnose  │
-                                └──────────┘
+│  ┌──────────────────┐  ┌────────────────────────────────────────┐ │
+│  │ FastAPI          │─▶│ AgenticRagService                      │ │
+│  │ /rag/agentic/query│  │  起点判定 -> 单跳/多跳 -> 证据收口      │ │
+│  └──────────────────┘  └───────────────┬────────────────────────┘ │
+│                                        │                          │
+│                      ┌─────────────────▼──────────────────┐       │
+│                      │ flows/retrieval_flow.py            │       │
+│                      │ 单跳直调 / Agent ReAct 追加检索     │       │
+│                      └─────────────────┬──────────────────┘       │
+│                                        │                          │
+│                 ┌──────────────────────┴───────────────┐          │
+│                 ▼                                      ▼          │
+│        ┌──────────────────┐                   ┌──────────────────┐ │
+│        │ ToolExecutor     │                   │ RetrievalPlanner │ │
+│        │ 权限/版本/trace  │                   │ 起点 + 停止条件   │ │
+│        └────────┬─────────┘                   └──────────────────┘ │
+│         ┌───────▼─────────┐                                        │
+│         │ ToolRegistry    │ (只读白名单: query_traceability / search_docs)
+│         └─────────────────┘                                        │
+│  ┌──────────────────┐  ┌──────────────────┐                        │
+│  │ AnswerAudit(MySQL)│ │ QueryCache(Redis)│                        │
+│  └──────────────────┘  └──────────────────┘                        │
+└───────────────────────────────────────┬────────────────────────────┘
+                    │ httpx 只读 REST
+        ┌───────────┴───────────┐
+        ▼                       ▼
+  ┌──────────────┐        ┌──────────────┐
+  │ 制造追溯      │        │ 文档检索      │
+  │ /rag/trace/  │        │ /rag/docs/   │
+  │ expand       │        │ search       │
+  └──────────────┘        └──────────────┘
 ```
 
 ### 3.1 关键设计决策
 
-- **路由即核心**：`IntentRouter` 规则优先 + LLM 兜底，路由准确率是健康度核心。
-- **工具与委托分离**：`ToolExecutor`（检索工具单步直答）与 `AgentDelegator`（显式服务调用委托诊断能力）解耦（SRP）。
-- **统一输出**：所有路径收敛到 `AgentAnswer`。
-- **trace 从 E 发起**：`trace_id` 从 E 生成，透传到诊断能力与检索工具。
+- **编排即工具选择**：无意图分类；只回答"还查不查、查哪个"。
+- **单跳优先**：能一次调用答的不进 ReAct，省成本也省延迟。
+- **预算硬约束**：工具次数/时长/证据量由应用层独立计算，超限即停。
+- **统一输出**：单跳与多跳都收敛到 `RagAnswer`。
+- **trace 从检索入口发起**：`trace_id` 在本模块生成，透传到两个检索工具。
 
 ---
 
-## 4. 意图路由与 Agent 委托（显式服务调用）
+## 4. 检索编排（起点、多跳、停止）
 
-### 4.1 意图分类（MVP 3 类）
-
-| 意图 | 路由到 | 形态 |
-|------|--------|------|
-| `TRACE_FACT` | 制造追溯工具 `query_traceability` | 工具直答 |
-| `ROOT_CAUSE` | 诊断能力（显式服务调用委托） | 委托 |
-| `DOC_LOOKUP` | 文档检索工具 `search_docs` | 工具直答 |
-
-> 全意图分类见 [详细设计](./Agentic RAG-详细设计.md) §4.1。
-
-### 4.2 路由规则（规则优先 + LLM 兜底）
+### 4.1 起点判定（单跳 vs 多跳）
 
 ```text
-IntentRouter.classify(question)
-   │
-   ├─ 1. 规则优先
-   │     ├─ 含"根因/5M1E/为什么不良" -> ROOT_CAUSE -> 委托诊断能力
-   │     ├─ 含"怎么处置/SOP/怎么修" -> DOC_LOOKUP -> 文档检索工具
-   │     └─ 含"过了哪几站/用了哪批/位置" -> TRACE_FACT -> 制造追溯工具
-   ├─ 2. LLM 兜底（以 Content Block（Pydantic BaseModel）强制枚举返回）
-   └─ 3. 仍不确定 -> UNKNOWN -> 转人工
+plan_start(request)
+   ├─ 有种子 且 无文档类词(处置/SOP/流程/标准/怎么修) -> 单跳 query_traceability
+   ├─ 无种子 且 无追溯类词(过点/物料/批次/设备/人员/工单) -> 单跳 search_docs
+   ├─ 种子缺失但问题指向制造对象 -> 先检索线索，再决定是否追溯（多跳）
+   └─ 其余 -> 多跳：Agent 在 Toolkit 内选择（≤2 次调用）
 ```
 
-- 规则优先降低对模型依赖；LLM 兜底强约束 Enum；UNKNOWN 转人工不硬答。
+- 这是**检索起点启发式**，不是意图分类：判错只影响多查/少查一次，不改变能力边界。
+- 单跳路径不调 LLM（工具参数由请求字段直接给出）；只有多跳进入 ReAct。
 
-### 4.3 诊断能力委托的 trace 透传与超时
+### 4.2 多跳工具选择
 
-> 🔴 **契约待对齐：诊断能力委托的 trace 透传**。MVP 假设诊断能力的 `/agent/diagnose` 接受 `traceparent` header 并透传到其工具调用（诊断能力 §8.2 已声明 OpenTelemetry 透传 `traceparent` 到下游 Java 服务）。E 委托诊断能力时注入 `traceparent`，使 E -> 诊断能力 -> 检索工具/各上下文 REST 的 trace 全链路串联。待与诊断能力实现确认 `traceparent` header 的接收与透传。MVP 兜底：若诊断能力未透传，E 侧仍记录委托的 span，但诊断能力内部 trace 断裂（降级可观测）。
->
-> **超时**：诊断能力整会话 ≤60s（[诊断能力](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) §5.1），E 委托超时设 60s（略留余量到 70s 整问答超时）。诊断能力超时返回 `DiagnosisReport.partial`，E 据此转人工。
+```text
+Agent.reply(question + 已解析的 seed/version 锚点)
+   ├─ query_traceability -> 过点/物料/设备/人员/工艺版本
+   ├─ search_docs        -> 按已解析版本召回 SOP/检验标准/历史 8D
+   └─ 观察 -> 证据是否足够？足够停止；不足追加一次（受预算约束）
+```
+
+- 工具面极小：只有两个只读工具，不允许任意 SQL 或无界关联。
+- 版本先解析后检索：先拿 `version`+`version_kind`，再查对应版本文档。
+- 并行只用于互不依赖的补充查询：`asyncio.gather` 并发独立调用，结论在应用层合并。
+
+### 4.3 停止条件
+
+1. **证据充分**：所需槽位齐（事实链、版本锚点、处置依据）。
+2. **无新增证据**：一次调用没有带来新证据。
+3. **预算耗尽**：工具次数 / 时长 / 证据条数到上限。
+4. **冲突**：版本冲突、权限拒绝、租户范围不匹配。
+
+停止时证据不完整：`needs_human_review=True`，`detail["missing"]` 说明缺口，不编造。
+
+### 4.4 预算
+
+| 预算项 | MVP 默认 | 说明 |
+|--------|---------|------|
+| 工具调用次数 | ≤2 | 单跳 1 次，多跳最多再追加 1 次 |
+| 证据条数 | ≤20 | 超出截断并标注 |
+| 单次检索请求时长 | ≤15s（🔴 待压测标定） | 超时返回已得证据 + 转人工提示 |
+
+预算由应用层 `BudgetPolicy` 独立计算；超限抛 `BudgetExceededError`（非框架异常）。
+
+> **口径对齐**：[RAG服务引入路线.md](RAG服务引入路线.md) §3 给的上限是「默认最多 6 个编排步骤」，并列出 4 个只读工具。本文 MVP 按「单跳优先」收紧到 **2 次工具调用 + 2 个工具**，差异是刻意的：路线给的是能力上限，MVP 给的是首版灰度预算，压测标定后可放开（受同一 `BudgetPolicy` 约束，不改代码结构）。
 
 ---
 
 ## 5. 工具注册与统一答案
 
-### 5.1 工具注册（MVP 两个检索工具，只读白名单）
+### 5.1 工具注册（两个只读工具）
 
 | 工具名 | 所属能力 | 入参 | 版本校验 |
 |--------|-----------|------|---------|
-| `query_traceability` | 制造追溯 | seed, as_of, version, version_kind | 历史回放带版本锚点 |
+| `query_traceability` | 制造追溯 | sn/batch_no/wo_id, as_of, version, version_kind | 历史回放带版本锚点 |
 | `search_docs` | 文档检索 | query, version, version_kind | 强制版本锚点过滤 |
 
 ```python
@@ -219,116 +240,115 @@ class ToolDescriptor(BaseModel):
     name: str
     description: str
     route: str                        # "traceability" / "doc_search"
-    read_only: bool                   # E 必须 True
+    read_only: bool                   # 必须 True
     args_schema: type[BaseModel]
     required_tenant_scopes: list[str]
 ```
 
 - 两工具均注册为 AgentScope `Tool` 并挂进同一个 `Toolkit`；外部检索服务也可按需用 MCP 接入。
 - `read_only=False` 启动时拒绝注册（继承诊断能力 `ReadOnlyToolGate`）。
-- 工具调用前按 `TenantContext` 权限过滤（继承诊断能力 §4.3）。
-- 检索工具强制版本锚点（`version`+`version_kind`）入参（继承文档检索、制造追溯与诊断能力的版本一致性）。
+- 工具调用前按 `TenantContext` 权限过滤。
+- 检索工具强制版本锚点（`version`+`version_kind`）入参。
 
-### 5.2 统一答案（AgentAnswer）
+### 5.2 统一答案（RagAnswer）
 
 ```python
 class AnswerSource(BaseModel):
-    source_type: str          # "trace_record" / "sop_doc" / "diagnosis_hypothesis"
-    ref: str                  # "evidence_id=..." / "SOP:WELD-014@v3" / "audit_id=..."
-    route: str                # "traceability" / "doc_search" / "diagnosis"
+    source_type: str          # "trace_record" / "sop_doc"
+    ref: str                  # "evidence_id=..." / "SOP:WELD-014@v3"
+    route: str                # "traceability" / "doc_search"
 
-class AgentAnswer(BaseModel):
+class RagAnswer(BaseModel):
     question: str
-    intent: str               # 命中的 IntentCategory
-    route_taken: str          # "traceability" / "diagnosis" / "doc_search"
+    retrieval_path: str          # "traceability" / "doc_search" / "doc_search+traceability" / "NONE"
     summary: str
-    detail: dict              # 能力相关结构化详情
-    evidence_set_id: str      # 本次证据集标识，供回查证据集（关系型证据子集，非图引用）
+    detail: dict                 # 结构化证据（事实链 / SOP 片段 / 缺失项）
+    evidence_set_id: str
     sources: list[AnswerSource]
     confidence: float
-    tool_chain: list[str]     # ["query_traceability"] 或 ["诊断能力:diagnose"]
+    tool_chain: list[str]        # ["query_traceability", "search_docs"]
+    stop_reason: str             # "enough" / "no_new_evidence" / "budget" / "conflict"
     trace_id: str
     needs_human_review: bool = False
     disclaimer: str = "本答案为辅助信息，最终处置需工程师在正式界面确认"
 ```
 
-- `route_taken` + `tool_chain` 透明，收口入口路由可观测。
-- `sources` 强制引用（SOP 带版本、证据 ID、诊断能力假设证据）；证据回查按 `evidence_set_id` 取，不使用图节点引用。
-- 统一答案以 AgentScope Content Block（Pydantic BaseModel）挂在 `Msg` 上返回，前端与评测侧可按结构解析。
+- `retrieval_path` + `tool_chain` 透明：能看出单跳/多跳、调了什么、为何停止。
+- `sources` 强制引用；证据回查按 `evidence_set_id` 取，不使用图节点引用。
+- 不含"意图"字段：意图属于网关的 `AgentAnswer`。
 - `disclaimer` 不可省。
 
 ### 5.3 红线继承
 
-E 继承诊断能力全部红线：① 只读闸（`ReadOnlyToolGate`）；② 版本闸（检索工具强制版本锚点 `version`+`version_kind`）；③ 权限闸（`TenantContext` 前置过滤）；④ 不进过点主事务闸（过点 toolset 不暴露 `pass/judge`）。
+① 只读闸（`ReadOnlyToolGate`）；② 版本闸（`version`+`version_kind`）；③ 权限闸（`TenantContext` 前置过滤）；④ 不进过点主事务闸（过点 toolset 不暴露 `pass/judge`）。
 
 ---
 
 ## 6. 实现方案
 
-### 6.1 网关编排服务（GatewayService）
+### 6.1 检索编排服务（AgenticRagService）
 
-> 下面代码给的是**编排形状**（应用层分诊 + 统一 `Agent` 驱动 + 应用层预算 + `SessionService` 会话恢复）。框架名只写 ADR-01 / 架构设计附录 A **已核实**的原语与最小构造骨架（`Agent(name=..., model=..., toolkit=..., offloader=...)`、`reply` / `reply_stream`）；未核实的参数与方法名不进代码，本文不生造 API。
+> 下面代码给的是**编排形状**（起点判定 + 单跳直调 / 多跳 Agent + 应用层预算 + `SessionService` 会话恢复）。框架名只写 ADR-01 / 架构设计附录 A 已核实的原语与最小构造骨架（`Agent(name=..., model=..., toolkit=..., offloader=...)`、`reply` / `reply_stream`）；未核实的参数与方法名不进代码。
 
 ```python
 class BudgetExceededError(Exception):
-    """应用层预算守卫抛出（非 AgentScope 内置异常）：工具次数 / 时长 / 证据量超限。"""
+    """应用层预算守卫（非 AgentScope 内置异常）：工具次数 / 时长 / 证据量超限。"""
 
-class GatewayService:
+class AgenticRagService:
     def __init__(
         self,
-        route_agent_factory: RouteAgentFactory,      # 按意图装配统一 Agent + Toolkit
-        budget_policy: BudgetPolicy,                 # 应用层工具次数 / 时长 / 证据预算（非框架参数）
-        session_service: SessionService,             # AgentState 跨请求会话恢复（Redis-backed，2.0.5 起替代 SessionManager）
-        intent_router: IntentRouter,
+        agent_factory: RetrievalAgentFactory,        # 装配统一 Agent + Toolkit（两个只读工具）
+        budget_policy: BudgetPolicy,                 # 应用层预算
+        session_service: SessionService,             # AgentState 跨请求恢复（Redis-backed）
         tool_executor: ToolExecutor,
-        delegator: AgentDelegator,
         cache: QueryCache,
         audit_repo: AnswerAuditRepo,
         metrics: MetricsCollector,
     ) -> None: ...
 
-    async def chat(self, request: ChatRequest, tenant: TenantContext) -> AgentAnswer:
-        # 1. 缓存
+    async def query(self, request: RetrievalRequest, tenant: TenantContext) -> RagAnswer:
+        # 1. 缓存（问题 + 租户 + 版本锚点）
         cached = await self._cache.get(request, tenant)
         if cached:
             self._metrics.cache_hit.inc()
             return cached
-        # 2. 意图分诊（规则优先 + LLM 兜底；框架无 Routing 原语，分诊是本层自建逻辑）
-        intent = await self._intent_router.classify(request.question)
-        self._metrics.intent.inc(intent.value)
-        # 3. 装配并驱动统一 Agent（内置 ReAct + Toolkit 工具选择）
-        #    ROOT_CAUSE 时 Toolkit 内只挂 delegate_diagnosis 一个"显式服务调用"工具（见 §7.3、§9.2）
-        #    budget 由应用层独立计算：最多 1-2 次工具调用、证据条数上限、剩余时长
-        budget = self._budget_policy.for_intent(intent)
-        agent_state = await self._session_service.load(request.session_id)   # 按 session_id 恢复 AgentState（Redis-backed）
-        agent = self._route_agent_factory.build(intent, tenant, budget, agent_state)
+
+        budget = self._budget_policy.for_request(request)
+        state = await self._session_service.load(request.session_id)   # 可空
+        start = plan_start(request)                                     # §4.1
+
         try:
-            msg = await asyncio.wait_for(
-                agent.reply(Msg(name="user", content=request.question, role="user")),
-                timeout=70.0,
-            )
+            if start.tool_name:                                         # 单跳：0 次 LLM
+                state = await self._tool_executor.run(
+                    start.tool_name, request, tenant, budget, state,
+                )
+            else:                                                       # 多跳：Agent ReAct
+                agent = self._agent_factory.build(tenant, budget, state)
+                msg = await asyncio.wait_for(
+                    agent.reply(Msg(name="user", content=request.question, role="user")),
+                    timeout=budget.timeout_seconds,
+                )
+                state = self._from_msg(state, msg)
         except (BudgetExceededError, asyncio.TimeoutError) as e:
             self._metrics.fallback.inc("timeout_or_budget")
-            return self._fallback(request, intent, f"问答未完成，已转人工: {e}")
-        # 4. 收敛统一答案（AgentAnswer 作为 Content Block 挂在 Msg 上）
-        answer = self._build_answer(request, intent, msg)
-        # 5. 会话状态落盘 + 审计 + 缓存
-        await self._session_service.save(request.session_id, agent.state)
-        await self._audit_repo.record(request, intent, answer)
+            return self._partial_answer(request, state, f"检索未完成: {e}")
+
+        answer = self._build_answer(request, state)
+        await self._session_service.save(request.session_id, state)
+        await self._audit_repo.record(request, answer)
         await self._cache.set(request, tenant, answer)
         return answer
 ```
 
-- 编排与路由/执行/委托分离（SRP）；超时或预算超限降级转人工。
-- E 的"轻量组合"不靠框架的递归上限参数，而靠 `budget` 里独立计算的工具调用次数与时长；超限即抛 `BudgetExceededError`。
+- 编排与工具执行分离（SRP）；超时/预算超限返回已得证据 + 转人工提示。
+- 单跳路径不经过 Agent，避免为简单问题付 ReAct 成本。
 
-### 6.2 ACL 防腐层（检索与诊断能力只读 REST 契约）
+### 6.2 ACL 防腐层（只读 REST 契约）
 
 | 协作方 | 只读 REST | 用途 | 超时 |
 |--------|----------|------|------|
 | 制造追溯 | `POST /rag/trace/expand` | 关系型证据子集展开 | 5s |
-| 文档检索 | `GET /rag/docs/search` | SOP 片段 | 2s |
-| 诊断能力 | `POST /agent/diagnose` | 深度诊断委托 | 60s（🔴 traceparent 透传 §4.3） |
+| 文档检索 | `GET /rag/docs/search` | SOP / 标准 / 8D 片段 | 2s |
 
 ```python
 class TraceRagAclClient:
@@ -336,11 +356,13 @@ class TraceRagAclClient:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
     async def query_traceability(
-        self, seed: dict, as_of: datetime, version: str, version_kind: str, tenant: TenantContext
+        self, seed: dict, as_of: datetime, version: str, version_kind: str,
+        tenant: TenantContext,
     ) -> TraceEvidenceSetView:
         resp = await self._http.post(
             "/rag/trace/expand",
-            json={"seed": seed, "as_of": as_of.isoformat(), "version": version, "version_kind": version_kind},
+            json={"seed": seed, "as_of": as_of.isoformat(),
+                  "version": version, "version_kind": version_kind},
             headers=tenant.headers(), timeout=5.0,
         )
         resp.raise_for_status()
@@ -354,23 +376,20 @@ class TraceRagAclClient:
             return False
 
 
-class DelegationClient:
-    """诊断 Agent 委托（显式服务调用，非框架移交原语）ACL。🔴 traceparent 透传（§4.3）。"""
+class DocRagAclClient:
+    """文档检索只读 ACL。"""
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
-    async def delegate(
-        self, question: str, tenant: TenantContext, traceparent: str,
-        evidence_set_id: str = "", session_id: str = ""
-    ) -> ReportView:
-        resp = await self._http.post(
-            "/agent/diagnose",
-            # 跨能力委托 = 显式服务调用：只传标识（evidence_set_id/session_id）与 question，不传消息历史
-            json={"question": question, "evidence_set_id": evidence_set_id, "session_id": session_id},
-            headers={**tenant.headers(), "traceparent": traceparent},  # 透传 trace
-            timeout=60.0,
+    async def search_docs(
+        self, query: str, version: str, version_kind: str, tenant: TenantContext,
+    ) -> DocEvidenceSetView:
+        resp = await self._http.get(
+            "/rag/docs/search",
+            params={"query": query, "version": version, "version_kind": version_kind},
+            headers=tenant.headers(), timeout=2.0,
         )
         resp.raise_for_status()
-        return ReportMapper.to_view(resp.json())
+        return DocEvidenceSetMapper.to_view(resp.json())
 
     async def ping(self) -> bool:
         try:
@@ -380,236 +399,180 @@ class DelegationClient:
             return False
 ```
 
-- 外部 DTO 不进 E 核心，只暴露 `TraceEvidenceSetView`/`ReportView`（ACL 约束）。
+- 外部 DTO 不进核心，只暴露 `TraceEvidenceSetView` / `DocEvidenceSetView`（ACL 约束）。
 - 所有 ACL 客户端带 `ping()` 供启动断言（§9.4）。
+- **没有诊断/草稿客户端**：这是"不做跨能力委托"的结构性保证。
 
 ### 6.3 版本一致性保证
 
-继承文档检索、制造追溯与诊断能力：检索工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验。E 不另搞版本管理。
+继承文档检索与制造追溯：工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验。本文不另搞版本管理；历史问题必须按当时版本检索。
 
 ---
 
-## 7. 实现方案（路由编排与执行）
+## 7. 编排执行（单跳与多跳）
 
-### 7.1 路由编排（应用层分诊 + 显式服务调用）
+### 7.1 编排形状
 
 ```text
-[应用层分诊] 意图分类（已在 GatewayService 调 IntentRouter，intent 随消息透传）
+[检索请求] 起点判定（§4.1）
       │
-      ├─ TRACE_FACT/DOC_LOOKUP ──▶ [Toolkit 工具] 调检索工具 ──▶ [收口 Agent]
-      ├─ ROOT_CAUSE ──▶ [显式服务调用] 诊断 Agent ──▶ [收口 Agent]
-      └─ UNKNOWN ──▶ [收口 Agent] 转人工兜底
+      ├─ 单跳 ──▶ ToolExecutor.run(tool_name) ──▶ 证据收口
+      ├─ 多跳 ──▶ Agent ReAct（Toolkit 两个只读工具，≤2 次）──▶ 证据收口
+      └─ 冲突/超限 ──▶ 返回已得证据 + 转人工提示
 ```
 
-- 2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 模块已删除：顺序组合在应用层用 `await` 串联，并行用 `asyncio.gather` 并发多个**各自独立**的 `Agent.reply()`，结论在应用层显式合并（编排代码在本仓库归 `flows/` 目录）；2.0 也不提供共享消息上下文原语，各分支只读同一份 `evidence_set_id`（关系型证据子集），彼此不看对方中间结论。本 MVP 只需"分诊 -> 单工具/显式调用 -> 收口"三段，用 `await` 串起来即可。
-- 步数与工具调用预算由应用层独立计算（最多 1-2 次工具调用 + 时长上限），E 的轻量组合超限即降级；深度场景显式调用诊断 Agent 服务。
-- 详见 §9.2 代码。
+- 单跳 = 应用层直接 `await`，不进入 Agent。
+- 多跳 = 一个 Agent 的 ReAct 循环；不做多 Agent 协同（本 MVP 无此需求）。
 
 ### 7.2 工具执行器（ToolExecutor）
 
 ```python
 class ToolExecutor:
-    """调检索工具，权限校验 + trace。工具以 AgentScope `Tool` 注册进 `Toolkit`（继承 诊断能力口径）。"""
+    """执行单个只读检索工具：权限 / 预算 / trace 校验。"""
 
-    def __init__(self, registry: ToolRegistry, trace_repo: RouteTraceRepo, metrics: MetricsCollector) -> None:
-        self._registry = registry; self._trace_repo = trace_repo; self._metrics = metrics
+    def __init__(self, registry: ToolRegistry, trace_repo: RetrievalTraceRepo,
+                 metrics: MetricsCollector) -> None:
+        self._registry = registry
+        self._trace_repo = trace_repo
+        self._metrics = metrics
 
-    async def __call__(self, state: GatewayState) -> GatewayState:
-        tenant = state["tenant"]
-        tool_name = self._select_tool(state["intent"])
-        tool = self._registry._descriptors.get(tool_name)
+    async def run(self, tool_name: str, request: RetrievalRequest,
+                  tenant: TenantContext, budget: ToolCallBudget,
+                  state: RetrievalState) -> RetrievalState:
+        tool = self._registry.get(tool_name)
         if tool is None or not tenant.can_access(tool.required_tenant_scopes):
             await self._trace_repo.save_denied(tool_name, tenant)
             self._metrics.tool_denied.inc(tool_name)
-            state["answer"] = self._fallback("权限不足或工具不可用")
+            state.denied = True
+            state.stop_reason = "conflict"
+            return state
+        if state.tool_calls >= budget.max_tool_calls:
+            state.stop_reason = "budget"
             return state
         t0 = time.perf_counter()
         try:
-            view = await tool.handler(question=state["question"], tenant=tenant)
+            view = await tool.handler(request=request, tenant=tenant)
             latency_ms = int((time.perf_counter() - t0) * 1000)
             await self._trace_repo.save_ok(tool_name, view, latency_ms)
-            state["tool_result"] = view
-            state["tool_chain"] = [tool_name]
+            state.evidence.append(view)
+            state.tool_chain.append(tool_name)
+            state.tool_calls += 1
             self._metrics.tool_ok.inc(tool_name)
         except Exception as e:
             await self._trace_repo.save_error(tool_name, e)
-            state["answer"] = self._fallback(f"工具调用失败: {e}")
             self._metrics.tool_error.inc(tool_name)
-        return state
-
-    def _select_tool(self, intent: IntentCategory) -> str:
-        return {
-            IntentCategory.TRACE_FACT: "query_traceability",
-            IntentCategory.DOC_LOOKUP: "search_docs",
-        }.get(intent, "")
-```
-
-### 7.3 Agent 委托器（AgentDelegator，显式服务调用）
-
-```python
-class AgentDelegator:
-    """把根因诊断委托给诊断 Agent 服务：显式服务调用（httpx -> /agent/diagnose），
-    只传 evidence_set_id / session_id / traceparent，不传消息历史；框架不提供 Handoffs 移交原语。
-    在本服务里注册为只读 Tool `delegate_diagnosis`，由统一 Agent 的 ReAct + Toolkit 选中；E 不自己多步推理。"""
-
-    def __init__(self, diagnosis_client: DelegationClient, trace_repo: RouteTraceRepo, metrics: MetricsCollector) -> None:
-        self._diagnosis = diagnosis_client; self._trace_repo = trace_repo; self._metrics = metrics
-
-    async def __call__(self, state: GatewayState) -> GatewayState:
-        tenant = state["tenant"]
-        traceparent = state.get("traceparent", "")
-        t0 = time.perf_counter()
-        try:
-            report = await self._diagnosis.delegate(state["question"], tenant, traceparent)
-            latency_ms = int((time.perf_counter() - t0) * 1000)
-            await self._trace_repo.save_ok("诊断能力:diagnose", report, latency_ms)
-            state["tool_result"] = report
-            state["tool_chain"] = ["诊断能力:diagnose"]
-            self._metrics.delegation_ok.inc("诊断能力")
-        except asyncio.TimeoutError:
-            state["answer"] = self._fallback("诊断超时，已转人工")
-            self._metrics.delegation_timeout.inc("诊断能力")
-        except Exception as e:
-            state["answer"] = self._fallback(f"诊断能力委托失败: {e}")
-            self._metrics.delegation_error.inc("诊断能力")
+            state.stop_reason = "conflict"
+            state.error = str(e)
         return state
 ```
 
-- 委托超时/失败降级转人工（继承诊断能力 §8.3）；`state` 是本服务自定义的编排数据结构，不是框架的图状态对象。
+- 工具名由起点判定或多跳 Agent 给出，**不再从"意图"映射**。
+- 预算在调用前校验，超限直接停止并标记 `stop_reason="budget"`。
 
 ---
 
 ## 8. 推荐包结构（Python src layout）
 
 ```text
-agent_gateway_service/
+agentic_rag_service/
   app/
     api/
-      chat_router.py           # /agent/chat, /agent/explain
+      query_router.py          # POST /rag/agentic/query, GET /rag/explain/{audit_id}
       schemas.py
     application/
-      gateway_service.py       # GatewayService（按 flows/ 的串联形状驱动，不含框架 pipeline 原语）
-      intent_router.py         # IntentRouter（规则优先 + LLM 兜底）
-    flows/                     # 编排形状：顺序 await 串联 + asyncio.gather（2.0.0 起 pipeline/msghub 模块已删除）
-      route_flow.py            # 分诊 -> 检索工具 / 显式服务调用 -> 收口（§6.1 的三段）
+      agentic_rag_service.py   # 编排入口
+      retrieval_planner.py     # 起点判定 + 停止条件 + 预算
+      flows/
+        retrieval_flow.py      # 单跳直调 / 多跳 ReAct 的编排形状
     domain/
-      intent.py                # IntentCategory 枚举
-      answer.py                # AgentAnswer / AnswerSource
+      retrieval.py             # RetrievalRequest / RagAnswer / RetrievalState
+      answer.py                # AnswerSource
       tool.py                  # ToolDescriptor / ToolRegistry / ReadOnlyToolGate
       tenant.py                # TenantContext
     infrastructure/
       ai/
-        route_agent_factory.py # 统一 Agent + Toolkit 装配（应用层分诊 + 工具选择）工厂
-        model_factory.py       # AgentScope Model 接入（provider 可插拔）
-        budget_policy.py       # 应用层工具次数/时长/证据预算
+        retrieval_agent_factory.py  # 统一 Agent + Toolkit 装配
+        model_factory.py            # AgentScope Model 接入
+        budget_policy.py            # 应用层工具次数 / 时长 / 证据预算
       session/
-        session_service.py     # AgentState + SessionService（Redis-backed；2.0.5 起由 SessionManager 改名）
+        session_service.py          # AgentState + SessionService（Redis-backed）
       acl/
-        trace_rag.py           # 制造追溯
-        doc_rag.py             # 文档检索
-        diagnosis_delegation.py       # 诊断能力委托（显式服务调用；🔴 traceparent 透传 §4.3）
+        trace_rag.py                # 制造追溯只读
+        doc_rag.py                  # 文档检索只读
       persistence/
-        models.py              # answer_audit / route_trace
+        models.py                   # answer_audit / retrieval_trace
         audit_repo.py
       redis_/
         query_cache.py
       obs/
-        tracing.py             # 只做 AgentScope TracingMiddleware 的接线（不自研 trace 层）
-        metrics.py             # 网关自有业务指标（prometheus-client）
+        tracing.py                  # TracingMiddleware 接线
+        metrics.py                  # 检索侧业务指标
     config.py
-    main.py                    # FastAPI app + lifespan 启动断言
+    main.py                         # FastAPI app + lifespan 启动断言
   tests/
   pyproject.toml
   Dockerfile
   docker-compose.yml
 ```
 
-- `domain/tool.ReadOnlyToolGate` 启动断言（继承诊断能力）。
-- `flows/` 只放应用层编排形状：顺序 `await` 串联、并行 `asyncio.gather` 并发**各自独立**的 `Agent.reply()` 后在应用层显式合并结论（2.0 无 `pipeline`/`msghub` 原语可依赖，也没有共享消息上下文）。
-- `infrastructure/acl/` 防腐层，调检索与诊断能力，外部 DTO 经 Mapper 转内部视图。
+- `infrastructure/acl/` 只有两个检索客户端；没有诊断/草稿客户端。
+- `application/retrieval_planner.py` 承载起点判定与停止条件，便于单测。
 
 ---
 
 ## 9. 关键代码骨架
 
-### 9.1 意图路由器（IntentRouter）
+### 9.1 起点判定（RetrievalPlanner）
 
 ```python
-class IntentCategory(str, Enum):
-    TRACE_FACT = "TRACE_FACT"
-    ROOT_CAUSE = "ROOT_CAUSE"
-    DOC_LOOKUP = "DOC_LOOKUP"
-    UNKNOWN = "UNKNOWN"
+class StartPlan(BaseModel):
+    tool_name: str | None      # 非空 = 单跳直调；None = 进入多跳
+    reason: str
 
-class IntentRouter:
-    """NL -> 意图分类。规则优先，LLM 兜底。"""
+TRACE_HINTS = ("过点", "物料", "批次", "设备", "人员", "工单", "锡膏")
+DOC_HINTS = ("处置", "SOP", "流程", "标准", "怎么修", "作业指导")
 
-    RULES = [
-        (["根因", "5M1E", "为什么不良"], IntentCategory.ROOT_CAUSE),
-        (["怎么处置", "SOP", "怎么修", "流程"], IntentCategory.DOC_LOOKUP),
-        (["过了哪几站", "用了哪批", "位置"], IntentCategory.TRACE_FACT),
-    ]
-
-    def __init__(self, classifier: Agent) -> None:
-        # 兜底分诊用一个不挂工具的统一 Agent：
-        # Agent(name="intent-classifier", model=DashScopeChatModel(credential=..., model=...), toolkit=Toolkit(tools=[]))
-        self._classifier = classifier
-
-    async def classify(self, question: str) -> IntentCategory:
-        for keywords, intent in self.RULES:
-            if any(k in question for k in keywords):
-                return intent
-        try:
-            # 一次结构化输出：枚举以 Content Block（Pydantic BaseModel）挂在 Msg 上承载
-            msg = await self._classifier.reply(
-                Msg(name="user", content=f"只输出意图枚举值：{question}", role="user")
-            )
-            return parse_intent_block(msg)          # 本层解析函数：从 Msg 的 Content Block 取 IntentCategory
-        except Exception:
-            return IntentCategory.UNKNOWN
+def plan_start(request: RetrievalRequest) -> StartPlan:
+    """只看请求形态决定检索起点：不是意图分类。"""
+    q = request.question
+    if request.seed and not any(h in q for h in DOC_HINTS):
+        return StartPlan(tool_name="query_traceability", reason="有种子且无文档诉求")
+    if not request.seed and not any(h in q for h in TRACE_HINTS):
+        return StartPlan(tool_name="search_docs", reason="无种子且无追溯诉求")
+    return StartPlan(tool_name=None, reason="证据缺口需多跳组合")
 ```
 
-> 说明：AgentScope 用 Content Block（Pydantic BaseModel）+ `Msg`（带 `usage`、block `id`）承载结构化输出；兜底分诊就是统一 `Agent.reply()` 的一次结构化输出 + 本层解析函数，不调用未核实的 `Model` 专用方法名。
+> 起点判定没有 LLM、没有 Enum、不产出"意图"；判错只影响多查/少查一次。
 
-### 9.2 路由编排工厂（RouteAgentFactory）
+### 9.2 检索 Agent 装配（RetrievalAgentFactory）
 
 ```python
-class RouteAgentFactory:
-    """按意图装配 E 的轻量编排 Agent：分诊 -> 工具 / 显式服务调用委托 -> 收口。"""
+class RetrievalAgentFactory:
+    """装配检索内多跳 Agent：Toolkit 只有两个只读检索工具。"""
 
-    def __init__(self, tool_registry: ToolRegistry, delegator: AgentDelegator,
-                 model: DashScopeChatModel, offloader: LocalWorkspace) -> None:
+    def __init__(self, tool_registry: ToolRegistry, delegator_free_model: Model,
+                 offloader: LocalWorkspace) -> None:
         self._registry = tool_registry
-        self._delegator = delegator       # 注册为只读 Tool `delegate_diagnosis`（见 §7.3）
-        self._model = model
-        self._offloader = offloader       # 超大结果卸载 / 上下文压缩（workspace/ 后端）
+        self._model = delegator_free_model
+        self._offloader = offloader
 
-    def build(self, intent: IntentCategory, tenant: TenantContext,
-              budget: ToolCallBudget, agent_state: AgentState | None = None) -> Agent:
-        # agent_state 由 §6.1 从 SessionService 按 session_id 载入后交入（本层搬运约定，非框架构造参数）
-        toolkit = self._registry.toolkit_for(intent, tenant)   # 只读白名单内的 Tool
-        if intent == IntentCategory.ROOT_CAUSE:
-            # 深度诊断 E 不自己推理：Toolkit 里只挂 delegate_diagnosis 一个显式服务调用工具
-            # （httpx -> /agent/diagnose，只传 evidence_set_id / session_id / traceparent，不传消息历史）
-            toolkit = self._registry.toolkit_for_delegation(tenant)
+    def build(self, tenant: TenantContext, budget: ToolCallBudget,
+              state: RetrievalState | None = None) -> Agent:
         return Agent(
-            name="gateway-agent",
-            model=self._model,            # DashScopeChatModel(credential=DashScopeCredential(...), model=...)
-            toolkit=toolkit,              # 内置 ReAct 负责"选工具 -> 观察 -> 收敛"
+            name="agentic-rag",
+            model=self._model,
+            toolkit=self._registry.toolkit_for(tenant),   # 只读白名单
             offloader=self._offloader,
+            budget=budget,                                # 应用层独立计算
         )
-        # budget 不是 Agent 构造参数：工具次数 / 时长 / 证据量由应用层独立计算并在 §6.1 用
-        # asyncio.wait_for + BudgetExceededError 兜住；权限闸在工具注册与网关侧
-        # （ReadOnlyToolGate + PermissionEngine/PermissionRule，见 §9.4、§5.3），HITL 用 event.RequireUserConfirmEvent。
 ```
 
-- AgentScope 的统一 `Agent` 内置 ReAct，E 只需限制**可见工具集**与**预算**；上面只写架构设计附录 A 已核实的最小构造骨架（`Agent(name=..., model=..., toolkit=..., offloader=...)`），未核实的构造参数不进代码。
-- 2.0 不提供 `Pipeline`（`sequential` / `fanout`）、`MsgHub`、`Handoffs` / `Routing`：顺序组合在应用层 `await` 串联，并行用 `asyncio.gather` 并发多个**各自独立**的 `Agent.reply()` 并在应用层显式合并结论（`GoalPipeline` / `TeamPipeline` 是 experimental，不进生产）；也不提供共享消息上下文原语，各分支只读同一份 `evidence_set_id`（关系型证据子集），彼此不看对方中间结论，跨能力委托是显式服务调用。编排代码在本仓库归 `flows/` 目录。
-- `UNKNOWN` 意图不进 `Agent`，直接走 §10.3 的转人工兜底。
+- 没有按意图分支，也没有委托 Tool。
+- `agentscope/pipeline` / `msghub` 自 2.0.0 起已删除；顺序组合用应用层 `await`，并行用 `asyncio.gather` 并发独立 `Agent.reply()` 后显式合并。`GoalPipeline` / `TeamPipeline` 标记 experimental，不进生产。构造参数以官方源码树为准（核对结论见 [ADR-01](../架构设计v2/00-架构决策记录ADR.md)）。
 
-### 9.3 工具执行器与委托器
+### 9.3 工具执行器
 
-见 §7.2、§7.3。
+见 §7.2。
 
 ### 9.4 启动断言（只读 + 依赖可达性）
 
@@ -617,71 +580,68 @@ class RouteAgentFactory:
 class ReadOnlyToolGate(Exception):
     """启动时发现非只读工具，拒绝启动。"""
 class DependencyUnreachableGate(Exception):
-    """启动时发现检索与诊断能力依赖不可达，拒绝启动（E 收口前提）。"""
+    """启动时发现检索能力依赖不可达，拒绝启动。"""
 
 async def assert_dependencies_reachable(clients: dict[str, object]) -> None:
-    """E 是收口入口，下游检索与诊断能力必须可达，否则退化为套壳。"""
+    """编排前提：两个检索能力必须可达。"""
     unreachable = []
     for name, client in clients.items():
         if not await client.ping():
             unreachable.append(name)
     if unreachable:
-        raise DependencyUnreachableGate(
-            f"依赖不可达: {unreachable}（E 收口要求检索与诊断能力成型）"
-        )
+        raise DependencyUnreachableGate(f"依赖不可达: {unreachable}（检索编排要求检索能力就绪）")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     registry = app.state.tool_registry
-    # 1. 只读断言（继承 诊断能力）
+    # 1. 只读断言
     registry.validate_on_startup()
-    # 2. 依赖可达性断言（E 收口前提）
+    # 2. 依赖可达性断言
     await assert_dependencies_reachable(app.state.acl_clients)
     yield
 ```
 
-- `assert_dependencies_reachable` 体现"E 是收口，依赖必须就绪"--E 不该在检索与诊断能力没就绪时启动。
-
 ### 9.5 FastAPI 入口
 
 ```python
-router = APIRouter(prefix="/agent", tags=["agentic-rag"])
+router = APIRouter(prefix="/rag", tags=["agentic-rag"])
 
-@router.post("/chat", response_model=AgentAnswer)
-async def chat(
-    req: ChatRequest,
+@router.post("/agentic/query", response_model=RagAnswer)
+async def agentic_query(
+    req: RetrievalRequest,
     tenant: TenantContext = Depends(tenant_from_token),
-    svc: GatewayService = Depends(get_gateway_service),
-) -> AgentAnswer:
-    return await svc.chat(req, tenant)
+    svc: AgenticRagService = Depends(get_agentic_rag_service),
+) -> RagAnswer:
+    return await svc.query(req, tenant)
 
-@router.get("/explain/{audit_id}", response_model=AnswerAudit)
-async def explain(audit_id: str, tenant: TenantContext = Depends(tenant_from_token)) -> AnswerAudit:
-    """回溯某次问答的路由与工具链。"""
+@router.get("/explain/{audit_id}", response_model=RetrievalAudit)
+async def explain(audit_id: str, tenant: TenantContext = Depends(tenant_from_token)) -> RetrievalAudit:
+    """回溯某次检索的路径、工具链与停止原因。"""
     ...
 ```
+
+- 只有检索编排接口；`/explain` 回溯检索过程。
 
 ### 9.6 配置与部署
 
 ```python
 # app/config.py
 class Settings(BaseSettings):
-    audit_dsn: str = "mysql+asyncmy://root:root@mysql:3306/agent_gateway?charset=utf8mb4"
+    audit_dsn: str = "mysql+asyncmy://root:root@mysql:3306/agentic_rag?charset=utf8mb4"
     redis_url: str = "redis://redis:6379/0"
-    # rag-service 检索 + agent-service 诊断只读 REST
+    # 两项检索能力只读 REST
     trace_rag_base_url: str = "http://rag-service:8000"
     doc_rag_base_url: str = "http://doc-rag-service:8000"
-    diagnosis_agent_base_url: str = "http://agent-service:8000"
-    # LLM / Embedding provider（AgentScope Model 可插拔）
+    # LLM provider（AgentScope Model 可插拔）
     llm_provider: str = "deepseek"
     llm_api_key: str = ""
-    # 应用层预算（非 AgentScope 参数名）：独立计算工具调用次数与时长
+    # 应用层预算（非 AgentScope 参数名）
     max_tool_calls: int = 2
     max_evidence_items: int = 20
-    chat_timeout_seconds: int = 70
+    query_timeout_seconds: int = 15
     confidence_threshold: float = 0.6
     class Config:
-        env_prefix = "GATEWAY_"
+        env_prefix = "AGENTIC_RAG_"
 ```
 
 ```yaml
@@ -692,26 +652,25 @@ services:
     image: mysql:8.0
     environment:
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: agent_gateway
+      MYSQL_DATABASE: agentic_rag
     ports: ["3309:3306"]
     volumes:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
-  agent-gateway-service:
+  agentic-rag-service:
     build: .
     depends_on: [mysql, redis]
     environment:
-      GATEWAY_AUDIT_DSN: mysql+asyncmy://root:root@mysql:3306/agent_gateway?charset=utf8mb4
-      GATEWAY_REDIS_URL: redis://redis:6379/0
-      GATEWAY_TRACE_RAG_BASE_URL: http://rag-service:8000
-      GATEWAY_DOC_RAG_BASE_URL: http://doc-rag-service:8000
-      GATEWAY_AGENT_BASE_URL: http://agent-service:8000
-    ports: ["8004:8000"]
+      AGENTIC_RAG_AUDIT_DSN: mysql+asyncmy://root:root@mysql:3306/agentic_rag?charset=utf8mb4
+      AGENTIC_RAG_REDIS_URL: redis://redis:6379/0
+      AGENTIC_RAG_TRACE_RAG_BASE_URL: http://rag-service:8000
+      AGENTIC_RAG_DOC_RAG_BASE_URL: http://doc-rag-service:8000
+    ports: ["8005:8000"]
 ```
 
-- MVP 用 `docker-compose` 本地起 MySQL + Redis + agent-gateway-service，验证"统一入口 -> 路由 -> 检索/诊断能力 -> 统一答案"闭环。
+- MVP 用 `docker-compose` 本地起 MySQL + Redis + agentic-rag-service，验证"检索请求 -> 单跳/多跳 -> 证据收口"闭环。
 
 ---
 
@@ -721,117 +680,113 @@ services:
 
 | 指标 | 含义 |
 |------|------|
-| `gateway_chat_total` | 问答次数（按 intent label） |
-| `gateway_route_accuracy` | 路由准确率（评测集/用户反馈，健康度核心） |
-| `gateway_tool_call_total` | 工具调用次数（按 route label） |
-| `gateway_delegation_total` | 诊断能力委托次数（按 status label） |
-| `gateway_chat_latency_seconds` | 整问答延迟（Histogram） |
-| `gateway_cache_hit_total` | 查询缓存命中 |
-| `gateway_low_confidence_total` | 低置信度转人工次数 |
-| `gateway_unknown_intent_total` | 未识别意图转人工次数 |
-| `gateway_dependency_unreachable_total` | 下游不可达降级次数 |
+| `agentic_query_total` | 检索请求次数（按 `retrieval_path`） |
+| `agentic_hop_total` | 工具调用次数分布（Histogram，观察单跳/多跳比例） |
+| `agentic_tool_call_total` | 工具调用（按 tool / status） |
+| `agentic_stop_reason_total` | 停止原因分布（enough / no_new_evidence / budget / conflict） |
+| `agentic_query_latency_seconds` | 检索延迟（Histogram） |
+| `agentic_cache_hit_total` | 缓存命中 |
+| `agentic_low_confidence_total` | 低置信度转人工 |
+| `agentic_dependency_unreachable_total` | 下游不可达降级 |
 
 ### 10.2 trace 串联
 
-- 埋点入口用 AgentScope `TracingMiddleware`（E 侧不再自建 obs 层），`trace_id` 从 E 生成，显式调用诊断 Agent 服务时透传 `traceparent`（🔴 §4.3）。
-- 链路查看走 OpenTelemetry + Tempo/Jaeger，过程回放用统一 `Agent` 的 `reply_stream` 事件流；**不选 AgentScope Studio**（已归档停止维护，不列为选型）。
-- `AnswerAudit` 记录问题/意图/路由/工具链/答案/`trace_id`，`/explain` 可回溯。
+- 埋点入口用 AgentScope `TracingMiddleware`（不自建 obs 层），`trace_id` 从检索入口生成。
+- 调制造追溯/文档检索时透传 `traceparent`，使检索入口 → 两个能力 → 下游 REST 的 trace 串联。
+- 链路查看走 OpenTelemetry + Tempo/Jaeger；过程回放用 `reply_stream`；**不选 AgentScope Studio**（已归档）。
+- `AnswerAudit` 记录问题 / 检索路径 / 工具链 / 停止原因 / 证据摘要 / `trace_id`，`/rag/explain` 可回溯。
 
 ### 10.3 兜底
 
-- **路由失败**：`UNKNOWN` 意图 -> 转人工"该问题暂不支持"。
-- **下游不可达**：检索/诊断能力故障 -> 降级"该能力暂时不可用"或切换备选能力。
-- **低置信度**：`confidence < 0.6` -> `needs_human_review=True`。
-- **委托超时**：诊断能力超时 -> 降级"诊断未完成，已转人工"（继承诊断能力 §8.3）。
-- **预算超限**：轻量组合的工具调用次数/时长/证据量超预算 -> 降级"建议改用诊断能力深度诊断"或转人工。
+- **下游不可达**：制造追溯或文档检索故障 → 降级"该能力暂时不可用"或返回已得证据 + 转人工。
+- **低置信度**：`confidence < 0.6` → `needs_human_review=True`。
+- **证据不足**：停止时槽位不齐 → `detail["missing"]` 列缺口，不编造。
+- **预算/超时**：返回已得证据 + `stop_reason` + 转人工提示。
+- **冲突**：版本冲突 / 权限拒绝 → 停止并显式说明，不跨版本硬答。
 
 ---
 
 ## 11. 实现步骤
 
-### 阶段一：骨架与意图路由（2 周）
+### 阶段一：骨架与单跳（2 周）
 
-1. 搭 `agent_gateway_service` 骨架（FastAPI + uvicorn），对齐 §8 包结构。
-2. 实现 `IntentRouter`（规则优先 + LLM 兜底）（§9.1）。
-3. 实现统一 `Agent` + `Toolkit` 的轻量路由编排（§9.2），单工具直答路径跑通。
-4. 实现 `ReadOnlyToolGate` + `assert_dependencies_reachable` 启动断言（§9.4）。
+1. 搭 `agentic_rag_service` 骨架（FastAPI + uvicorn），对齐 §8 包结构。
+2. 实现 `ToolRegistry` + `ToolExecutor` + `ReadOnlyToolGate` 启动断言（§7.2、§9.4）。
+3. 实现 `plan_start` 与两条单跳路径，跑通单跳直答。
 
-### 阶段二：工具与委托（2-3 周）
+### 阶段二：多跳编排（2-3 周）
 
-5. 实现 `ToolExecutor` + `ToolRegistry`（检索工具封装为 AgentScope `Tool` 并注册进 `Toolkit`）（§7.2）。
-6. 实现 ACL 客户端（rag-service 检索）（§6.2）。
-7. 实现 `AgentDelegator`（显式服务调用委托诊断能力 + traceparent 透传）（§7.3、§4.3 🔴）。
-8. 验证 E -> 诊断能力 -> A/各上下文 REST 的 trace 全链路串联。
+4. 实现 `RetrievalAgentFactory` + 多跳 ReAct（§9.2），限制工具面与预算。
+5. 实现停止条件（证据充分 / 无新增 / 预算 / 冲突）（§4.3）。
+6. 实现 ACL 客户端（制造追溯 / 文档检索）（§6.2）。
 
 ### 阶段三：统一输出与可观测（1-2 周）
 
-9. 实现 `AgentAnswer` 统一格式 + `AnswerAudit` 审计（§5.2）。
-10. 实现 `/agent/explain` 回溯端点（§9.5）。
-11. 接 OpenTelemetry + prometheus 指标（§10.1），路由准确率告警。
+7. 实现 `RagAnswer` + `AnswerAudit`（§5.2、§10.2）。
+8. 实现 `/rag/explain/{audit_id}` 回溯端点（§9.5）。
+9. 接 OpenTelemetry + prometheus 指标；单跳/多跳比例与停止原因看板。
 
-### 阶段四：加固、评测与试点（1 周）
+### 阶段四：加固与评测（1 周）
 
-12. 沉淀评测集（典型问题 + 预期路由/答案），回归路由准确率。评测栈自建（自研 `EvalRunner` + 三层判定 + pass^k + CI 门禁），judge 用独立包 `py-openjudge`--AgentScope 2.0 **无内生评测**，1.x 的 `agentscope.evaluate` 已删除且未回归。
-13. 兜底链路全测（UNKNOWN/下游不可达/低置信度/委托超时/预算超限）。
-14. 灰度统一入口试点，收集"路由是否准、答案是否对"反馈。
-15. 确认 🔴 决策点（§4.3 traceparent 透传、§11 草稿与编排 纳入时机、路由规则覆盖）。
+10. 沉淀评测集（典型检索问题 + 预期证据/停止原因），回归多跳准确率与证据召回率。评测栈自建（自研 `EvalRunner` + 断言/指标/judge 三层 + pass^k + CI 门禁），judge 用独立包 `py-openjudge`--AgentScope 2.0 **无内生评测**。
+11. 兜底链路全测（下游不可达 / 低置信度 / 证据不足 / 预算超限 / 版本冲突）。
+12. 确认 🔴 决策点（检索超时阈值、多跳上限、证据条数上限）。
 
-> **前提**：E 必须在两项检索能力与诊断能力成型后启动（[RAG服务引入路线.md](RAG服务引入路线.md) §3）。E 是收口，不是起步。
+> **前提**：必须在文档检索与制造追溯成型后启动；没有两个工具，编排就是空转。
 
 ---
 
 ## 12. 约束落地检查清单
 
-- [ ] E 无自有检索/推理能力，全部调两项检索能力 + 委托诊断能力（§1.3 收口不造新能力）。
-- [ ] 所有注册工具 `read_only=True`，`ReadOnlyToolGate` 启动断言生效（继承诊断能力）。
-- [ ] `assert_dependencies_reachable` 启动断言：检索与诊断能力不可达时拒绝启动（E 收口前提）。
-- [ ] E 不调过点引擎放行/拦截 API，
-- [ ] 检索工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验（继承文档检索、制造追溯与诊断能力的版本一致性）。
-- [ ] 工具调用前按 `TenantContext` 权限过滤，拒绝记录可观测（继承诊断能力）。
-- [ ] 深度诊断用显式服务调用委托诊断能力，E 不自己多步推理；应用层预算（工具次数 / 时长 / 证据量）限制轻量组合规模。
-- [ ] 所有路径收敛到 `AgentAnswer` 统一格式，带 `route_taken` + `tool_chain` + `sources`。
-- [ ] `trace_id` 从 E 发起，委托诊断能力时透传 `traceparent`（🔴 §4.3），全链路可回溯。
-- [ ] 路由失败/下游不可达/低置信度/委托超时 -> 转人工兜底，不硬答。
+- [ ] 无意图分类器、无 `IntentCategory`、无跨能力委托客户端（§1.3）。
+- [ ] 所有注册工具 `read_only=True`，`ReadOnlyToolGate` 启动断言生效。
+- [ ] `assert_dependencies_reachable` 启动断言：两个检索能力不可达时拒绝启动。
+- [ ] 不调过点引擎放行/拦截 API。
+- [ ] 检索工具强制版本锚点（`version`+`version_kind`）入参，ACL 层校验。
+- [ ] 工具调用前按 `TenantContext` 权限过滤，拒绝记录可观测。
+- [ ] 应用层预算（工具次数 / 时长 / 证据量）硬约束多跳规模。
+- [ ] 所有路径收敛到 `RagAnswer`，带 `retrieval_path` + `tool_chain` + `stop_reason` + `sources`。
+- [ ] `trace_id` 从检索入口发起，透传到两个检索能力。
+- [ ] 下游不可达 / 低置信度 / 证据不足 / 预算超限 / 版本冲突 -> 显式降级，不硬答。
 - [ ] 答案带 `disclaimer`：辅助信息，最终处置需工程师确认。
-- [ ] E 在两项检索能力与诊断能力成型后启动，不提前做（避免套壳）。
+- [ ] 不对外提供 `/agent/chat`；统一入口在网关。
 
 ---
 
 ## 13. 面试防守 Q&A
 
-**Q：MVP 选了哪三类意图？为什么？**
-A：选了追溯事实（`TRACE_FACT`->制造追溯工具）、根因诊断（`ROOT_CAUSE`->显式服务调用委托诊断能力）、文档查询（`DOC_LOOKUP`->文档检索工具）三类。原因：① 这三类覆盖了检索与诊断能力的核心能力，验证"统一入口 -> 路由 -> 工具/委托 -> 统一答案"完整闭环；② 覆盖了两种路由形态--单步工具直答（检索）与跨能力显式调用（诊断能力），验证 E 的"广深分工"；③ 这三类是工程师最高频场景。其余意图（草稿委托、轻量组合）按相同范式扩展。
+**Q：Agentic RAG 和入口网关怎么分工？**
+A：网关回答"这问题该找检索、诊断还是草稿"，Agentic RAG 回答"这次检索还要再查什么"。意图路由与跨能力委托在网关（[Agent入口网关-意图路由.md](../AGENT服务/Agent入口网关-意图路由.md)）；本模块只有检索工具选择。依赖是单向的：网关 → RAG / agent-service，不成环。
 
-**Q：E 和诊断能力怎么分工？是不是重复了？**
-A：不重复，广深分工。E 是"广而浅"的路由收口（意图分类 -> 选工具 / 显式服务调用委托 -> 轻量组合），诊断能力是"深而专"的追溯多步诊断（≤10 步 5M1E 推理）。简单追溯事实（"过了哪几站"）调制造追溯工具直答；深度根因诊断（"为什么不良"）E 显式调用诊断能力。E 的轻量组合只允许 1-2 次工具调用（应用层独立计算次数、时长与证据预算），深度多步委托诊断能力。这 reconcile 了 RAG 引入路线 §3"Agentic 在预算内完成多步组合"和 AGENT 引入路线 §2.1"诊断能力自己决定下一步查什么"--E 的"多步"是轻量组合，深度推理委托诊断能力。
+**Q：为什么 Agentic RAG 不做意图路由？**
+A：定位不允许。RAG 引入路线 §3 说 Agentic 不是所有请求必经的入口层，只决定"什么时候再查一次、查什么、什么时候停止"。把分诊放进来，rag-service 就成入口层，还要反向依赖 agent-service 才能委托诊断，两个服务互相依赖；而且入口话术变化快、检索契约变化慢，节奏不同。
 
-**Q：E 怎么判断该走哪项能力？**
-A：意图路由规则优先 + LLM 兜底。高频问题关键词命中直定意图（"根因/5M1E"->诊断能力，"怎么处置/SOP"->B，"过了哪几站"->A），命中不了才走 LLM 结构化输出分类（`IntentCategory` 固化为 Enum）。路由准确率是 E 的核心健康度指标。UNKNOWN 转人工不硬答。
+**Q：多跳会不会不可控？**
+A：三层约束：工具面只有两个只读工具；预算硬限制（≤2 次调用、≤20 条证据、≤15s）；停止条件明确（证据充分 / 无新增 / 预算 / 冲突）。另外单跳优先，多数问题根本不进 ReAct。
 
-**Q：委托诊断能力时怎么保证 trace 不断？**
-A：E 委托诊断能力时注入 `traceparent` header，诊断能力接收后透传到其工具调用与下游 Java REST，使 E -> 诊断能力 -> A/各上下文 REST 的 trace 全链路串联（🔴 待与诊断能力实现确认 `traceparent` 接收与透传，§4.3）。MVP 兜底：若诊断能力未透传，E 侧仍记录委托 span，但诊断能力内部 trace 断裂（降级可观测）。`AnswerAudit` 记录 `trace_id`，`/explain` 可回溯。
+**Q：和普通 RAG 的区别？**
+A：普通 RAG 是"一次检索 + 一次生成"；Agentic RAG 多的是"证据不够时再查一次"的判断与组合，但动作空间被限制在只读白名单和预算内，不是自由探索。
 
-**Q：E 路由错了怎么办？**
-A：三重兜底。一是路由准确率作为核心指标监控 + 评测集回归；二是诊断能力委托有超时（≤60s）和置信度阈值，诊断能力发现问题不属于诊断范畴返回低置信度，E 据此转人工；三是 UNKNOWN 和路由失败都转人工不硬答。`AnswerAudit` 记录每次路由决策，工程师可回溯"为什么走了诊断能力"，反馈调优规则。
+**Q：为什么是单跳优先？**
+A：成本和延迟。单跳不调 LLM，工具参数由请求字段直接给出；多跳才进 ReAct。多数现场问题是单跳能答的，没必要为它们付多跳成本。
 
 **Q：上线了吗？**
-A：这是设计阶段规划，不是已落地，且 E 是这几项能力里最后做的。重点是四条架构判断：① E = 统一入口收口层，不造新能力，全部调检索工具 + 显式调用委托诊断能力；② 意图路由规则优先 + LLM 兜底；③ 广深分工--E 轻量组合（应用层工具次数/时长预算），深度委托诊断能力；④ 继承全部只读红线 + 依赖可达性启动断言。E 必须在检索与诊断能力成型后启动，否则退化为套壳。诚实 + 体现架构判断力，比硬吹"已上线 Agentic RAG"得分高。
+A：这是设计阶段规划，不是已落地。重点是四条判断：① Agentic RAG 只做检索编排，不做入口分诊与跨能力委托；② 单跳优先、多跳有预算与停止条件；③ 只读、版本锚点、权限、不进过点四条红线全继承；④ trace 从检索入口发起，可回溯检索路径与停止原因。
 
 ---
 
 ## 14. 一句话定位
 
-"Agentic RAG MVP 把文档检索、制造追溯与诊断收口成统一入口--3 类意图（追溯事实/根因诊断/文档查询）规则优先 + LLM 兜底路由：单步意图调检索工具直答，深度根因用显式服务调用委托诊断能力（`traceparent` 透传串联 trace）。E 不造新能力，全部调检索工具 + 显式调用委托诊断能力；广深分工--E 只做轻量组合（应用层独立计算工具次数、时长与证据预算），跨上下文深度多步委托诊断能力；继承全部只读红线（`ReadOnlyToolGate`/版本/权限/不进过点主事务）+ 依赖可达性启动断言，所有路径收敛到带 `route_taken`+`tool_chain`+`sources` 的统一答案。E 是最后一步，等检索与诊断能力成型后收口。"
+"Agentic RAG 是 rag-service 的检索内编排：给定问题、种子与版本锚点，在文档检索与制造追溯两个只读工具之间判断是否追加检索、查什么、何时停止，最后收敛成带来源引用的 `RagAnswer`。单跳优先、多跳受 2 次工具调用预算约束；不做意图分诊、不做跨能力委托；全程只读、版本锚定、不进过点主事务。"
 
 ---
 
-## 15. 与检索能力、Agent 三项能力的契约对齐与待办
+## 15. 契约对齐与待办
 
 | 契约 | 状态 | 待办 |
 |------|------|------|
-| 诊断能力 `/agent/diagnose` 接受并透传 `traceparent` | 🔴 待对齐 | 与诊断能力实现确认 trace 透传（§4.3） |
-| A `/rag/trace/expand` 契约 | 🔴 待对齐 | 与制造追溯读模型确认 expand 端点入参（seed/as_of/version/version_kind）与返回的 `evidence_set_id` |
-| B `/rag/docs/search` 契约 | 🔴 待对齐 | 与文档型 RAG 确认 search 端点入参 |
-| 草稿委托（`DRAFT_REQUEST`） | ⏳ §11 | 草稿能力就绪后纳入显式服务调用委托 |
-| 轻量组合（多工具） | ⏳ §11 | 应用层工具次数/时长预算已预留（默认 1-2 次），按场景放宽 |
-| 流程编排纳入 | ⏳ 远期 | 编排能力成型后作为显式服务调用委托目标 |
+| 制造追溯 `/rag/trace/expand` | 🔴 待对齐 | 确认入参（seed/as_of/version/version_kind）与返回的 `evidence_set_id` |
+| 文档检索 `/rag/docs/search` | 🔴 待对齐 | 确认 search 端点入参与版本过滤语义 |
+| 入口网关 `RETRIEVAL_REQUEST` -> `RetrievalRequest` | 🔴 待对齐 | 与网关确认种子/版本锚点透传字段（[Agent入口网关-意图路由.md](../AGENT服务/Agent入口网关-意图路由.md) §6） |
+| 多跳上限与超时阈值 | ⏳ 待压测 | 默认 ≤2 次 / ≤15s，按现场数据调整 |
+| 证据条数上限 | ⏳ 待压测 | 默认 ≤20，按 token 成本调整 |

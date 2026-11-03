@@ -242,7 +242,7 @@ POST /agent/orchestration/complaint_8d/start
 
 | 层 | 被测对象 | 数据源 |
 |---|---|---|
-| 路由 / 入口 | 能力选得对不对（E 的意图路由；能力本身不承担） | `route_taken` / `intent` |
+| 路由 / 入口 | 能力选得对不对（**入口网关的意图路由**；三项能力本身不承担） | `route_taken` / `intent` |
 | 工具调用 | 选工具、装参数、顺序 | `tool_call_traces` |
 | 轨迹 | 里程碑、步数冗余、收敛 | span 序列 + `agent_step_record` |
 | 安全 | 写越界、版本锚点、租户、放行工具 | 启动断言 + 步骤审计 |

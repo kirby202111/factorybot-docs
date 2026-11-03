@@ -76,7 +76,7 @@
 |------|------|------|------------|--------|
 | 文档型 RAG（文档检索能力） | [文档型 RAG-详细设计.md](../RAG服务/文档型 RAG-详细设计.md) | 检索 + 生成 | 文档检索召回 / 引用命中 / 版本过滤 | §5.2 |
 | 制造追溯（rag-service 关系型追溯能力） | [rag-service-整体结构设计.md](../RAG服务/rag-service-整体结构设计.md) §4.2 非图制造追溯 | 关系型读模型 + 固定关联查询 + 5M1E 综合 | 证据召回 / 根因准确 / 版本锚点一致 | §5.3 |
-| Agentic RAG（Agentic 能力） | [Agentic RAG-详细设计.md](../RAG服务/Agentic RAG-详细设计.md) | 单 Agent 的 ReAct + `Toolkit` 工具选择（意图路由自建，框架无 `Routing` / `Handoffs` 原语） | 路由准确 / 工具选择合理 | §5.4 |
+| Agentic RAG（rag-service 检索内编排） | [Agentic RAG-详细设计.md](../RAG服务/Agentic RAG-详细设计.md) | 单 Agent 的 ReAct + `Toolkit` 工具选择（**意图分诊与跨能力委托归 `agent-gateway-service`，不在本对象**） | 起点判定 / 工具选择 / 收口 | §5.4 |
 | 诊断能力 | [FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md) | 多步只读推理 | 工具序列 / 证据充分 / 根因准确 | §5.5 |
 | 草稿编写能力 | [FactoryAgent-草稿编写能力.md](../AGENT服务/FactoryAgent/FactoryAgent-草稿编写能力.md) | 草稿生成（不落库） | 草稿采纳 / 合规 / 证据完整 | §5.6 |
 | 流程编排能力 | [FactoryAgent-流程编排能力.md](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) | 跨上下文编排 + gate | 编排正确 / LLM 占比 / 越界检测 | §5.7 |
@@ -102,7 +102,7 @@
 |------|------|---------|------|
 | **检索质量** | 该取的数据取到没、取对没 | 文档检索 / 数据问答 / 制造追溯、诊断与编排 | 指标 + 断言 |
 | **生成质量** | 答案准不准、忠不忠实、有没有幻觉 | 所有 RAG、诊断与草稿 | 指标 + LLM-as-judge |
-| **Agent 行为** | 步数 / 工具序列 / 路由 / LLM 占比合理不 | Agentic RAG、三项能力 | 指标 + 断言 |
+| **Agent 行为** | 步数 / 工具序列 / 路由 / LLM 占比合理不 | Agentic RAG、入口网关、三项能力 | 指标 + 断言 |
 | **安全红线** | 版本 / 写边界 / 租户 / 过点 / PII | 所有对象 | **硬失败** |
 | **置信度校准** | 报的置信度与实际准确一致不 | 三项能力、制造追溯 | ECE + 标定曲线 |
 
@@ -191,7 +191,8 @@ class ExpectedOutcome(BaseModel):
     expected_evidence_ids: list[str]             # 预期证据引用（evidence_id / 业务主键，可选，强断言）
     expected_defect_codes: list[str]             # 预期缺陷码
     expected_draft_fields: dict | None           # 草稿能力：草稿应含字段（reentry_point 等）
-    expected_route: list[str] | None             # Agentic RAG/编排能力：预期路由/编排步骤
+    expected_route: list[str] | None             # 入口网关 / 编排能力：预期能力路由
+    expected_retrieval_path: list[str] | None    # Agentic RAG：预期起点与工具序列（如 ["query_traceability", "search_docs"]）
     should_decline: bool = False                 # 该用例期望拒答（证据不足时）
 
 class SafetyExpectation(BaseModel):
@@ -308,14 +309,25 @@ class VersionAnchorChecker:
 
 > 制造追溯是护城河，指标最多。`版本锚点正确率 = 100%` 是硬卡：证据引用的工艺版本必须等于过点当时锁定的 `routeVersion`（读模型版本对齐见 [rag-service-技术选型和实现方案.md](../RAG服务/rag-service-技术选型和实现方案.md) §4.3 查询算法，版本解析策略见同上 §7.2，跨能力版本传递见 [rag-service-整体结构设计.md](../RAG服务/rag-service-整体结构设计.md) §8），取"当前生效版"即判失败。这里测的一致性**不是图结构一致性**（追溯不引入图检索），而是**读模型位点一致性**（`trace_sync_checkpoint` 位点与 freshness 在允许阈值内，超阈值必须显式声明缺口）与**固定关联查询结果**（白名单查询计划返回的业务主键与 `expected_evidence_ids` 对齐）；评测目标与断言强度不变。`实体幻觉率`必须为 0（任何非 0 即硬失败）--LLM 编造不存在的 evidence_id/SN/batch 在 MES 里是不可接受的（工程师按假证据处置会出事）。
 
-### 5.4 Agentic RAG（Agentic 能力）指标
+### 5.4 Agentic RAG（检索内编排）指标
 
 | 指标 | 计算 | 目标 |
 |------|------|--------|
-| 路由准确率 | 路由到的路线/工具 == 预期 / 总 | ≥0.90 |
+| 起点判定准确率 | 单跳 / 多跳起点 == 预期 / 总 | ≥0.90 |
 | 工具选择合理性 | 选对工具 / 总工具选择 | ≥0.85 |
 | 多余工具调用率 | 冗余工具调用 / 总 | ≤0.15 |
-| 收口正确率 | 该收口时收口 / 总 | ≥0.90 |
+| 收口正确率 | `stop_reason` == 预期（enough / no_new_evidence / budget / conflict）/ 总 | ≥0.90 |
+
+> **口径**：这四个指标只测"检索内"。Agentic RAG **不做意图分诊**、**不做跨能力委托**（[Agentic RAG-详细设计.md](../RAG服务/Agentic RAG-详细设计.md) §1.3），因此"意图路由准确率"不属于本对象。
+>
+> 入口意图分诊与跨能力委托的评测对象是 **`agent-gateway-service`**（[Agent入口网关-意图路由.md](../AGENT服务/Agent入口网关-意图路由.md)），指标单列，不与上表混算：
+>
+> | 指标 | 计算 | 目标 |
+> |------|------|--------|
+> | 意图分诊准确率 | `intent` == 预期能力 / 总 | ≥0.90 |
+> | 误路由代价 | 按代价矩阵加权（检索 < 诊断 < 草稿；写侧最高） | ≤阈值（待标定） |
+> | 委托正确率 | 应委托且实际委托到对应能力 / 应委托总数 | ≥0.95 |
+> | 失败降级正确率 | 分诊/委托失败时 `route_taken="HUMAN"` / 总失败 | 100%（硬） |
 
 ### 5.5 诊断能力指标
 
