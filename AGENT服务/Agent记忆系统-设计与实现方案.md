@@ -106,7 +106,7 @@
 
 ### 2.3 数据流：一次工具调用如何流经各层
 
-以 诊断的一次工具调用为例（工具执行封装在 Toolkit 内，本项目的执行节点拟建于 `app/infrastructure/ai/tool_node.py`，设计目标路径）：
+以 诊断的一次工具调用为例（工具执行封装在 Toolkit 内，本项目的工具执行钩子 `ToolExecHook` 拟建于 `app/infrastructure/ai/tool_exec_hook.py`，设计目标路径）：
 
 ```
 Agent（内置 ReAct）产出 pending_tool_calls
