@@ -79,7 +79,7 @@ tau2-bench 的三个领域（航空/零售/电信客服）的任务集、工具�
 | 路径 | 做法 | 适用情形 | 取舍 |
 |---|---|---|---|
 | **A. 概念移植（推荐，成本低）** | 不引入 tau2 代码，仅把 Pass^k、组合式生成、五维术语、受约束模拟器思想写进你现有 `mes-eval` 设计 | 你代码处于"设计 9 分 / 落地 1 分"，应先把既有设计落地，而非另起框架 | 不继承 tau2 现成 runner；但改动小、与你体系融合好 |
-| **B. fork 框架（成本高）** | 以 MIT 协议 fork tau2，替换为 MES 领域（policy=限界上下文不变式、tools=你的 factorybot 工具、DB=MySQL/Neo4j/Chroma mock、tasks=HANDOFF/HISTORY/SYNTHETIC） | 你希望有一套现成的多轮模拟 runner，且要做交互型 Agent | 工程投入大；需维护一套 MES 领域定义；但省去自研 simulator harness |
+| **B. fork 框架（成本高）** | 以 MIT 协议 fork tau2，替换为 MES 领域（policy=限界上下文不变式、tools=你的 factorybot 工具、DB=MySQL/Chroma mock——**不含图数据库**，追溯按 ADR-03 用关系型读模型 + 固定关联查询、tasks=HANDOFF/HISTORY/SYNTHETIC） | 你希望有一套现成的多轮模拟 runner，且要做交互型 Agent | 工程投入大；需维护一套 MES 领域定义；但省去自研 simulator harness |
 
 **我的建议**：现阶段走 A。你既有评测设计已覆盖 tau2 的 5 维校验中的 4 维，只缺 `Pass^k` 与组合式生成器，且你的"落地 1 分"意味着首要矛盾是**把设计跑起来**而不是换框架。待 诊断能力离线评测跑通、且你决定做交互型 Agent 时，再评估是否 fork tau2 解决用户模拟器。
 

@@ -3,6 +3,11 @@
 > 本文是 [AGENT服务引入路线.md](AGENT服务引入路线.md) §4「可观测兜底」与三项能力实现文档 §8 的**收敛展开**，输出**可观测性分层模型、链路/指标/日志/评测/漂移的完整设计、数据模型、包结构与代码骨架、部署与约束落地**。
 > **定位**：诊断、草稿编写、流程编排三项能力共用同一套可观测底座。各能力文档的 §8 自此收敛为指针，**事实源唯一在本篇**——避免三处简版各说各话。
 > **技术栈**：OpenTelemetry Python + `prometheus-client` + 结构化日志（JSON），与三大 MES 服务的 Java/Spring APM 通过 W3C `traceparent` 互通，互不侵入。
+> **底座口径**：Agent 框架底座为 **AgentScope 2.0**（Python `>=3.12`）。观测的**通用采集与上下文传播**取框架已核实能力
+> `TracingMiddleware`（OTel，`middleware/_tracing/`）+ `reply_stream` 事件流；MES 特有的观测诉求（脱敏、预算拦截、成本归因、只读旁路约束）由**自定义 Middleware 链**实现，
+> 文中出现的 `self._xxx.method(...)`、`Redactor`、`ObservabilityPort` 一类是本项目的内部封装命名，不代表框架 API。
+> **不存在的东西不写进设计**：`AgentScope Studio` 已归档、不再作为独立工具维护，**不列为选型**——研发期调试可视化一律走 **OTel + Tempo/Jaeger trace 视图 + `reply_stream` 事件回放自建脚本**（把事件流落 JSONL，本地按 `session_id` 重放单条会话）；框架也没有 `Pipeline` / `MsgHub` / `sequential_pipeline` / `fanout_pipeline`（1.x API，2.0.0 起模块已删除）与 Handoffs/Routing 移交原语，本文件里的编排形状一律指本项目 `flows/` 目录的应用层 Python 代码（顺序 `await`、`asyncio.gather` 并发多个各自独立的 `Agent.reply()`、应用层显式合并）。
+> OpenTelemetry / Prometheus / structlog / Grafana 作为**补充埋点与后端**保留，与 `TracingMiddleware` 并存而非被替换。
 > **口径纪律**：可观测本身是**只读旁路**——它只采集、只落只读 trace/指标，绝不进过点主事务（[领域总览.md](../领域模型/领域总览.md) §5.3），绝不旁路任何上下文的写路径。观测数据同样受租户隔离约束。本篇讲的是**设计规划**，不是说"已上线全链路可观测"。
 
 ---
@@ -29,7 +34,7 @@
 
 ### 1.3 覆盖范围与不覆盖范围
 
-- **覆盖**：`agent-service`（Python）内部全链路——会话、LangGraph 节点、工具调用、ACL、LLM 调用、置信度、评测、漂移、成本。
+- **覆盖**：`agent-service`（Python）内部全链路——会话、Agent 推理步（`Agent.reply` / `reply_stream` 的事件流）、工具调用、ACL、LLM 调用、置信度、评测、漂移、成本。
 - **不覆盖**：下游 Java 服务的内部观测（复用其既有 Spring APM / OTel agent），只通过 `traceparent` 把链路接起来。RAG 服务的观测归 [RAG服务](../RAG服务/) 各路线，本篇只定义 Agent 调 RAG 时的 span 衔接约定。
 - **不覆盖**：MES 核心业务表的观测（工单/WIP/过点自身指标），那是 MES 主体的事，Agent 只读它们、不替它们埋点。
 
@@ -55,9 +60,9 @@
 
 ### 2.2 设计原则（OOD/SOLID 落到观测层）
 
-- **SRP**：`Tracing`、`MetricsCollector`、`LlmCallLogger`、`EvalRunner` 各司一职，不混在一个"观测大对象"里。
-- **DIP**：业务节点（`ToolNode`、`DraftBuilder`、`supervisor`）依赖观测的抽象接口（`ObservabilityPort`），不直接依赖 OTel/prometheus 具体实现——便于测试时换内存实现。
-- **OCP**：新增一项能力或一个 LLM provider，不改观测核心，只新增 label/指标维度。
+- **SRP**：`TracingMiddleware`（框架）、本项目补充的 `LlmCallLogger`、`EvalRunner` 各司一职，不混在一个"观测大对象"里。
+- **DIP**：业务侧（`Agent` + `Toolkit` 工具执行、`DraftBuilder`、本项目 `flows/` 编排流程的入口步骤）依赖观测的抽象接口（`ObservabilityPort`），不直接依赖 OTel/prometheus 具体实现——便于测试时换内存实现。
+- **OCP**：新增一项能力或一个模型 provider，不改观测核心，只在 Middleware 链上挂新的一段、新增 label/指标维度。
 - **观测与业务解耦**：观测失败（如 OTel exporter 挂）**不阻断**业务流程——trace 落不下去，会话照样跑完，只是该次无 trace。观测是旁路，不是主路径依赖。
 
 ### 2.3 红线
@@ -86,16 +91,16 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │ agent-service（Python）                                               │
 │                                                                       │
-│   业务节点                  观测旁路（ObservabilityPort 抽象）          │
+│   业务入口                  观测旁路（ObservabilityPort 抽象）          │
 │  ┌────────────┐  依赖    ┌──────────────────────────────────────────┐│
 │  │ Diagnosis   │────────▶│ L4 评测质量层  EvalRunner / Calibration   ││
 │  │ Service     │         │  ──────────────────────────────────────  ││
 │  │ DraftBuilder│         │ 业务视图层     ToolTraceRepo / 证据链投影  ││
-│  │ Supervisor  │         │  ──────────────────────────────────────  ││
-│  └─────┬──────┘         │ 指标层        MetricsCollector             ││
+│  │ flows/ 入口 │         │  ──────────────────────────────────────  ││
+│  └─────┬──────┘         │ 指标层   观测 Middleware + prometheus      ││
 │        │                │  ──────────────────────────────────────  ││
-│   model_node /           │ 链路层        Tracing (OTel spans)         ││
-│   tool_node              │  ──────────────────────────────────────  ││
+│   推理步 /               │ 链路层   TracingMiddleware (OTel spans)    ││
+│   工具执行               │  ──────────────────────────────────────  ││
 │        │                 │ L0 基础设施   OTel SDK / context / exporter││
 │        ▼                 └───────────┬────────────────────────────────┘│
 │  ┌───────────┐                      │ 采集（异步、不阻断业务）           │
@@ -117,30 +122,39 @@
 
 ### 3.3 数据流
 
-1. 会话开始：`DiagnosisService` 建 root span，写 `diagnosis_session`，`MetricsCollector.session_started`。
-2. 每步推理：`model_node` 调 LLM -> `LlmCallLogger` 落 `llm_call_log` + `agent_llm_*` 指标；产出 tool calls。
-3. `tool_node` 执行：权限校验 -> ACL -> 下游 REST（注入 `traceparent`）-> 落 `tool_call_trace` + `agent_tool_*` 指标。
+1. 会话开始：`DiagnosisService` 建 root span，写 `diagnosis_session`，观测 Middleware 记 `session_started` 指标。
+2. 每步推理：Agent 内置 ReAct 的模型调用（经 `Model` 抽象）-> `LlmCallLogger` 落 `llm_call_log` + `agent_llm_*` 指标；产出 tool calls。
+3. `Toolkit` 工具执行：Permission 策略判定 -> ACL -> 下游 REST（注入 `traceparent`）-> 落 `tool_call_trace` + `agent_tool_*` 指标。
 4. 收口：`ReportParser` 解析报告 -> 置信度判定 -> 落 `diagnosis_report`，低置信置 `needs_human_review` + `agent_low_confidence_total`。
 5. 离线：`EvalRunner` 跑评测集 -> 落 `eval_run`，拟合置信度标定曲线，检测漂移。
 
 ---
 
-## 4. 链路追踪（Tracing）
+## 4. 链路追踪（`TracingMiddleware` + OTel）
 
 ### 4.1 trace / span 模型
 
-一次会话产出一棵 span 树，根 span 代表会话，子 span 代表每一步的 LLM 调用与工具调用：
+一次会话产出一棵 span 树，根 span 代表会话，子 span 代表每一步的 LLM 调用与工具调用。
+**span 只按四类命名，不假设"图节点"**（框架无图/管道原语，本项目也不用图编排术语建模）：
+
+| span 类别 | 名字（本项目约定） | 谁产生 |
+|---|---|---|
+| **Agent 调用** | `agent.invoke` / `agent.step` / `agent.report` | 一次 `Agent.reply()` / `reply_stream()` 及其内部 ReAct 步 |
+| **工具调用** | `tool.invoke`（下挂 `acl.call` / `http.request`） | `Toolkit` 执行一个 `Tool` |
+| **委托** | `delegate.call`（带 `evidence_set_id` / `session_id` / `traceparent`；下游用 `fetch_evidence_set(evidence_set_id)` 回查） | 跨能力的显式服务调用（**不是移交原语**，框架没有 Handoffs/Routing） |
+| **flow 步骤** | `flow.step`（CODE / AGENT 性质区分） | 本项目 `flows/` 应用层代码里的一个步骤（顺序 `await` 或 `asyncio.gather` 的一路分支） |
 
 ```text
 [agent.session] session_id=S-001 capability=diagnosis tenant=WS-A  ← root span
-  ├─ [agent.step] step_no=1
+  ├─ [flow.step] step_no=1 kind=AGENT
   │    ├─ [llm.invoke] model=claude-... prompt_version=p_v7  tokens=...
   │    └─ [tool.invoke] tool=query_pass_records ctx=过点执行
   │         └─ [acl.call] -> [http.request] GET /api/pass-records/{sn}  ← traceparent 透传到 Java
-  ├─ [agent.step] step_no=2
+  ├─ [flow.step] step_no=2 kind=AGENT
   │    ├─ [llm.invoke] ...
   │    └─ [tool.invoke] tool=query_process_route route_version=v3 ctx=工艺管理
   │         └─ [acl.call] -> [http.request] GET /api/process-routes/{id}?version=v3
+  ├─ [delegate.call] to=rag-service evidence_set_id=ES-042 traceparent=...  ← 显式服务委托
   └─ [agent.report] confidence=0.72 needs_human_review=false
 ```
 
@@ -154,14 +168,21 @@
 | `agent.capability` | 能力 | `diagnosis` / `drafting` / `orchestration` |
 | `agent.tenant.workshop` | 车间 | `WS-A` |
 | `agent.tenant.line` | 产线 | `L-01` |
-| `agent.step_no` | 步骤序号 | `1` |
+| `agent.span_kind` | 四类 span 之一（拓扑标签，归因用） | `agent` / `tool` / `delegate` / `flow_step` |
+| `agent.contract_version` | 该步输入/输出契约版本（schema 版本） | `report_v3` |
+| `agent.step_no` | flow 步骤序号 | `1` |
+| `agent.step_kind` | flow 步骤性质 | `CODE` / `AGENT` |
+| `agent.delegate.evidence_set_id` | 委托传递的证据集键（追溯唯一口径） | `ES-042` |
 | `agent.tool.name` | 工具名 | `query_process_route` |
 | `agent.tool.bounded_context` | 所属限界上下文 | `工艺管理上下文` |
 | `agent.tool.route_version` | 工艺版本（工艺类工具必填） | `v3` |
 | `agent.llm.model` | 模型标识 | `claude-sonnet-5` |
 | `agent.llm.prompt_version` | 提示词版本 | `p_v7` |
-| `agent.confidence` | 报告置信度（仅 report span） | `0.72` |
+| `agent.confidence` | 报告置信度（仅 report span，由规则算，不采信 LLM 自评） | `0.72` |
 | `agent.status` | 结果状态 | `OK` / `DENIED` / `ERROR` / `TIMEOUT` |
+
+**归因口径（依 [ADR-11](../架构设计v2/00-架构决策记录ADR.md)）**：判定"哪个 Agent / 哪一步出错"**靠契约 + 确定性校验 + trace 拓扑标签**（上表里的 `span_kind` / `contract_version` / `step_kind` 就是拓扑标签），**不靠事后让强模型看日志猜**（AgenTracer 实测 SOTA 推理模型的事后归因准确率普遍 <10%），更**不靠 embedding 语义相似**（嵌入相似度区分"被推翻的事实"与"重复表述"仅 AUROC 0.59，近似随机，无法区分失效事实）。校验发生在**执行路径上**（schema 断言、版本锚点断言、权限断言），不在观测事后。
+跨能力委托只经 `evidence_set_id` 显式传证，各分支**只读同一份证据集、彼此看不到对方的中间结论**——框架没有共享消息上下文的原语，因此不存在"广播导致归因混乱"这一说，也不允许按它设计。
 
 ### 4.3 上下文传播（traceparent 到 Java）
 
@@ -170,11 +191,12 @@
 - ACL 客户端**不手动**拼 `traceparent`——靠 instrumentation 自动注入，避免人为出错；只在 header 里额外带 `X-Tenant-*` 做权限（[诊断能力 §4.3](FactoryAgent/FactoryAgent-诊断能力.md)）。
 - Kafka 侧（主动触发场景）：`aiokafka` 消费时从消息 header 取 `traceparent` 续接，或为自发事件新建 root span。
 
-### 4.4 LangGraph 集成
+### 4.4 与 AgentScope 运行时的集成
 
-- `model_node` / `tool_node` 外层包 span：进入节点开 span，退出关 span，异常记 `agent.status=ERROR` 事件。
-- LangGraph `checkpointer` 的 `thread_id = session_id`，使中断恢复的会话与原 trace 同属一棵树（恢复时续 root span）。
-- `recursion_limit` 命中抛 `GraphRecursionError` 时，在 root span 记 `agent.recursion_limit_hit` 事件并标 `agent.status=TIMEOUT`。
+- 通用的推理步 / 模型调用 / 工具调用 span 由框架 `TracingMiddleware` 产出；本项目只在 Middleware 链上补 MES 维度属性（tenant、capability、prompt_version、span_kind），不再自建 flow 步骤级 span 包裹以外的重复埋点。
+- 会话恢复：`SessionService`（Redis-backed，**2.0.5 起由旧名改名而来，旧名不可导入**）以 `session_id` 为唯一键，gate 挂起后由确认事件（`event.RequireUserConfirmEvent`）在任意副本续跑；续跑时按 `session_id` 取回原 `trace_id` 并续上 root span，使中断-恢复的会话与原 trace 同属一棵树。
+- 步数与工具调用预算命中上限时（由本项目的预算拦截 Middleware 抛出，指标口径见 §5.2 的 `agent_step_budget_hit_total`、SLO 见 §5.4），在 root span 记 `agent.step_budget_hit` 事件并标 `agent.status=TIMEOUT`。
+- **研发期调试可视化不依赖任何框架自带 UI**（`AgentScope Studio` 已归档、不作选型）：单次会话看 OTel trace 瀑布（Tempo/Jaeger）+ `reply_stream` 事件流回放（把事件落 JSONL 后按 `session_id` 本地重放），跨会话聚合看 Grafana 指标看板。三者互补，均由本项目的观测旁路自采。
 
 ### 4.5 证据链 = span 树的业务投影
 
@@ -187,8 +209,10 @@ trace span 树是给 SRE 看的火焰图；业务侧（工程师 UI）看的是�
 from contextlib import contextmanager
 from opentelemetry import trace
 
-class Tracing:
-    """链路层：封装 OTel span 创建，业务节点只调它，不直接碰 OTel API。"""
+class MesSpanEnricher:
+    """链路层的 MES 维度补写器：通用 span 由框架 `TracingMiddleware` 建立，
+    本类只在 Middleware 链上补 MES 属性与异常归因，业务代码不直接碰 OTel API。
+    （方法签名是本项目内部封装命名，非框架 API。）"""
 
     def __init__(self, tracer: trace.Tracer) -> None:
         self._tracer = tracer
@@ -200,7 +224,7 @@ class Tracing:
         ) as span:
             try:
                 yield span
-            except (GraphRecursionError, asyncio.TimeoutError) as e:
+            except (StepBudgetExceeded, asyncio.TimeoutError) as e:
                 span.set_attribute("agent.status", "TIMEOUT")
                 span.record_exception(e)
                 raise
@@ -215,7 +239,7 @@ class Tracing:
                 "agent.step_no": obs_ctx.step_no,
             },
         ) as span:
-            yield span  # 调用方在 yield 内执行工具，结果回填属性
+            yield span  # Toolkit 在工具执行前后回调本段，结果回填属性
 
     @contextmanager
     def llm_span(self, obs_ctx: ObservabilityContext, model: str, prompt_version: str):
@@ -236,7 +260,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ObservabilityContext:
-    """随会话流动的观测上下文，注入到每个节点。不可变。"""
+    """随会话流动的观测上下文，由 Middleware 链在每一步注入。不可变（本项目内部类型，非框架 API）。"""
     session_id: str
     trace_id: str
     tenant: "TenantContext"
@@ -260,7 +284,7 @@ class ObservabilityContext:
 
 ### 5.1 命名规范与分层
 
-- 前缀 `agent_` 为通用指标；`draft_` / `node_` 为能力特有。
+- 前缀 `agent_` 为通用指标；`draft_` / `orchestration_` 为能力特有。
 - label 维度固定：`capability` / `tool` / `status` / `model` / `bounded_context`，新增维度需评审——维度爆炸会撑爆 prometheus。
 - Counter 用 `_total` 后缀；Histogram 用 `_seconds` / `_bytes` 后缀，遵循 [Prometheus 命名规范](https://prometheus.io/docs/practices/naming/)。
 
@@ -276,7 +300,7 @@ class ObservabilityContext:
 | `agent_tool_call_latency_seconds` | Histogram | tool | 单工具调用延迟 |
 | `agent_tool_denied_total` | Counter | tool | 权限拒绝次数 |
 | `agent_tool_error_total` | Counter | tool, bounded_context | 工具失败次数 |
-| `agent_recursion_limit_hit_total` | Counter | capability | 触发最大步数上限次数 |
+| `agent_step_budget_hit_total` | Counter | capability | 命中步数与工具调用预算上限的次数（原"递归上限命中率"口径改名，阈值不变） |
 | `agent_session_timeout_total` | Counter | capability | 整会话超时次数 |
 | `agent_low_confidence_total` | Counter | capability | 置信度 <0.5 转人工次数 |
 | `agent_llm_invocation_total` | Counter | model, capability | LLM 调用次数 |
@@ -302,7 +326,7 @@ class ObservabilityContext:
 | 指标 | 类型 | label | 含义 |
 |------|------|-------|------|
 | `agent_session_total` | Counter | scenario, status | 会话数（换线/首件/异常处置场景） |
-| `agent_step_total` | Counter | capability, node_type | 节点执行数（node_type: CODE/AGENT） |
+| `agent_step_total` | Counter | capability, step_kind | flow 步骤执行数（step_kind: CODE/AGENT；业务表列名仍为 `node_trace.node_type`） |
 | `agent_llm_invocation_total` | Counter | capability | 真 LLM 调用数（换线全程 PASS 时为 0） |
 | `orchestration_step_latency_seconds` | Histogram | step | 各步耗时（含 gate 等待） |
 | `orchestration_gate_decision_total` | Counter | step, decision | gate 决策数（decision: APPROVED/REJECTED/SKIPPED） |
@@ -311,17 +335,17 @@ class ObservabilityContext:
 | `write_tool_total` | Counter | tool, confirmed | 写工具调用数（confirmed: true/false） |
 | `orchestration_write_rejected_total` | Counter | tool | 未带有效 confirmation token 被拒次数 |
 
-> `agent_llm_invocation_total` 与 `agent_step_total{node_type=CODE}` 的占比是流程编排能力的核心健康指标——体现"懂什么时候不用 AI"：换线顺利时 LLM 调用应趋近 0，全靠代码节点跑。
+> `agent_llm_invocation_total` 与 `agent_step_total{step_kind=CODE}` 的占比是流程编排能力的核心健康指标——体现"懂什么时候不用 AI"：换线顺利时 LLM 调用应趋近 0，全靠代码步骤跑。
 
 ### 5.3 埋点位置
 
 | 指标 | 埋点位置 |
 |------|---------|
-| session_* | `DiagnosisService.diagnose` / `DraftBuilder.build` / `supervisor.run` 入口与出口 |
-| tool_* | `ToolNode.__call__`（[诊断能力 §7.2](FactoryAgent/FactoryAgent-诊断能力.md) 已有雏形） |
-| llm_* / token_* / cost_* | `llm_factory` 出品的 `BaseChatModel` 包装层（统一拦截，见 §8.4） |
+| session_* | `DiagnosisService.diagnose` / `DraftBuilder.build` / 本项目 `flows/` 编排流程入口与出口 |
+| tool_* | `Toolkit` 工具执行前后回调（[诊断能力 §7.2](FactoryAgent/FactoryAgent-诊断能力.md) 已给出设计雏形，代码尚未落地） |
+| llm_* / token_* / cost_* | AgentScope `Model` 抽象外层的观测 Middleware（统一拦截，见 §8.4） |
 | draft_* | `DraftBuilder` 出口 + confirmation gate 回调 |
-| node_* / gate_* | `supervisor` 节点调度器 + 各 gate |
+| orchestration_* / gate_* | `flows/` 的步骤调度（顺序 `await` / `asyncio.gather` 的应用层代码）+ 各 gate |
 
 ### 5.4 SLI / SLO 与告警
 
@@ -330,7 +354,7 @@ class ObservabilityContext:
 | 会话 P99 延迟 | 诊断能力 ≤60s / 编排能力 ≤120s | P99 连续 10min 超阈值 | P2 |
 | 工具调用错误率 | <1% | 5min 错误率 >5% | P1 |
 | LLM schema 失败率 | <0.5% | 5min 失败率 >2% | P2 |
-| 递归上限命中率 | <2% | 10min 命中率 >5% | P2 |
+| 步数/工具调用预算命中率 | <2% | 10min 命中率 >5% | P2 |
 | 低置信转人工占比 | 监控不告警（健康兜底） | **突增**（同比 +50%）告警 | P3 |
 | token/会话 P95 | 基线 ±20% | 超基线 1.5× 持续 30min | P3（成本漂移） |
 | 写工具被拦 | 0 | 任意一次 >0 | P0（红线越界） |
@@ -343,8 +367,9 @@ class ObservabilityContext:
 # app/infrastructure/obs/metrics.py
 from prometheus_client import Counter, Histogram, Registry
 
-class MetricsCollector:
-    """指标层：所有埋点集中在此，业务节点调它，不直接碰 prometheus 原语。"""
+class MetricsMiddleware:
+    """指标层：自定义观测 Middleware 链上的一段，所有 prometheus 埋点集中在此，
+    业务代码不直接碰 prometheus 原语（本项目内部封装命名，非框架 API）。"""
 
     def __init__(self, registry: Registry) -> None:
         self._session_total = Counter(
@@ -358,7 +383,7 @@ class MetricsCollector:
             buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0), registry=registry,
         )
         self._low_conf = Counter(
-            "agent_low_confidence_total", "Low-confidence handoffs", ["capability"], registry=registry
+            "agent_low_confidence_total", "Low-confidence escalations (转人工)", ["capability"], registry=registry
         )
         self._llm_tokens = Counter(
             "agent_token_total", "LLM tokens", ["model", "direction", "capability"], registry=registry
@@ -411,7 +436,7 @@ class MetricsCollector:
 
 ### 6.3 脱敏
 
-- 工具入参出参与 prompt 摘要进日志/trace 前，经 `Redactor` 脱敏：
+- 工具入参出参与 prompt 摘要进日志/trace 前，经 `Redactor`（挂在 Middleware 链上的业务专属段）脱敏：
   - 序列号保留前 4 后 2（`SN-0012****89`）🔴 规则待定。
   - 物料批次、供应商信息、工艺参数阈值按白名单字段保留，其余打码。
   - 用户 PII（工程师 ID 之外的个人信息）不采集。
@@ -449,9 +474,9 @@ trace 落 MySQL 的平铺视图，给工程师 UI 用（trace 后端 Tempo/Jaege
 
 | 表 | 来源 | 用途 |
 |----|------|------|
-| `tool_call_trace` | 诊断能力 `ToolNode`（[诊断能力 §5.2](FactoryAgent/FactoryAgent-诊断能力.md)） | 工具调用证据 |
+| `tool_call_trace` | 诊断能力 `Toolkit` 工具执行（[诊断能力 §5.2](FactoryAgent/FactoryAgent-诊断能力.md)） | 工具调用证据 |
 | `draft_trace` | 草稿能力 `DraftBuilder` | 草稿生成证据 |
-| `node_trace` | 编排能力 `supervisor` | 编排节点执行（含 CODE/agent 区分） |
+| `node_trace` | 编排能力 `flows/` 的步骤调度（应用层 Python 代码，非框架图/管道原语） | flow 步骤执行（含 CODE/AGENT 性质区分；列名 `node_type` 是本表拟定列名，非图节点语义） |
 | `llm_call_log` | 通用 `LlmCallLogger` | LLM 调用明细（token/成本/模型） |
 | `diagnosis_session` / `diagnosis_report` | 诊断能力 | 会话与报告 |
 
@@ -468,7 +493,8 @@ class Hypothesis(BaseModel):
 
 - `evidence` 存的是 `tool_call_trace.trace_id` 列表，UI 点开即拉对应行的入参出参。
 - 证据**必须非空**：`ReportParser` 校验每条 hypothesis 至少引用 1 条 trace，否则判 schema 失败重试——没有证据的假设不许输出（与 诊断能力 §5.3 的 Pydantic 强约束一致）。
-- 草稿能力的 `evidence_refs` 同样引用 `trace_id` + `subgraph_ref`（[草稿能力 §8.3](FactoryAgent/FactoryAgent-草稿编写能力.md)），编排能力动作卡的 `evidence` 引用 `trace_id` 列表 + `agent_hypothesis`。
+- 草稿能力的 `evidence_refs` 同样引用 `trace_id` + `evidence_set_id`（[草稿能力 §8.3](FactoryAgent/FactoryAgent-草稿编写能力.md)），编排能力动作卡的 `evidence` 引用 `trace_id` 列表 + `agent_hypothesis`。
+- **追溯口径唯一**：跨能力/跨服务的证据引用一律写 `evidence_set_id`，需要细节时由 `fetch_evidence_set(evidence_set_id)` 回查**关系型证据子集**；**不引入**图/子图/快照边之类的表达（[ADR-03](../架构设计v2/00-架构决策记录ADR.md)：坚决不用图检索）。
 
 ### 7.3 工程师 UI 回溯交互
 
@@ -485,9 +511,9 @@ class Hypothesis(BaseModel):
 - 每条证据可下钻到下游 REST 调用（通过 trace_id 在 Tempo/Jaeger 查完整 span）。
 - 置信度 <0.5 的报告**不展示给操作工**，只推工程师，且标红"需复核"。
 
-### 7.4 编排能力的节点类型区分
+### 7.4 编排能力的 flow 步骤性质区分
 
-编排能力的 `node_trace.node_type` 区分 `CODE`（纯 Python 函数节点，不调 LLM）与 `agent`（调 LLM + 工具）。这让可观测时能统计"本次换线调了几次 LLM"（[编排能力 §8.1](FactoryAgent/FactoryAgent-流程编排能力.md)）——换线顺利时 LLM 调用应趋近 0，这是编排能力的核心健康度信号。
+编排能力的 `node_trace.node_type`（本表拟定列名）区分 `CODE`（纯 Python 函数步骤，不调 LLM）与 `AGENT`（调 LLM + 工具的步骤）。这让可观测时能统计"本次换线调了几次 LLM"（[编排能力 §8.1](FactoryAgent/FactoryAgent-流程编排能力.md)）——换线顺利时 LLM 调用应趋近 0，这是编排能力的核心健康度信号。这里的"步骤"指本项目 `flows/` 应用层代码的一次执行，**不是图/管道节点**（框架无此类原语）。
 
 ---
 
@@ -495,7 +521,7 @@ class Hypothesis(BaseModel):
 
 ### 8.1 LLM 调用观测
 
-每次 `model_node` 调 LLM 落一行 `llm_call_log`：
+Agent 每一步内置 ReAct 的模型调用都落一行 `llm_call_log`：
 
 | 字段 | 说明 |
 |------|------|
@@ -528,31 +554,31 @@ class Hypothesis(BaseModel):
 
 ### 8.4 多 provider 观测一致性
 
-- `llm_factory` 出品的模型统一包一层 `ObservableChatModel`，拦截所有 provider 的调用，统一记 `llm_call_log` + 指标——无论 Claude / 通义千问 / DeepSeek / 本地模型，观测口径一致。
-- 不同 provider 的 token 计数口径差异（如中文 token）在包装层归一化，避免指标不可比。
+- 模型统一经 AgentScope **`Model` 抽象**接入（provider 可插拔），在其调用链上挂一段本项目自定义的观测 Middleware，拦截所有 provider 的调用，统一记 `llm_call_log` + 指标——无论 Claude / 通义千问 / DeepSeek / 本地模型，观测口径一致。
+- 不同 provider 的 token 计数口径差异（如中文 token）在该 Middleware 内归一化，避免指标不可比；token 口径统一取消息 `usage` 字段。
 
 ```python
 # app/infrastructure/obs/llm_obs.py
-class ObservableChatModel(BaseChatModel):
-    """包装任意 BaseChatModel，统一埋 LLM 观测。provider 无关。"""
+class ModelObsMiddleware:
+    """本项目自定义的模型观测 Middleware，挂在 `Model` 调用的 Middleware 链上。
+    provider 无关；方法签名是本项目内部封装命名，非框架 API。"""
 
-    def __init__(self, inner: BaseChatModel, obs: ObservabilityPort,
-                 model_name: str, prompt_version: str) -> None:
-        self._inner = inner
+    def __init__(self, obs: ObservabilityPort, model_name: str, prompt_version: str) -> None:
         self._obs = obs
         self._model = model_name
         self._prompt_version = prompt_version
 
-    async def _agenerate(self, messages, **kw):
+    async def on_model_call(self, next_call, messages, **kw):
         t0 = time.perf_counter()
         try:
-            resp = await self._inner._agenerate(messages, **kw)
+            resp = await next_call(messages, **kw)
             latency_ms = int((time.perf_counter() - t0) * 1000)
+            usage = resp.usage                      # 消息自带 usage（框架能力）
             self._obs.llm_called(
                 model=self._model, prompt_version=self._prompt_version,
-                prompt_tokens=resp.usage_metadata.prompt_tokens,
-                completion_tokens=resp.usage_metadata.completion_tokens,
-                latency_ms=latency_ms, finish_reason=resp.response.finish_reason,
+                prompt_tokens=usage.input_tokens,
+                completion_tokens=usage.output_tokens,
+                latency_ms=latency_ms, finish_reason=resp.finish_reason,
             )
             return resp
         except Exception as e:
@@ -616,7 +642,7 @@ class ObservableChatModel(BaseChatModel):
 
 ### 10.2 离线评测流程
 
-- `EvalRunner` 跑全集：对每个 case 跑 Agent，比对实际报告与预期，算指标。
+- `EvalRunner` 跑全集：对每个 case 跑 Agent，比对实际报告与预期，算指标。**评测栈是本项目自建的**：自研 `EvalRunner` + 三层判定（程序化断言 / 指标阈值 / LLM-as-judge）+ pass^k（同一 case 连续 k 次全对才算过）+ pytest CI 门禁；框架侧**不提供**内生评测（1.x 的 `agentscope.evaluate` 在 2.0 已删除且未回归），只提供 `TracingMiddleware` 的 trace 事件作为过程数据来源。judge 用**独立包 `py-openjudge`**（独立仓库/独立 PyPI 包，`agentscope` 内无引用，需单独 pin 版本）。MES 安全硬断言与版本锚点校验作为**专属附加层**保留在指标之上，属 hard gate，不因引入 judge 而削弱。
 - 触发时机：模型升级、提示词 `prompt_version` 变更、工具集调整、定期回归。
 - 评测脚本走 pytest，可进 CI 作为发版门禁（🔴 是否硬门禁待定）。
 
@@ -634,6 +660,8 @@ class ObservableChatModel(BaseChatModel):
 | 草稿采纳率（草稿能力） | 被工程师采纳下达的草稿 / 总草稿 | 待定 |
 | 置信度校准误差（ECE） | 预测置信度与实际准确率的加权差 | ECE < 0.1 |
 | 工具调用冗余 | 实际工具调用数 / 最少必要数 | 越接近 1 越好 |
+| **pass^k（主轴）** | 同一 case 连续 k 次运行**全部**通过的比例（k 由评审定，口径对齐 ADR-10 的 pass^8） | 待定 |
+| **每成功任务成本**（cost-per-successful-task，主轴） | 总花费 / 通过 pass^k 的 case 数 | 待定 |
 
 ```python
 # app/infrastructure/obs/eval/runner.py
@@ -642,19 +670,25 @@ class EvalRunner:
         self._svc = svc
         self._cases = cases
 
-    async def run_suite(self, model_version: str, prompt_version: str) -> EvalReport:
+    async def run_suite(self, model_version: str, prompt_version: str, k: int = 8) -> EvalReport:
+        # 自研 runner：三层判定 = 程序化断言 / 指标阈值 / LLM-as-judge（独立包 py-openjudge）
+        # pass^k：同一 case 连续跑 k 次，全过才算过（框架无内生评测，agentscope.evaluate 在 2.0 已删除）
         results = []
         for case in await self._cases.all():
-            report = await self._svc.diagnose(case.to_request(), case.tenant)
+            runs = [await self._svc.diagnose(case.to_request(), case.tenant) for _ in range(k)]
             results.append(EvalResult(
                 case_id=case.id,
-                accuracy=case.match(report),           # top-1 假设命中?
-                evidence_recall=case.evidence_recall(report),
-                confidence=report.confidence,
+                passed_all=all(r.passed_hard_gates for r in runs),   # 版本锚点/写权限/越权 = hard gate
+                accuracy=case.match(runs[0]),                         # top-1 假设命中?
+                evidence_recall=case.evidence_recall(runs[0]),
+                confidence=runs[0].confidence,
+                cost=sum(r.total_cost for r in runs),
             ))
         return EvalReport(
             model_version=model_version,
             prompt_version=prompt_version,
+            pass_k=sum(r.passed_all for r in results) / len(results),
+            cost_per_successful_task=self._cost_per_success(results),
             accuracy=sum(r.accuracy for r in results) / len(results),
             ece=self._expected_calibration(results),
             details=results,
@@ -695,12 +729,12 @@ class EvalRunner:
 |---------|------|---------|
 | `confidence < 0.5` | `needs_human_review=True`，推工程师不推操作工 | `agent_low_confidence_total` +1，report 标记 |
 | 工具连续失败 3 次 | 终止会话，转人工 | `agent_tool_error_total`，session status=FAILED，span ERROR |
-| `recursion_limit` 命中 | 转人工 | `agent_recursion_limit_hit_total` +1，span TIMEOUT |
+| 步数与工具调用预算上限命中 | 转人工 | `agent_step_budget_hit_total` +1，span TIMEOUT |
 | 整会话超时 60s/120s | 转人工 | `agent_session_timeout_total` +1 |
 | LLM schema 校验失败重试 N 次 | 转人工 | `agent_llm_schema_error_total` +1 |
 | 写工具未带有效 confirmation token（编排能力） | `WriteToolGate` 拒绝 + 告警 | `orchestration_write_rejected_total` +1，P0 告警 |
 | 证据为空（hypothesis 无 evidence） | schema 校验失败，重试 | `agent_llm_schema_error_total` +1 |
-| `subgraph_ref` 回查为空（草稿能力） | 草稿标 `needs_review`，intent 注明证据不完整，不硬凑 | `draft_low_confidence_total` +1 |
+| `evidence_set_id` 回查为空（草稿能力） | 草稿标 `needs_review`，intent 注明证据不完整，不硬凑 | `draft_low_confidence_total` +1 |
 | 草稿 `requires_confirmation` 恒 True（草稿能力） | 前端无法绕过确认下达；草稿能力不持有写 client | `draft_rejected_total` +1 |
 | gate 等待超 deadline（编排能力） | 自动挂起 `SUSPENDED`，推责任人，不无限阻塞 | `orchestration_suspended_total` +1 |
 | barrier 未 PASS（编排能力） | 禁止推放行卡，分流到 agent 或挂起 | `orchestration_suspended_total` +1 |
@@ -779,21 +813,24 @@ drift_report
 
 ### 14.1 obs/ 包扩展
 
-在 [诊断能力 §6](FactoryAgent/FactoryAgent-诊断能力.md) 的 `infrastructure/obs/` 基础上扩展：
+通用采集由框架 `TracingMiddleware`（OTel）承担；研发期调试可视化**不用已归档的 Studio**，走 Tempo/Jaeger trace 视图 + `reply_stream` 事件回放（§4.4）。本包的定位是**挂在 Middleware 链上的业务专属观测段**，
+在 [诊断能力 §6](FactoryAgent/FactoryAgent-诊断能力.md) 规划的 `infrastructure/obs/` 设计上扩展——**注意：以下包结构是设计目标，代码仓当前未落地**：
 
 ```text
 app/infrastructure/obs/
-  context.py            # ObservabilityContext
-  port.py               # ObservabilityPort（抽象，业务节点依赖它）
-  tracing.py            # Tracing（OTel span 封装）
-  metrics.py            # MetricsCollector（prometheus）
+  context.py            # ObservabilityContext（随会话流动的 MES 观测上下文）
+  port.py               # ObservabilityPort（抽象，业务侧依赖它）
+  tracing.py            # MesSpanEnricher（补 OTel span 的 MES 维度）
+  metrics.py            # MetricsMiddleware（prometheus 指标出口）
   logging.py            # 结构化日志 + trace 关联
-  redactor.py           # 脱敏（纯函数）
-  llm_obs.py            # ObservableChatModel 包装、LlmCallLogger
+  redactor.py           # 脱敏 Redactor（纯函数，挂在 Middleware 链上）
+  llm_obs.py            # ModelObsMiddleware（`Model` 调用观测）、LlmCallLogger
+  tool_obs.py           # ToolObsMiddleware（`Toolkit` 工具执行观测）
+  budget.py             # 步数与工具调用预算拦截
   cost.py               # CostEstimator（单价表 -> 估算）
   calibration.py        # 置信度标定曲线
   eval/
-    runner.py           # EvalRunner
+    runner.py           # 自研 EvalRunner（三层判定 + pass^k；judge 依赖独立包 py-openjudge）
     cases.py            # EvalCaseRepo
     metrics.py          # ECE / accuracy / recall
     drift.py            # PSI / 分布对比
@@ -801,7 +838,7 @@ app/infrastructure/obs/
 
 ### 14.2 核心抽象（ObservabilityPort）
 
-业务节点依赖抽象，不依赖具体实现——符合 DIP，测试时可换 `InMemoryObservability`：
+业务侧依赖抽象，不依赖具体实现——符合 DIP，测试时可换 `InMemoryObservability`：
 
 ```python
 # app/infrastructure/obs/port.py
@@ -820,50 +857,47 @@ class ObservabilityPort(Protocol):
     def write_blocked(self, write_tool): ...
 ```
 
-### 14.3 ToolNode 注入观测（修订诊断能力 §7.2）
+### 14.3 工具执行注入观测（修订诊断能力 §7.2）
 
-诊断能力的 `ToolNode` 已有 trace 落库 + 指标雏形，本篇把它收敛到依赖 `ObservabilityPort`，统一三层级：
+诊断能力的工具执行在 [诊断能力](FactoryAgent/FactoryAgent-诊断能力.md) 里已给出 trace 落库 + 指标的**设计雏形（代码尚未落地）**，本篇把它收敛到依赖 `ObservabilityPort`，挂在 `Toolkit` 工具执行的 Middleware 位上，统一三层级。
+注意分工：**权限判定归 `Permission`（在每次工具执行处拦截）**，本段只负责把结果落进 trace/指标/日志，不复制一套权限逻辑。
 
 ```python
-# app/infrastructure/ai/tool_node.py
-class ToolNode:
+# app/infrastructure/obs/tool_obs.py
+class ToolObsMiddleware:
+    """`Toolkit` 工具执行的观测段（方法签名是本项目内部封装命名，非框架 API）。"""
+
     def __init__(self, registry, trace_repo, obs: ObservabilityPort) -> None:
         self._registry = registry
         self._trace_repo = trace_repo
         self._obs = obs
 
-    async def __call__(self, state: AgentState) -> AgentState:
-        obs_ctx = state["obs_ctx"]
-        results = []
-        for call in state["pending_tool_calls"]:
-            tool = self._registry._descriptors.get(call["name"])
-            if tool is None or not obs_ctx.tenant.can_access(tool.required_tenant_scopes):
-                await self._trace_repo.save_denied(call["name"], obs_ctx.tenant)
-                self._obs.tool_denied(call["name"])
-                results.append(self._deny_result(call))
-                continue
-            t0 = time.perf_counter()
-            with self._obs.tool_span(obs_ctx, tool):
-                try:
-                    args = tool.args_schema.model_validate(call["args"])
-                    view = await tool.handler(**args.model_dump(), tenant=obs_ctx.tenant)
-                    self._obs.tool_ok(tool.name, time.perf_counter() - t0)
-                    await self._trace_repo.save_ok(
-                        call["name"], tool.bounded_context, args, view,
-                        int((time.perf_counter() - t0) * 1000), obs_ctx,
-                    )
-                    results.append(self._ok_result(call, view))
-                except Exception as e:
-                    self._obs.tool_error(tool.name)
-                    await self._trace_repo.save_error(call["name"], e, obs_ctx)
-                    results.append(self._err_result(call, str(e)))
-        state["tool_results"] = results
-        state["pending_tool_calls"] = []
-        return state
+    async def on_tool_call(self, call: dict, obs_ctx: ObservabilityContext) -> dict:
+        tool = self._registry.get(call["name"])
+        if tool is None or not obs_ctx.tenant.can_access(tool.required_tenant_scopes):
+            await self._trace_repo.save_denied(call["name"], obs_ctx.tenant)
+            self._obs.tool_denied(call["name"])
+            return self._deny_result(call)
+        t0 = time.perf_counter()
+        with self._obs.tool_span(obs_ctx, tool):
+            try:
+                args = tool.args_schema.model_validate(call["args"])
+                view = await tool.handler(**args.model_dump(), tenant=obs_ctx.tenant)
+                self._obs.tool_ok(tool.name, time.perf_counter() - t0)
+                await self._trace_repo.save_ok(
+                    call["name"], tool.bounded_context, args, view,
+                    int((time.perf_counter() - t0) * 1000), obs_ctx,
+                )
+                return self._ok_result(call, view)
+            except Exception as e:
+                self._obs.tool_error(tool.name)
+                await self._trace_repo.save_error(call["name"], e, obs_ctx)
+                return self._err_result(call, str(e))
 ```
 
 - `trace_repo.save_*` 多传 `obs_ctx`，让 `tool_call_trace` 带 `trace_id` / `session_id` / `tenant`，证据链可串。
 - 工具入参出参经 `Redactor` 后再落 `tool_call_trace` 与日志（§6.3）。
+- 大结果的回灌走 `Offloader` / `ToolOffloadMiddleware`（见 [AgentToken成本优化-设计与实现方案.md](AgentToken成本优化-设计与实现方案.md)），本段只在卸载前后各记一次属性，不重复搬数据。
 
 ---
 
@@ -915,17 +949,19 @@ class ToolNode:
 
 ## 17. 实现步骤（分阶段）
 
+> **起点核实**：代码仓 `E:\factorybot` 目前只有脚手架（`src/` 下 `agents/tool_test.py`、`api/{health,index,tool_test}.py`、`schemas/tool_test.py`、`tools/get_current_time.py`、`factory.py`），**观测底座与三项能力均未落地**。本节全部条目是**待建步骤（设计目标）**，不是"已完成/已上线"清单。
+
 ### 阶段一：链路与指标底座（2 周）
 
-1. 接 OTel Python SDK + `httpx` instrumentation，trace 发 Collector，`traceparent` 透传到 Java。
-2. 实现 `ObservabilityContext` / `Tracing` / `MetricsCollector` / `ObservabilityPort`。
-3. 修订诊断能力的 `ToolNode` 依赖 `ObservabilityPort`，`tool_call_trace` 带 `trace_id`/`session_id`/`tenant`。
+1. 接 OTel Python SDK + `httpx` instrumentation，trace 发 Collector，`traceparent` 透传到 Java；同时接入框架 `TracingMiddleware`（研发期调试用 Tempo/Jaeger trace 视图 + `reply_stream` 事件回放，**不引已归档的 Studio**）。
+2. 实现 `ObservabilityContext` / `MesSpanEnricher` / `MetricsMiddleware` / `ObservabilityPort`（本项目自定义的 Middleware 段与抽象）。
+3. 修订诊断能力的 `Toolkit` 工具执行观测段依赖 `ObservabilityPort`，`tool_call_trace` 带 `trace_id`/`session_id`/`tenant`。
 4. 接 prometheus `/metrics`，落地 §5.2 通用指标。
 5. 结构化日志 + trace 关联（`LoggingContext`）。
 
 ### 阶段二：业务视图与证据链（1 周）
 
-6. `llm_call_log` 表 + `ObservableChatModel` 包装，统一多 provider 观测。
+6. `llm_call_log` 表 + `ModelObsMiddleware`，统一多 provider 观测。
 7. `CostEstimator` + `agent_cost_usd_total`。
 8. 工程师 UI：报告 + 证据链点开回溯 trace（[诊断能力 §9 阶段三](FactoryAgent/FactoryAgent-诊断能力.md)）。
 
@@ -957,9 +993,9 @@ class ToolNode:
 - [ ] 观测不进过点主事务，不挂在过点 P99 ≤200ms 路径上。
 - [ ] 观测数据按 `TenantContext` 隔离，A 车间查不到 B 车间 trace。
 - [ ] 每个会话一个 root span，`traceparent` 透传到下游 Java 服务（OTel httpx 自动注入）。
-- [ ] `ToolNode` 依赖 `ObservabilityPort` 抽象，不直接依赖 OTel/prometheus 实现。
+- [ ] `Toolkit` 工具执行的观测段依赖 `ObservabilityPort` 抽象，不直接依赖 OTel/prometheus 实现；权限判定仍归 `Permission`，不在此复制。
 - [ ] 每步工具调用落 `tool_call_trace`，带 `trace_id`/`session_id`/`tenant`，证据链可回溯。
-- [ ] LLM 调用统一经 `ObservableChatModel` 包装，`llm_call_log` 记 token/成本/模型/`prompt_version`。
+- [ ] 模型调用统一经 `ModelObsMiddleware`（挂在 `Model` 抽象的 Middleware 链上），`llm_call_log` 记 token/成本/模型/`prompt_version`。
 - [ ] 报告每条 hypothesis 至少引用 1 条 evidence（trace_id），否则 schema 失败重试。
 - [ ] `confidence < 0.5` 置 `needs_human_review`，不展示给操作工，`agent_low_confidence_total` +1。
 - [ ] 兜底矩阵每分支都落 trace 事件 + 指标 + 日志。
@@ -976,10 +1012,10 @@ class ToolNode:
 A：普通 APM 回答"接口慢不慢、服务挂没挂"，Agent 可观测性要额外回答"这条 AI 根因假设凭什么、要不要转人"。核心区别是产物——APM 出火焰图，Agent 出**证据链**（假设 -> trace_id -> 工具结果 -> 下游数据）。而且 Agent 多了通用服务没有的质量维度：准确率、置信度校准、漂移、token 成本。MES 场景下 AI 决策必须可审计，所以把可观测性独立成三项能力共用底座，而不是各写各的埋点。
 
 **Q：trace 落 Tempo，又落 MySQL 的 `tool_call_trace`，不是重复吗？**
-A：不重复，是同一份 trace 的两种投影。Tempo/Jaeger 给 SRE 看火焰图，是底；`tool_call_trace` 是平铺视图给工程师 UI 用，是面。工程师不需要懂 span 树，他点假设 -> 弹证据 -> 看工具入参出参，这个交互用 MySQL 平铺表最直接。两者同源（都来自 `ToolNode` 的同一次调用），trace_id 串起来，不各说各话。
+A：不重复，是同一份 trace 的两种投影。Tempo/Jaeger 给 SRE 看火焰图，是底；`tool_call_trace` 是平铺视图给工程师 UI 用，是面。工程师不需要懂 span 树，他点假设 -> 弹证据 -> 看工具入参出参，这个交互用 MySQL 平铺表最直接。两者同源（都来自 `Toolkit` 的同一次工具执行），trace_id 串起来，不各说各话。
 
 **Q：观测挂了会不会影响 Agent 跑？**
-A：不会。观测是旁路，业务节点依赖 `ObservabilityPort` 抽象，具体实现挂了（OTel exporter 挂、prometheus 挂）业务照样跑，只是该次无 trace。这和"Agent 失败最坏是没诊断出来"一脉相承——观测失败最坏是没记录，不会反噬业务。这条用 DIP 保证：业务依赖抽象，不依赖观测实现。
+A：不会。观测是旁路，业务侧依赖 `ObservabilityPort` 抽象，具体实现挂了（OTel exporter 挂、prometheus 挂）业务照样跑，只是该次无 trace。这和"Agent 失败最坏是没诊断出来"一脉相承——观测失败最坏是没记录，不会反噬业务。这条用 DIP 保证：业务依赖抽象，不依赖观测实现。
 
 **Q：置信度模型说 0.8 就真有 80% 准吗？怎么保证不误导？**
 A：不保证，所以要**标定**。离线用评测集跑，把预测按置信度分桶算每桶实际准确率，画 reliability diagram，overconfident 就用 Platt/isotonic 修正。标定曲线版本化，随模型/提示词变更重标。加上 `confidence < 0.5` 转 `needs_human_review` 不推操作工、报告带 disclaimer——多层兜底，宁可让人判。这不是单点信任模型自评，是标定 + 阈值 + 兜底的组合。
@@ -994,7 +1030,7 @@ A：靠 W3C `traceparent`。Agent 调 Java REST 时 OTel 的 httpx instrumentati
 A：因为转人工是兜底在工作，是健康的——低置信转人说明防错在起作用。告警应该盯**突增**（同比 +50%），那才说明模型或数据出问题了。盯上限会把正常的兜底误报成故障，反而干扰。这个区别写进告警规则，体现你懂"可观测不是堆指标，是分清信号和噪声"。
 
 **Q：token 成本怎么管？会不会烧钱？**
-A：先分清"测得清"和"降得下"。测得清是本篇可观测性的事，降得下是 [AgentToken成本优化-设计与实现方案.md](AgentToken成本优化-设计与实现方案.md) 的事（优先级"少调 > 少发 > 调便宜的"：代码节点归零 / prompt caching / 工具结果压缩 / 版本化缓存 / 过评测门禁的模型路由）。测得清靠三件事：一是 `agent_token_total` 按 prompt/completion 计数，`agent_cost_usd_total` 按单价估算，按租户聚合给管理层看。二是成本漂移检测，token/会话 P95 超基线 1.5× 告警。三是 `recursion_limit` 限制最大步数，从根本上限死单会话 token 上限。编排能力换线顺利时 LLM 调用应趋近 0（`agent_llm_invocation_total`），全靠代码节点跑——懂什么时候不用 AI，就是最大的省钱。
+A：先分清"测得清"和"降得下"。测得清是本篇可观测性的事，降得下是 [AgentToken成本优化-设计与实现方案.md](AgentToken成本优化-设计与实现方案.md) 的事（优先级"少调 > 少发 > 调便宜的"：代码节点归零 / prompt caching / 工具结果压缩 / 版本化缓存 / 过评测门禁的模型路由）。测得清靠三件事：一是 `agent_token_total` 按 prompt/completion 计数，`agent_cost_usd_total` 按单价估算，按租户聚合给管理层看。二是成本漂移检测，token/会话 P95 超基线 1.5× 告警。三是用步数与工具调用预算上限封顶单会话步数，从根本上限死单会话 token 上限。编排能力换线顺利时 LLM 调用应趋近 0（`agent_llm_invocation_total`），全靠代码节点跑——懂什么时候不用 AI，就是最大的省钱。
 
 ---
 

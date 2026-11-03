@@ -1,7 +1,7 @@
 # FactoryAgent 诊断能力（多步只读推理）
 
-> 本文是 [FactoryAgent-总体设计与实现方案.md](FactoryAgent-总体设计与实现方案.md) 中**诊断能力（`diagnosis`）**的落地展开，输出实现方案、图形态、工具集、报告结构与约束。
-> **定位**：诊断能力 = 开放式 ReAct 取证循环。输入是"一个待解释的现象"，输出是"根因假设排序 + 证据链"。它既是一个可独立调用的入口，也是被[草稿编写能力](FactoryAgent-草稿编写能力.md)与[流程编排能力](FactoryAgent-流程编排能力.md)复用的**子图**。
+> 本文是 [FactoryAgent-总体设计与实现方案.md](FactoryAgent-总体设计与实现方案.md) 中**诊断能力（`diagnosis`）**的落地展开，输出实现方案、运行时形态、工具集、报告结构与约束。
+> **定位**：诊断能力 = 开放式 ReAct 取证循环。输入是"一个待解释的现象"，输出是"根因假设排序 + 证据链"。它既是一个可独立调用的入口，也是被[草稿编写能力](FactoryAgent-草稿编写能力.md)与[流程编排能力](FactoryAgent-流程编排能力.md)复用的**能力（`Agent`）**。
 > **口径纪律**：全程**只读**，永不进过点主事务（[领域总览.md](../../领域模型/领域总览.md) §5.3），不旁路任何上下文的写路径。输出是**根因假设 + 证据链 + 建议**，不是结论性判定——最终处置仍由工程师在正式界面确认。
 
 ---
@@ -19,14 +19,14 @@
 3. 查同批次锡膏批次（物料上下文）+ 贴片机当时参数（设备数据接入上下文）
 4. 查同批次其他单件不良率 → 给出 5M1E 假设排序
 
-### 1.2 两种入口，同一套图
+### 1.2 两种入口，同一个 Agent
 
-同一张 ReAct 子图有两种触发方式，入参不同、其余全同：
+同一个 ReAct Agent 有两种触发方式，入参不同、其余全同：
 
 | 入口 | 输入 | 谁触发 | 输出侧重 |
 |------|------|--------|---------|
 | **提问式** | 自然语言问题（"这批焊接不良根因"）+ 业务对象引用 | 工艺 / 质量工程师在 UI 提问 | 5M1E 假设排序 + 处置建议 |
-| **异常驱动式** | 结构化异常（`mismatch{expected, actual, code}` / `fault{asset_id, alarm_at}` / `complaint{batch_no}`） | 编排图的非确定节点、领域事件订阅器 | 根因假设 + 置信度 + 仍需人确认的疑点 |
+| **异常驱动式** | 结构化异常（`mismatch{expected, actual, code}` / `fault{asset_id, alarm_at}` / `complaint{batch_no}`） | 编排 flow 的非确定能力节点、领域事件订阅器 | 根因假设 + 置信度 + 仍需人确认的疑点 |
 
 **关键差别只有一个**：异常驱动式已经有结构化锚点，取证从锚点出发；提问式需要模型自己先把问题落到业务对象上。这正是"能力"与"入口"分离的好处——编排里要判根因时，不需要另写一个"根因 Agent"，只需要换个入参。
 
@@ -34,7 +34,7 @@
 
 | 边界 | 说明 | 落地 |
 |------|------|------|
-| **只读** | 所有工具只读，写工具不注册到该能力 | `CapabilitySpec(writes_allowed=False)` + `ToolPolicyGate` 断言 |
+| **只读** | 所有工具只读，写工具不注册到该能力 | `CapabilitySpec(writes_allowed=False)` + `Permission` 断言 |
 | **无写 client** | ACL 客户端只有 `query/fetch/search` 动词 | `validate_acl_clients` 扫描方法名前缀 |
 | **不进过点主事务** | 不调过点引擎放行 / 拦截 API | 过点 toolset 只暴露 `query_*`；放行类工具全局禁注册 |
 | **版本一致性** | 查工艺必须带版本锚点 | 工具强制版本入参，ACL 校验 `ACTIVE` |
@@ -46,27 +46,27 @@
 ```text
                    ┌────────────────────────────┐
    提问式 ─────────▶│                            │
-                   │      诊断能力（ReAct 子图）  │──▶ DiagnosisReport
+                   │      诊断能力（ReAct Agent）  │──▶ DiagnosisReport
    编排非确定节点 ──▶│  - 自有 toolset（只读）      │      ├─ 5M1E 假设排序
-   领域事件订阅 ────▶│  - 报告 + 证据链 + 置信度    │      ├─ 证据引用（trace_id / subgraph_ref）
+   领域事件订阅 ────▶│  - 报告 + 证据链 + 置信度    │      ├─ 证据引用（trace_id / evidence_set_id）
                    └────────────────────────────┘      └─ needs_human_review
                               ▲
-                              │ 复用同一子图，不重写
+                              │ 复用同一 Agent，不重写
                    ┌──────────┴──────────┐
                    │  草稿编写能力         │  用 report 作为草稿语义骨架
                    │  流程编排能力         │  在异常分支调用它判根因
                    └─────────────────────┘
 ```
 
-- **被草稿复用**：草稿不重复推理，直接消费 `DiagnosisReport`（含 `subgraph_ref` 与证据引用），保证草稿每句话可回溯证据。
+- **被草稿复用**：草稿不重复推理，直接消费 `DiagnosisReport`（含 `evidence_set_id` 与证据引用），保证草稿每句话可回溯证据。
 - **被编排复用**：换线 mismatch、客诉追溯等节点 `invoke("diagnosis", payload, parent_session_id=...)`，共用同一 trace 与租户上下文。
 - **不反向调用**：诊断能力不调草稿、不调编排——它是纯上游。这条单向性让"只读"这个安全属性可以一键验证。
 
 ---
 
-## 2. 图形态：开放式 ReAct 子图
+## 2. 运行时形态：开放式 ReAct Agent
 
-用 LangGraph 的 `StateGraph` 构建 `model ↔ tool` 循环：`model_node`（思考 + 产出 tool calls）与 `tool_node`（执行工具 + 回灌结果）。模型无 tool call 时收口，输出根因报告。
+用 AgentScope 2.0 的统一 `Agent` 类（内置 ReAct）承载 `model ↔ tool` 循环：模型节点（思考 + 产出 tool calls）与工具执行钩子（执行工具 + 回灌结果）。模型无 tool call 时收口，输出根因报告。
 
 ```text
 用户问题 / 结构化异常："单件 SN-001 焊接不良根因"
@@ -88,14 +88,14 @@
 
 **为什么必须开放规划**：取证路径由中间结果驱动（查到"ST-A 借出未还"才去查上工单收线记录），不是固定 JOIN。这是诊断能力"三问"中"分支难以穷举"的命中点——详见 [能力边界与选型决策卡](FactoryAgent-能力边界与选型决策卡.md)。
 
-**节点与边的约束**：
+**循环与预算的约束**：
 
 | 项 | 取值 | 落地 |
 |----|------|------|
-| 最大步数 | `recursion_limit=20` | 一次 model+tool 算 2 步，最多 10 次工具调用；超限抛 `GraphRecursionError` |
+| 最大步数 | 步数与工具调用预算上限 `=20` | 一次 model+tool 算 2 步，最多 10 次工具调用；超预算即终止并兜底 |
 | 单工具超时 | ≤2s | httpx timeout |
-| 整会话超时 | ≤60s | `asyncio.wait_for` 包住图驱动 |
-| 中断恢复 | `SqlSaver` checkpointer | 中间状态落 MySQL，进程重启从断点续跑 |
+| 整会话超时 | ≤60s | `asyncio.wait_for` 包住 Agent 驱动 |
+| 挂起与续跑 | `AgentState` + `SessionService`（Redis-backed） | 中间状态落 Redis，进程重启按 `session_id` 从断点续跑；HITL 用 `event.RequireUserConfirmEvent` |
 | 收口条件 | 模型无 tool call | 输出 `DiagnosisReport`（Pydantic 校验） |
 
 ---
@@ -115,9 +115,9 @@
 | 设备工装台账 | `query_asset_status(asset_id)` / `query_stencil_lending` / `query_stencil_master_history` | 设备状态、钢网借还与主数据变更 |
 | 返修 / 返工 | `query_repair_history(serial_no)` / `query_rework_orders(wo_id)` | 历史返修返工 |
 | 质量 | `query_defect_rate(batch_no)` / `query_history_8d(keywords)` | 批次不良率、历史同类 8D |
-| RAG 服务 | `query_traceability_graph` / `search_docs(query, version_anchor)` | 追溯图（**首位注册**）、文档检索 |
+| RAG 服务 | `query_traceability` / `search_docs(query, version_anchor)` | 追溯读模型（**首位注册**）、文档检索 |
 
-> `query_traceability_graph` 注册在诊断 toolset 首位，system prompt 引导"先调图"；图覆盖不足时再降级到各上下文 REST 补齐。
+> `query_traceability` 注册在诊断 toolset 首位，system prompt 引导"先查追溯读模型"；固定关联查询覆盖不足时再降级到各上下文 REST 补齐。
 
 **工具元数据**：
 
@@ -165,7 +165,7 @@ class DiagnosisReport(BaseModel):
     summary: str
     confidence: float               # 0.0 ~ 1.0
     hypotheses: list[Hypothesis]
-    subgraph_ref: str | None = None  # 追溯子图引用，供草稿能力回查
+    evidence_set_id: str | None = None  # 证据集引用，供草稿能力回查
     version: str | None = None       # 版本锚点（透传自证据）
     version_kind: str | None = None  # route|bom|rule|asset|standard
     version_ref_id: str | None = None
@@ -180,18 +180,18 @@ class DiagnosisReport(BaseModel):
 
 ---
 
-## 5. 关键实现骨架
+## 5. 关键实现骨架（设计目标，尚未落地）
 
-### 5.1 工具执行节点（权限 + trace）
+### 5.1 工具执行钩子（权限 + trace）
 
 ```python
 # app/ai/tool_node.py
 class ToolNode:
-    """LangGraph 工具执行节点：权限校验 -> 调 ACL -> 落 trace。"""
+    """工具执行钩子（挂在 Toolkit 上）：权限校验 -> 调 ACL -> 落 trace。"""
 
-    def __init__(self, registry: ToolRegistry, trace_repo: StepRepo,
+    def __init__(self, toolkit: Toolkit, trace_repo: StepRepo,
                  metrics: MetricsCollector, capability: str = "diagnosis") -> None:
-        self._registry = registry
+        self._toolkit = toolkit
         self._trace_repo = trace_repo
         self._metrics = metrics
         self._capability = capability
@@ -200,7 +200,7 @@ class ToolNode:
         tenant = state["tenant"]
         results = []
         for call in state["pending_tool_calls"]:
-            tool = self._registry.get(call["name"], self._capability, tenant)
+            tool = self._toolkit.get(call["name"], self._capability, tenant)
             if tool is None:
                 await self._trace_repo.save_denied(call["name"], tenant)
                 self._metrics.tool_denied.inc(call["name"])
@@ -252,24 +252,27 @@ class ProcessManagementAclClient:
 
 外部 DTO 不进入能力核心，只暴露 `ProcessRouteView`——防腐层的核心职责。
 
-### 5.3 子图装配与调用
+### 5.3 Agent 装配与调用
 
 ```python
-# app/ai/diagnosis_graph.py
-def build_diagnosis_graph(llm, registry, deps) -> CompiledGraph:
-    g = StateGraph(AgentState)
-    g.add_node("model", ModelNode(llm, registry, capability="diagnosis"))
-    g.add_node("tools", ToolNode(registry, deps.step_repo, deps.metrics, "diagnosis"))
-    g.add_edge(START, "model")
-    g.add_conditional_edges("model", route_tools, ["tools", END])
-    g.add_edge("tools", "model")
-    return g.compile(checkpointer=deps.checkpointer)
+# app/ai/diagnosis_agent.py
+def build_diagnosis_agent(model, toolkit, deps) -> Agent:
+    """诊断能力 = 统一 Agent 类（内置 ReAct）+ 只读 Toolkit 切片。"""
+    return Agent(
+        name="diagnosis",
+        model=model,                                   # AgentScope Model 抽象，可插拔 provider
+        toolkit=toolkit.tools_for("diagnosis", deps.tenant),  # 只读工具切片
+        session_service=deps.session_service,          # AgentState + SessionService（Redis-backed）
+        permission=deps.permission,                    # 每次工具执行前过 Permission 拦截
+        max_steps=20,                                  # 步数与工具调用预算上限
+        tracing=deps.tracing_middleware,               # TracingMiddleware 注入 trace
+    )
 ```
 
 被编排调用时（共用一条 trace）：
 
 ```python
-# 编排图中的非确定节点
+# 编排 flow 中的非确定能力节点
 async def root_cause_node(state: OrchestrationState) -> OrchestrationState:
     result = await runtime.invoke(
         "diagnosis",
@@ -311,15 +314,15 @@ async def root_cause_node(state: OrchestrationState) -> OrchestrationState:
 
 - `confidence < 0.5` → `needs_human_review`，只推工程师不推操作工。
 - 连续 3 次工具失败 → 终止会话转人工，不空转消耗。
-- `GraphRecursionError` / 超时 → 返回 `DiagnosisReport.partial(...)`"诊断未完成，已转人工"，不硬答。
+- 超步数预算 / 超时 → 返回 `DiagnosisReport.partial(...)`"诊断未完成，已转人工"，不硬答。
 - 主动触发（`defect_rate.spike` 等只读事件）同样落 report 并推工程师，不自动触发任何写。
 
 ---
 
 ## 7. 实现步骤
 
-1. 装配 ReAct 子图 + 一个 LLM provider（`llm_factory` 可插拔）。
-2. 实现 2–3 个核心 toolset（过点 / 工艺 / RAG 图），跑通提问式闭环。
+1. 装配 ReAct Agent + 一个 LLM provider（AgentScope `Model` 抽象可插拔）。
+2. 实现 2–3 个核心 toolset（过点 / 工艺 / RAG 追溯读模型），跑通提问式闭环。
 3. 落 `ToolNode`：权限过滤 + trace 落库 + 指标埋点。
 4. 固化 `DiagnosisReport` / `Hypothesis` / `FiveM1ECategory` 与解析器。
 5. 补全 `open_questions` 与置信度阈值兜底。
@@ -339,7 +342,7 @@ async def root_cause_node(state: OrchestrationState) -> OrchestrationState:
 - [ ] 过点 toolset 只含 `query_*`，无放行 / 拦截类工具（全局前缀断言）。
 - [ ] 每步工具调用落 `agent_step_record`，`traceparent` 透传下游 Java 服务。
 - [ ] 报告带置信度与 disclaimer，`< 0.5` 转人工不展示给操作工。
-- [ ] 单工具 ≤2s、整会话 ≤60s、`recursion_limit ≤20`。
+- [ ] 单工具 ≤2s、整会话 ≤60s、步数与工具调用预算上限 ≤20。
 - [ ] 被编排调用时 `parent_session_id` 落库，跨能力同 trace。
 - [ ] 主动触发只订阅只读事件，产出仍需人确认。
 
@@ -348,7 +351,7 @@ async def root_cause_node(state: OrchestrationState) -> OrchestrationState:
 ## 9. 面试防守 Q&A
 
 **Q：诊断能力为什么不单独做成一个 Agent？**
-A：因为它不只被"提问"用。换线 mismatch 后判根因、客诉追溯做 5M1E 排序，都要同一种能力——开放式取证循环。做成独立 Agent 就有两个后果：编排里要判根因时只能"远程调一个服务"或"复制一份推理逻辑"；会话表和 trace 断成两截。现在它是一个**可被 invoke 的子图**，编排用它只要换入参（结构化异常），并且 `parent_session_id` 把两条链串在同一条 trace 上。
+A：因为它不只被"提问"用。换线 mismatch 后判根因、客诉追溯做 5M1E 排序，都要同一种能力——开放式取证循环。做成独立 Agent 就有两个后果：编排里要判根因时只能"远程调一个服务"或"复制一份推理逻辑"；会话表和 trace 断成两截。现在它是**一个可被 flow `await` 复用的能力（统一 `Agent` 的只读 ReAct 循环）**，编排用它只要换入参（结构化异常），并且 `parent_session_id` 把两条链串在同一条 trace 上。
 
 **Q：怎么保证诊断不会基于失效工艺给根因？**
 A：`query_process_route` 强制版本入参，ACL 层校验 `ACTIVE`，否则返回错误让模型重试。过点记录本身绑工艺版本（§5.1），模型从过点记录拿到的版本就是当时生产用的版本——版本一致性是从领域模型兜上来的，不是 Agent 自己保证的。
@@ -359,11 +362,11 @@ A：工具注册时声明 `required_tenant_scopes`，`ToolNode` 调用前按会�
 **Q：诊断失败会不会误导操作工？**
 A：报告带置信度，`< 0.5` 标 `needs_human_review` 只推工程师；工具连续失败 3 次终止转人工；报告含 disclaimer。诊断全程只读，最坏情况是"没诊断出来"，不产生写副作用——和 MES 防错理念一致，宁可拦下让人判。
 
-**Q：为什么把追溯图工具注册在首位？**
-A：图已经把 `SNAPSHOT_OF_ROUTE` 结构性锁进快照，一次查询就能拿到"当时生产用的工艺版本 + 跨上下文证据节点"，避免模型多次往返后才对齐版本；图覆盖不足时再降级到各上下文 REST 补齐。这是"先图后 REST"的顺序，不是二选一。
+**Q：为什么把追溯工具注册在首位？**
+A：追溯走的是 rag-service 的关系型读模型（`query_traceability` → 按 `evidence_set_id` 回查关系型证据子集），版本锚点在写入证据集时就和批次/工单/工序钉在一起，一次查询就能拿到"当时生产用的工艺版本 + 跨上下文证据"，避免模型多次往返后才对齐版本。这正是版本锚点三段传递链（诊断 → 草稿 → 写意图）的第一环。固定关联查询计划覆盖不足时再降级到各上下文 REST 只读补齐。这是"先证据集后 REST"的顺序，不是二选一；**不引入图数据库/Cypher/图投影**（ADR-03 非图追溯红线）。
 
 ---
 
 ## 10. 一句话定位
 
-"诊断能力是同一张 ReAct 子图的两种用法——工程师提问时它做多步只读推理，编排的异常分支里它拿结构化 mismatch 直接判根因。全程只读、工具对齐 14 个限界上下文、查工艺强制版本锚点、输出带置信度的 5M1E 假设而非结论，被草稿与编排复用时只换入参不复制逻辑，一条 trace 串到底。"
+"诊断能力是同一个 ReAct 循环（统一 `Agent`）的两种用法——工程师提问时它做多步只读推理，编排的异常分支里它拿结构化 mismatch 直接判根因。全程只读、工具对齐 14 个限界上下文、查工艺强制版本锚点、输出带置信度的 5M1E 假设而非结论，被草稿与编排复用时只换入参不复制逻辑，一条 trace 串到底。"

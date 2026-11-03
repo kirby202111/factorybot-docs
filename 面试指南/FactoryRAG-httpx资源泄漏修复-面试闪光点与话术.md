@@ -1,5 +1,7 @@
 # FactoryRAG httpx 资源泄漏修复 · 面试闪光点与话术（资源生命周期归属 / 构造者即销毁者 / 灰度懒装配的 dispose 条件性）
 
+> **⚠️ 历史实现记录，不参与本仓库口径统一**：本文描述的是 **FactoryRAG 当时真实发生过的 P0 资源泄漏修复**。文中的服务装配形态（`build_gateway_service`、路线级懒装配、`Container.dispose`）是**当时代码的实际形态，保留原样**。本仓库 Agent 侧目标底座已统一为 AgentScope 2.0（见 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md)），但不改写这段历史——"构造者即销毁者"的资源生命周期归属结论与框架无关。
+
 > **定位**：本文是对 FactoryRAG（rag-service）一条 **P0 资源泄漏缺陷**的面试纵深展开。与 factorybot 那轮"代码优化"里 `wiring.py` 的 httpx 泄漏是**同类不同实例**——这次是 E 路线（agentic）装配时创建的 诊断与草稿 委托 httpx 客户端未纳入 Container 生命周期。守口径纪律：做了什么如实讲（构造上移 + dispose 收口 + keyword-only 注入 + None 守卫），不确定的决策点交还用户拍板（client 由谁构造），残留项诚实交代（生命周期测试未补属待办 #5、启动失败路径未单独兜底、4 个预存测试失败非本次引入）。
 >
 > **核心矛盾**：一个分层工整、DDD 组合根清晰的服务，资源却"造了不收"。`build_gateway_service` 在装配时 new 了两个 `httpx.AsyncClient`，传给委托客户端后引用就丢了——既不存 container，`dispose` 也不关。根因不是"忘了写 aclose"，而是**资源生命周期归属错位**：构造资源的地方（路线装配函数）不拥有销毁权，拥有销毁权的地方（`Container.dispose`）不知道资源存在。两个判断贯穿全文：**构造者即销毁者**、**灰度懒装配决定 dispose 必须条件性**。

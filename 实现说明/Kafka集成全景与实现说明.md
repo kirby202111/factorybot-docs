@@ -7,7 +7,7 @@
 > - **在哪用、为什么用（What / Where / Why）**——即**本文**。本文不重复上述 How，只在引用时点明出处；本文的增量是**跨 14 上下文的场景普查、使用模式归纳、闪光点与重难点剖析**。
 > - 领域契约（聚合根 / 事件 / 不变式编号）的权威源是各限界上下文的事件风暴与领域建模文档（`领域模型/`），本文只引用其 topic / 事件名。
 >
-> **适用边界**：覆盖两条 Kafka 路径——① 低频业务契约事件（走 Outbox）；② 高频采集数据（走边缘缓冲 + 直连）；以及两条 Python 旁路消费/生产路径（图投影 / Agent 主动触发 / 动作卡推送）。事务边界、一致性模型、可靠性语义沿用上述权威文档，本文不另行定义。
+> **适用边界**：覆盖两条 Kafka 路径——① 低频业务契约事件（走 Outbox）；② 高频采集数据（走边缘缓冲 + 直连）；以及两条 Python 旁路消费/生产路径（读模型投影 / Agent 主动触发 / 动作卡推送）。事务边界、一致性模型、可靠性语义沿用上述权威文档，本文不另行定义。
 >
 > **口径纪律**：本文出现的吞吐 / 限流 / 保留期数值均为**设计容量目标 + 假设**（参见 [项目亮点与指标卡片](../面试指南/项目亮点与指标卡片.md) §0），不是线上实绩。需按真实集群容量与车间实测量拍板的阈值用 🔴 标注，交还运维 / 架构决策。
 
@@ -19,7 +19,7 @@
 
 2. **两条可靠性路径刻意分工，是整套设计的地基**。低频业务契约事件（过点 / 工单 / 维修 / 物料 / 质量 / 工艺 / 资产）走 **Transactional Outbox**（与业务状态同事务原子，至少一次 + `event_id` 幂等）；高频设备采集（秒级遥测 / 工艺采样 / 单件事件）走**边缘缓冲 + Kafka 直连**（不经 Outbox、不开 DB 事务，不丢不重 + `msg_id` 去重）。这条架构级排除是 Outbox 不被写爆、限流参数可定的根本前提（[Outbox §9.1](业务事件/Outbox设计方案.md)、[高频数据 §2](高频数据/MES高频数据方案.md)）。
 
-3. **Kafka 在本系统承担五种角色**，本文据此组织场景分析：① 配置型主数据的"发布—缓存刷新"投影；② 业务流程的事件编排；③ 双向可逆状态重算；④ 资产生命周期与可用性聚合；⑤ 高频采集搬运。另有两种 Python 旁路角色：⑥ 只读图投影构建；⑦ Agent 主动触发与动作卡推送。
+3. **Kafka 在本系统承担五种角色**，本文据此组织场景分析：① 配置型主数据的"发布—缓存刷新"投影；② 业务流程的事件编排；③ 双向可逆状态重算；④ 资产生命周期与可用性聚合；⑤ 高频采集搬运。另有两种 Python 旁路角色：⑥ 只读关系型读模型投影构建；⑦ Agent 主动触发与动作卡推送。
 
 4. **场景规模**：全系统约 **13 个 topic 命名空间、近百个领域事件**落入 Kafka（见 §3 全景表）。其中走 Outbox 的低频契约事件约 8 成，走 dc.* 直连的高频采集占剩余，外加 `agent.*` 一个跨语言 topic。
 
@@ -58,9 +58,9 @@
 ┌──────┐  ┌────────┐  ┌──────────┐   ┌──────────────┐
 │ Java │  │ Java   │  │ Python   │   │ Python       │
 │ 主体 │  │ 主体   │  │ rag-svc  │   │ agent-svc    │
-│ 各上 │  │ 各上   │  │ Graph    │   │ 事件监听(主动│
+│ 各上 │  │ 各上   │  │ 读模型   │   │ 事件监听(主动│
 │ 下文 │  │ 下文   │  │ Projector│   │ 触发) + 动作 │
-│ 幂等 │  │ 幂等   │  │ -> Neo4j │   │ 卡生产       │
+│ 幂等 │  │ 幂等   │  │ -> MySQL │   │ 卡生产       │
 │ 消费 │  │ 消费   │  │ 只读投影  │   │ agent.*      │
 └──────┘  └────────┘  └──────────┘   └──────────────┘
   消费阵营①：Java 跨上下文协作      消费阵营②③：Python 旁路只读/受限
@@ -85,7 +85,7 @@
 
 | 服务 | 语言栈 | Kafka 角色 | topic | 边界 |
 |---|---|---|---|---|
-| rag-service | Python（aiokafka） | **只读图投影消费者**：订阅 `mes.*/process.*/material.*/quality.*` 增量构建 Neo4j 追溯图 | 复用既有领域事件 topic | 只读投影，`ReadOnlyProjectionGate` 禁止 DELETE/REMOVE；不订 `dc.*` 原始流 |
+| rag-service | Python（aiokafka） | **只读投影消费者**：订阅 `mes.*/process.*/material.*/quality.*` 增量构建 MySQL 关系型追溯读模型（`trace_*` 关系表 + 外键 + 固定关联查询） | 复用既有领域事件 topic | 只读投影，`ReadOnlyProjectionGate` 禁止历史覆盖性删除/改写；不订 `dc.*` 原始流 |
 | agent-service | Python（aiokafka） | **主动触发消费者**：订阅 `ProcessRouteActivated` / `equipment.fault` / 不良率突增等只读事件，触发 草稿能力草拟 / 流程编排 | 复用既有领域事件 topic | 只读旁路，物理隔离不进过点主事务 |
 | agent-service | Python（aiokafka） | **动作卡生产者**：编排能力 confirmation gate 的动作卡 WebSocket（实时）+ Kafka 持久兜底 | `agent.action_cards`（key=`session_id`） | 双通道，Kafka 兜底离线可达可回溯 |
 
@@ -141,7 +141,7 @@
 **架构闪光点**
 
 1. **CQRS 读侧缓存投影 + 降级兜底**：缓存是读优化投影不是事实源，丢失可从权威源重建（[高频数据 §7.1](高频数据/MES高频数据方案.md) 同构思想）。`EquipmentOnline ≠ AssetCommissioned`——通信视角与资产视角独立维护，缓存语义不混淆。
-2. **版本快照不可变**：过点记录锁定 `routeVersion`，工艺变更事件只影响变更后首次过点的在制品，历史追溯免疫后续变更（[领域总览 §5.1](../领域模型/领域总览.md)）。图投影侧用 `[:SNAPSHOT_OF_ROUTE]` 边把版本一致性变成结构属性。
+2. **版本快照不可变**：过点记录锁定 `routeVersion`，工艺变更事件只影响变更后首次过点的在制品，历史追溯免疫后续变更（[领域总览 §5.1](../领域模型/领域总览.md)）。追溯读模型侧用版本锚点三段（`version_kind` / `version` / `version_ref_id`）配合固定关联查询锁定当时版本，把版本一致性变成可断言的数据属性。
 3. **配置生效走 Outbox 同事务**：`ProcessRouteActivated` 与 RouteVersion 状态变更（SUBMITTED->ACTIVATED）+ 旧版本 Deprecate 在同一本地事务，保证"新版本生效 + 旧版本失效 + 通知下游"原子（INV-CX-02）。
 4. **`superseded_by` 区分取代与整体退役**：`QualityGateDeprecated(superseded_by=null)` 才通知工艺管理标记 DRAFT stale 并通知过点移除缓存；规则修订（`rule_id` 不变）不广播，避免噪声。
 
@@ -150,7 +150,7 @@
 1. **缓存与权威源的一致性窗口**：事件最终一致意味着缓存有秒级滞后。若过点恰在"配置已发布、缓存未刷新"窗口内读到旧值，可能放行本应拦截的过点。缓解：缓存未命中降级 REST 兜底 + 关键变更后短暂双读校验 🔴。
 2. **缓存未命中雪崩**：冷启动或缓存大面积失效时，过点降级 REST 打爆权威源。需缓存预热（新消费组 `auto-offset-reset=earliest` 补投影）+ 降级查询限流熔断。
 3. **缓存失效粒度**：质量门禁规则弃用要精确移除缓存中该 `rule_id` 条目，不能整批失效。需 `rule_id+version` 粒度的缓存键设计。
-4. **降级 REST 的版本对齐**：降级查询返回的必须是"当前生效版"，而图投影锁定的是"过点当时版"——两者口径不同，消费侧需明确区分。
+4. **降级 REST 的版本对齐**：降级查询返回的必须是"当前生效版"，而追溯读模型锁定的是"过点当时版"——两者口径不同，消费侧需明确区分。
 
 ---
 
@@ -322,33 +322,33 @@ Kafka 只承载"窄而快"的结构化流与大载荷的**引用**，"大而慢"
 
 ---
 
-### 模式 G：只读图投影构建（rag-service GraphProjector）
+### 模式 G：事件投影到关系型读模型（rag-service ReadModelProjector）
 
 **典型业务节点**
 
-rag-service 的 `GraphProjector` 订阅领域事件流，增量构建 / 更新 Neo4j 追溯图（5M1E 串联）：
+rag-service 的 `ReadModelProjector` 订阅领域事件流，增量构建 / 更新 MySQL 关系型追溯读模型（`trace_*` 关系表，按 5M1E 业务关联组织）：
 
 - MVP 4 上下文：在制品执行（`mes.checkpoint.lifecycle` / `mes.routing.progress` / `wip.*`）+ 工艺管理（`process.route.lifecycle`）+ 物料（`material.bom.lifecycle` / `material.inventory.changed`）+ 质量（`quality.inspection.verdict` / `quality.anomaly.batch`）
 - 后续扩展：设备（`eam.*`）、环境（`dc.*` 语义事件，非原始流）
 
 **Kafka 核心使用方式与作用**
 
-图不是凭空建模，是各上下文领域事件的**只读投影**——与在制品执行的 `ProcessRouteCache` / `EquipmentAvailabilityCache` 同构，只是投影目标是属性图而非键值缓存（[追溯型 RAG §2.3](../RAG服务/追溯型%20RAG/追溯型%20RAG-实现方案.md)）。Kafka 承担"事实流 -> 图增量写入"的投影通道。复用既有领域事件 envelope 与消费侧幂等模式，不造新契约。
+读模型不是凭空建模，是各上下文领域事件的**只读投影**——与在制品执行的 `ProcessRouteCache` / `EquipmentAvailabilityCache` 同构，只是投影目标是一组带索引的关系表而非键值缓存（[rag-service-技术选型和实现方案 §4 非图制造追溯实现](../RAG服务/rag-service-技术选型和实现方案.md)、[rag-service-整体结构设计 §4.2 非图制造追溯](../RAG服务/rag-service-整体结构设计.md)）。Kafka 承担"事实流 -> 读模型表增量写入"的投影通道。复用既有领域事件 envelope 与消费侧幂等模式，不造新契约。
 
 **架构闪光点**
 
-1. **图是只读投影，事实源是聚合根**：`ReadOnlyProjectionGate` 启动断言禁止 `DELETE`/`REMOVE`/历史覆盖性 `SET`。图库归 RAG 服务自有，从不回写 MES。跨语言物理边界天然强制只读。
-2. **版本一致性结构性兜底**：`CheckpointRecord` 节点带 `route_version` + `[:SNAPSHOT_OF_ROUTE]` 边指向当时版本；工艺变更（`ProcessRouteActivated`）只新增版本节点、旧版本 `DEPRECATED` 不删，历史边不动（INV-CX-02）。把"版本一致性"从"LLM 自觉带版本"变成"图结构物理保证"。
-3. **不进过点主事务，允许秒级最终一致**：图索引异步消费事件，过点 P99 ≤200ms 不受图索引影响（[领域总览 §5.3](../领域模型/领域总览.md)）。图挂了过点照常，只是追溯查询退化。
-4. **高频原始流不全量入图**：`assert_no_raw_data_topic` 启动断言兜底，MVP 不订 `dc.*` 原始流（图要的是语义事件不是原始报文）。
-5. **跨语言复用既有契约**：Python rag-service 用 aiokafka 订阅 Java 主体发布的同一套领域事件 envelope（`event_id`/`event_type`/`event_version`/`partition_key`），`event_id` 幂等 + consumer offset（MySQL）+ ACL 降级 REST，不造新管道。
+1. **读模型是只读投影，事实源是聚合根**：`ReadOnlyProjectionGate` 启动断言禁止任何历史覆盖性删除 / 改写（不开放对既有事实行的 DELETE / UPDATE）。读模型库归 RAG 服务自有，从不回写 MES。跨语言物理边界天然强制只读。
+2. **版本一致性确定性兜底**：`CheckpointRecord` 对应的过点行带版本锚点三段（`version_kind` / `version` / `version_ref_id`，此处锚的是工艺版本），固定关联查询按锚点取当时版本；工艺变更（`ProcessRouteActivated`）只新增版本行、旧版本 `DEPRECATED` 不删，历史行不动（INV-CX-02）。把"版本一致性"从"LLM 自觉带版本"变成"读模型结构 + 确定性过滤保证"。
+3. **不进过点主事务，允许秒级最终一致**：读模型投影异步消费事件，过点 P99 ≤200ms 不受读模型投影影响（[领域总览 §5.3](../领域模型/领域总览.md)）。读模型挂了过点照常，只是追溯查询退化。
+4. **高频原始流不全量入读模型**：`assert_no_raw_data_topic` 启动断言兜底，MVP 不订 `dc.*` 原始流（读模型要的是语义事件不是原始报文）。
+5. **跨语言复用既有契约**：Python rag-service 用 aiokafka 订阅 Java 主体发布的同一套领域事件 envelope（`event_id`/`event_type`/`event_version`/`partition_key`），`event_id` 幂等 + consumer offset（MySQL）+ ACL 降级 REST，不造新管道。对外证据回查统一用 `evidence_set_id`（AgentScope `Tool` 形态 `fetch_evidence_set(evidence_set_id)`），见 [rag-service-整体结构设计 §7.2 与 agent-service](../RAG服务/rag-service-整体结构设计.md)。
 
 **实施重难点与技术挑战**
 
-1. **投影滞后与降级**：图允许秒级最终一致，但 诊断若在投影滞后窗口内查询，会拿到不完整图。靠 诊断能力 ACL 降级查询上下文只读 REST 补齐（如 `CONSUMED_BATCH` 边未投影时降级调 `GET /api/material/consumption`）。降级阈值 🔴 待定。
-2. **`CONSUMED_BATCH` 边 gap**：批次反向扩展依赖 `CONSUMED_BATCH` 边，但该边的事件契约（物料消耗明细）尚不明确 🔴。MVP 用降级 REST 兜底，待物料上下文明确消耗明细事件后改投影。
-3. **`event_id` 幂等与位点**：图投影侧 `event_id` 幂等表 + consumer offset 都落 MySQL，重启从断点续消费。幂等记录与图写入须同事务，否则重启会重复写图节点/边。
-4. **图 schema 演进**：Neo4j 图 schema（节点标签 / 边类型 / 属性）随业务演进，已有节点 / 边不能破坏性变更。需图 schema 版本化 + 兼容性策略。
+1. **投影滞后与降级**：读模型允许秒级最终一致，但 诊断若在投影滞后窗口内查询，会拿到不完整读模型。靠 诊断能力 ACL 降级查询上下文只读 REST 补齐（如 `CONSUMED_BATCH` 关联行尚未投影时降级调 `GET /api/material/consumption`）。降级阈值 🔴 待定。
+2. **`CONSUMED_BATCH` 关联 gap**：批次反向扩展依赖 `CONSUMED_BATCH` 关联（物料消耗明细行），但该关联对应的事件契约（物料消耗明细）尚不明确 🔴。MVP 用降级 REST 兜底，待物料上下文明确消耗明细事件后改投影。
+3. **`event_id` 幂等与位点**：读模型投影侧 `event_id` 幂等表 + consumer offset 都落 MySQL，重启从断点续消费。幂等记录与读模型写入须同事务，否则重启会重复写读模型行。
+4. **读模型 schema 演进**：MySQL 读模型 schema（表 / 列 / 索引）随业务演进，已有列 / 索引不能破坏性变更。需读模型 schema 版本化 + 兼容性策略。
 5. **跨语言消费的 envelope 一致性**：Java 侧 JSON 序列化与 Python 侧 Pydantic 反序列化必须字段对齐，否则投影静默失败。需共享 schema 定义（如 JSON Schema / AsyncAPI）。
 
 ---
@@ -377,7 +377,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 **实施重难点与技术挑战**
 
 1. **触发去重与风暴控制**：同一事件可能因 Kafka 重投多次到达，或短时间内多个相关事件同时触发同一场景。Agent 触发须幂等（按 `event_id` + scenario 去重），且并发触发需限流（按 tenant 信号量），避免突发把 LLM 调用打爆。
-2. **Agent 长程任务与事件消费的背压**：流程编排是长程任务（interrupt/resume，跨进程恢复），事件消费速率可能远超 Agent 处理速率。需消费端 pause 背压 + 任务入队，不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
+2. **Agent 长程任务与事件消费的背压**：流程编排是长程任务（跨天等待人确认 / 续跑，跨进程恢复；会话状态用 AgentScope `AgentState` + `SessionService`（Redis-backed，2.0.5 起由 `SessionManager` 改名，旧名不可导入），流程推进状态归工作流引擎），事件消费速率可能远超 Agent 处理速率。需消费端 pause 背压 + 任务入队，不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
 3. **跨语言事件消费幂等**：Python 侧 `event_id` 幂等表 + 手动 ack，与 Java 侧同构但独立实现。两套幂等表 schema 须对齐。
 4. **触发条件配置化**：哪些事件触发哪个 Agent 场景、触发阈值（如不良率突增的"突增"定义）应配置化，不硬编码在监听器里。🔴 触发规则归属（Agent 侧配置 vs MES 侧事件契约）待定。
 
@@ -399,7 +399,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 **架构闪光点**
 
 1. **双通道互补**：WebSocket 的实时性 + Kafka 的持久性。实时通道失败（责任人未连 WS）不影响持久通道；持久通道消费侧（前端拉取 / 重连补送）兜底。
-2. **Kafka 兜底离线 / 重连补送**：与 编排能力长程任务的 interrupt/resume 同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `thread_id` 续跑。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
+2. **Kafka 兜底离线 / 重连补送**：与 编排能力长程任务的等待人确认 / 续跑同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `session_id` 续跑（会话经 `AgentState` + `SessionService` 恢复）。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
 3. **跨语言 Python 生产**：agent-service（Python aiokafka）生产 `agent.action_cards`，是本系统唯一的 Python->Kafka 生产路径（其余 Python 服务都是消费）。partition_key=`session_id` 保证同一编排会话的动作卡有序。
 
 **实施重难点与技术挑战**
@@ -423,10 +423,10 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 | 4 | **统一 Envelope** | `event_id`/`event_type`/`event_version`/`trace_id`/`correlation_id`/`causation_id` | 幂等去重 / 监控聚合 / schema 演进 / 链路串联统一入口 |
 | 5 | **至少一次 + 消费端幂等** | `event_id+consumer_group`（业务）/ `msg_id`（采集） | 等效一次处理，容忍重投 |
 | 6 | **CQRS 读侧缓存投影 + 降级 REST** | 过点 5 大缓存（工艺 / 设备 / 质量门 / 齐套 / 工单） | 过点 ≤200ms，缓存丢失可重建 |
-| 7 | **版本快照不可变** | `routeVersion` 锁定 + `SNAPSHOT_OF_ROUTE` 边 | 历史追溯免疫后续变更，版本一致性变结构属性 |
+| 7 | **版本快照不可变** | `routeVersion` 锁定 + 版本锚点三段（`version_kind` / `version` / `version_ref_id`） | 历史追溯免疫后续变更，版本一致性由固定关联查询与确定性过滤保证 |
 | 8 | **强防错本地事务 vs 跨服务异步精细切分** | 设备管理同服务本地事务 / 跨服务事件 | 强防错买确定性，跨服务买解耦，按需选择 |
 | 9 | **采集只搬运不解释** | INV-CX-01，网关 / 平台不做业务判定 | 协议适配器免疫工艺变更，防腐败 |
-| 10 | **跨语言 Python 旁路复用既有契约** | GraphProjector / Agent 监听器复用 Java 事件 | 零新管道，物理边界强制只读 |
+| 10 | **跨语言 Python 旁路复用既有契约** | ReadModelProjector / Agent 监听器复用 Java 事件 | 零新管道，物理边界强制只读 |
 | 11 | **限流四层 + 自适应背压** | 领取节流 / 全局令牌桶 / 按 topic 公平 / 在途上限 | 突发下保护 Kafka / DB / 下游不被击穿 |
 | 12 | **限流与顺序正交** | 速率维度 vs 分区维度 | 限流不破坏分区内顺序 |
 
@@ -564,7 +564,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 | 维修 `repair.*` | | ✓（试产验证） | | | | | | | | ✓（完成->恢复/报废） | ✓（保养建议） | | — | |
 | 设备数据接入 `dc.*` | | ✓（实时数据 REST） | | | | | ✓（线边仓事件） | | ✓（采样） | ✓（通信/报警/度量） | | | | — |
 
-> Python 旁路消费：rag-service GraphProjector 消费 `mes.*`/`process.*`/`material.*`/`quality.*`；agent-service 消费 `process.route.lifecycle`/`equipment.fault`/不良率突增等。均不在上表（上下文外，复用契约）。
+> Python 旁路消费：rag-service ReadModelProjector 消费 `mes.*`/`process.*`/`material.*`/`quality.*`；agent-service 消费 `process.route.lifecycle`/`equipment.fault`/不良率突增等。均不在上表（上下文外，复用契约）。
 
 ---
 
@@ -580,7 +580,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 | **P3 物料齐套闭环** | 模式 C 的 KitStatus 重算链（`material.*`->`wo.kit.status`）+ 排产齐套预占链（`schedule.*`↔`material.*`） | 验证多源重算与双向可逆状态机 |
 | **P4 设备可用性聚合** | 模式 D 的 `eam.asset.availability` 聚合 + 同服务本地事务 vs 跨服务事件切分；通 `pm.*`/`calibration.*`/`repair.*`->台账 | 过点准入硬门禁，强防错边界落地 |
 | **P5 高频采集管道** | 模式 E 的 dc.* 直连 + 边缘网关 + 断点续传 + 去重 + 乱序矫正；模式 F 的大载荷卸载 | 与业务事件独立可并行，但依赖车间设备实测 |
-| **P6 Python 旁路** | 模式 G 的 GraphProjector（先 MVP 4 上下文）+ 模式 H 的 Agent 主动触发 + 模式 I 的动作卡双通道 | 依赖业务事件契约稳定后接入 |
+| **P6 Python 旁路** | 模式 G 的 ReadModelProjector（先 MVP 4 上下文）+ 模式 H 的 Agent 主动触发 + 模式 I 的动作卡双通道 | 依赖业务事件契约稳定后接入 |
 | **P7 可观测与治理** | 全链路 trace 串联 + DLT 告警 + 限流可观测 + schema 演进规范 + 重放机制验证 | 贯穿各阶段，P7 集中补齐 |
 
 ---
@@ -592,7 +592,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 3. **命名空间按业务语义隔离**（13 前缀），前缀物理隔离防串台（wo/brework/rework/repair）。
 4. **`partition_key=聚合根ID` 保序 + 幂等 Producer + 至少一次 + 消费端幂等**——所有 topic 统一可靠性基线。
 5. **配置型主数据走"发布—缓存刷新"投影 + 降级 REST**，过点 ≤200ms 读本地缓存，缓存丢失可重建。
-6. **版本快照不可变**（`routeVersion` / `SNAPSHOT_OF_ROUTE`），历史追溯免疫后续变更。
+6. **版本快照不可变**（`routeVersion` 锁定 + 版本锚点三段 `version_kind` / `version` / `version_ref_id`），历史追溯免疫后续变更。
 7. **强防错本地事务 vs 跨服务异步事件精细切分**：同服务 + 强防错 -> 本地事务；跨服务或非强防错 -> 事件。
 8. **采集只搬运不解释**（INV-CX-01），网关 / 平台不做业务判定，协议适配器免疫工艺变更。
 9. **大载荷走对象存储，主流只传 URI + sha256**，对象先于引用存在。
@@ -611,8 +611,8 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 | 边缘网关 HA 部署形态 | 单网关+缓冲 / 主备 / 集群 | 关键线体主备；切换 RTO 按可用性预算定 | 模式 E |
 | 平台 `msg_id` 去重存储方案 | DB 唯一（v1 起步）/ Redis 布隆+DB（预案）/ Redis SET+异步 | v1 主推 DB 唯一 + 消费端幂等；布隆为 DB 扛不住时预案 | 模式 E |
 | 大载荷保留期 | 按 kind 分类 | `curve/aoi-image/log/deadletter/` 分类，按审计要求 | 模式 F |
-| 图投影降级阈值 | 图覆盖度低于多少触发降级 REST | 🔴 待 诊断实测定 | 模式 G |
-| `CONSUMED_BATCH` 边事件契约 | 物料消耗明细事件是否定义 | MVP 用降级 REST，待物料上下文明确定义后改投影 | 模式 G |
+| 读模型投影降级阈值 | 读模型覆盖度低于多少触发降级 REST | 🔴 待 诊断实测定 | 模式 G |
+| `CONSUMED_BATCH` 关联对应的事件契约 | 物料消耗明细事件是否定义 | MVP 用降级 REST，待物料上下文明确定义后改投影 | 模式 G |
 | Agent 触发规则归属 | 触发条件配置在 Agent 侧还是 MES 事件契约 | 🔴 待定 | 模式 H |
 | 同服务本地事务 vs 事件的边界 | 哪些运维异常走本地事务 | 同服务 + 强防错 -> 本地事务；跨服务或非强防错 -> 事件 | 模式 D / §5.8 |
 | 全局 / 各 topic 发送配额 | 事件/s、burst、字节/s | 全局 200/s、burst 2×，按业务紧急度分配；上线前压测定 | [Outbox §9.6](业务事件/Outbox设计方案.md) |

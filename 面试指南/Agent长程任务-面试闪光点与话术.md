@@ -1,6 +1,6 @@
 # Agent 长程任务 · 面试闪光点与话术（状态持久化 / 一致性保证 / 中断恢复 / 人在回路深度版）
 
-> **定位**：本文是 [FactoryAgent-流程编排能力.md](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) 与 [FactoryAgent-LangGraph统一架构与流程图.md](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) 的**面试纵深展开**，聚焦 流程编排能力作为系统中唯一面向长程任务设计的模块，钻进 **状态持久化、一致性保证、中断恢复、人在回路、超时兜底、部分失败回滚** 六条主线讲到底，每条都绑出处 + 防守话术。
+> **定位**：本文是 [FactoryAgent-流程编排能力.md](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) 与 [FactoryAgent-统一架构与流程图.md](../AGENT服务/FactoryAgent/FactoryAgent-统一架构与流程图.md) 的**面试纵深展开**，聚焦 流程编排能力作为系统中唯一面向长程任务设计的模块，钻进 **状态持久化、一致性保证、中断恢复、人在回路、超时兜底、部分失败回滚** 六条主线讲到底，每条都绑出处 + 防守话术。
 >
 > **口径纪律**（沿用 [项目亮点与指标卡片.md](项目亮点与指标卡片.md) §0）：这是**设计规划阶段**方案，不是"已上线长程任务引擎"。设计规模 / 架构 SLA 目标可给，须标注口径；不编造业务效果数字。长程任务的核心矛盾不是"跑得久不久"，而是"**既能跨小时跨人工确认保持状态一致、又能在进程重启/超时/人无响应/部分失败时安全降级、还要写动作绝不旁路 MES 的聚合根不变式**"——所有设计围绕这个矛盾展开。
 
@@ -10,18 +10,18 @@
 
 | 闪光点 | 一句话 | 出处 |
 |--------|--------|------|
-| **异步驱动 + 中断恢复** | HTTP 只负责启动，`asyncio.create_task` 异步驱动，gate 处 `interrupt` 暂停等人，state 落 MySQL 可跨进程续跑 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
-| **状态外置持久化** | LangGraph `SqlSaver` 以 `thread_id=session_id` 持久化，进程重启从断点恢复，gate 等待状态不丢 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
-| **confirmation token 绑定 action:target** | 人确认后发 token，绑定具体写动作（`isolation.issue:tenant_001`）+ 过期，防篡改防重放 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.7 |
+| **异步驱动 + 中断恢复** | HTTP 只负责启动，`BackgroundTaskManager` 托管异步驱动，gate 处 Permission 拦截等人，`AgentState` 落 Redis 可跨进程续跑 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
+| **状态外置持久化** | `AgentState` + `SessionService`（Redis-backed）按 `session_id` 持久化，进程重启由任意副本从断点恢复，gate 等待状态不丢 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-统一架构与流程图.md) §3 |
+| **确认凭证绑定 action:target** | 人确认后由 Permission 签发凭证，绑定具体写动作（`isolation.issue:tenant_001`）+ 过期，防篡改防重放 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.7 |
 | **写不旁路应用服务** | 写落库走各上下文**正常应用服务**，过聚合根不变式 + 事务发件箱，与正常写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认" | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.5 |
-| **步数 + 时长双闸门** | `recursion_limit=40` + `timeout=3600s`，超限标 FAILED 转人工，不硬走 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
+| **步数 + 时长双闸门** | 步数与工具调用预算上限 40 + `timeout=3600s`，超限标 FAILED 转人工，不硬走 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.3 |
 | **gate deadline 挂起** | 每个 confirmation gate 有 deadline，超时自动 `SUSPENDED` 推责任人，不无限阻塞产线 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
-| **barrier 硬防错** | 并行分支汇合后 barrier 按结构化结果确定性分流，未 PASS 绝不推放行卡——编排层防错，非 agent 判定 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3 |
+| **barrier 硬防错** | `asyncio.gather` 并发分支汇合后 barrier 按结构化结果确定性分流，未 PASS 绝不推放行卡——编排层防错，非 agent 判定 | [编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-统一架构与流程图.md) §3 |
 | **故障隔离不污染整链** | agent 连续失败 2 次标 `SUSPENDED` 推异常卡，不自动重试到死；低置信度标 `need_human_review` 不自动路由 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §12 |
 | **会话全生命周期可审计** | `agent_session` + `agent_step_record`（含 `node_type` CODE/AGENT 区分 + `gate_decision` 谁/何时/基于哪张卡/agent 假设），每一步决策可回溯 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §5.3 |
-| **代码节点 vs agent 节点物理分层** | `orchestration/code_nodes/` 与 `orchestration/agents/` 分开落点，`node_type` 落库可验——换线全程 PASS 时 LLM 调用为 0 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6 |
+| **代码节点 vs agent 节点物理分层** | `flows/` 应用层编排里确定性步骤与 Agent 步骤分开声明，`node_type` 落库可验——换线全程 PASS 时 LLM 调用为 0 | [流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §6 |
 
-> 这组是长程任务设计的"门面"。被问"Agent 跑一半人没确认怎么办"或"进程重启了 task 状态还在吗"时，直接甩"异步驱动 + SqlSaver 持久化 + interrupt/resume + confirmation token + 双闸门 + 故障隔离"六件套。
+> 这组是长程任务设计的"门面"。被问"Agent 跑一半人没确认怎么办"或"进程重启了 task 状态还在吗"时，直接甩"异步托管 + AgentState/SessionService 持久化 + Permission gate + 事件系统确认续跑 + 双闸门 + 故障隔离"六件套。
 
 ---
 
@@ -31,11 +31,11 @@
 
 长程任务的一致性不是靠'一个长事务锁到底'，而是靠**四层设计**：
 
-第一层**状态外置**：LangGraph `SqlSaver` 把 state 持久化到 MySQL，`interrupt` 暂停时进程不阻塞，`resume` 时从断点恢复，进程重启不丢状态。
+第一层**状态外置**：`AgentState` 由 `SessionService` 持久化到 Redis，Permission gate 拦写动作等人确认时进程不阻塞，确认后按 `session_id` 从断点恢复，进程重启不丢状态。
 
-第二层**写一致性**：所有写动作走 confirmation gate——Agent 草拟 intent + draft，人确认后发 confirmation token（绑定 `action:target` + 过期），落库走各上下文**正常应用服务**过聚合根不变式 + 事务发件箱，绝不旁路写。
+第二层**写一致性**：所有写动作走 Permission gate——Agent 草拟 intent + draft，人确认后由 Permission 签发确认凭证（绑定 `action:target` + 过期），落库走各上下文**正常应用服务**过聚合根不变式 + 事务发件箱，绝不旁路写。
 
-第三层**超时兜底**：`recursion_limit=40` + `timeout=3600s` 步数+时长双闸门，gate deadline 超时挂起推责任人，不无限阻塞。
+第三层**超时兜底**：步数与工具调用预算上限 40 + `timeout=3600s` 步数+时长双闸门，gate deadline 超时挂起推责任人，不无限阻塞。
 
 第四层**故障隔离**：agent 连续失败 2 次标 `SUSPENDED` 推异常卡，barrier 未 PASS 不放行，局部失败不污染整链——最坏情况退回人工编排，不会越界写、不会错误放行。"
 
@@ -54,30 +54,31 @@
 ```python
 async def start(self, req: Request, tenant: TenantContext) -> Session:
     session = await self._sessions.create(req, tenant)
-    asyncio.create_task(self._drive(session, tenant))  # 异步驱动
+    # 长程驱动交给 AgentScope BackgroundTaskManager 托管，不再自研 create_task 点火
+    await self._background.run(self._drive(session, tenant))
     return session  # 立即返回 session_id，不阻塞 HTTP
 ```
 
-- HTTP 请求 `/agent/orchestration/{scenario}/start` 只做两件事：创建 session 记录 + 启动异步任务，**立即返回** `session_id`。
-- 后续流程（plan -> gate -> agent -> gate -> done）在后台异步执行，gate 处 `interrupt` 暂停等人，不占 HTTP 连接。
-- 调用方拿到 `session_id` 后轮询 session 状态或通过 WebSocket 收动作卡推送。
+- HTTP 请求 `/agent/orchestration/{scenario}/start` 只做两件事：创建 session 记录 + 把驱动任务交给 `BackgroundTaskManager`，**立即返回** `session_id`。
+- 后续流程（plan -> gate -> agent -> gate -> done）在后台异步执行，gate 处由 Permission 拦截等人确认，不占 HTTP 连接。
+- 调用方拿到 `session_id` 后轮询 session 状态，或订阅事件流（`AGUIProtocolMiddleware`）收动作卡推送。
 
-**为什么是亮点**：长程任务最忌讳"一个 HTTP 请求从头等到尾"——MES 换线可能要 30 分钟，HTTP 连接早就超时了。异步驱动 + interrupt 让 HTTP 只做"点火"，真正的长跑在后台，gate 等人时进程不占连接、不占 CPU。这是**长程任务设计的第一个分水岭**：不懂的人会让 HTTP 一直 block 到流程结束；懂的人知道"启动后立即返回，状态靠查询/推送"。
+**为什么是亮点**：长程任务最忌讳"一个 HTTP 请求从头等到尾"——MES 换线可能要 30 分钟，HTTP 连接早就超时了。异步托管 + Permission gate 让 HTTP 只做"点火"，真正的长跑在后台，gate 等人时进程不占连接、不占 CPU。这是**长程任务设计的第一个分水岭**：不懂的人会让 HTTP 一直 block 到流程结束；懂的人知道"启动后立即返回，状态靠查询/推送"。
 
-**防守话术**："HTTP 请求只负责启动，立即返回 session_id。长流程在后台异步跑，gate 等人确认时 `interrupt` 暂停，进程不阻塞、不占连接。这和 MES 过点 P99 ≤200ms 不冲突——长程任务的等待不挂在过点路径上。"
+**防守话术**："HTTP 请求只负责启动，立即返回 session_id。长流程在后台异步跑，由 `BackgroundTaskManager` 托管；gate 等人确认时 Permission 拦下写工具，会话状态落在 会话存储 里，进程不阻塞、不占连接。这和 MES 过点 P99 ≤200ms 不冲突——长程任务的等待不挂在过点路径上。"
 
 #### A.2 状态外置持久化：进程重启不丢状态
 
-**核心机制**（[编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §3）：
+**核心机制**（[编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-统一架构与流程图.md) §3）：
 
-- LangGraph 的 `SqlSaver` checkpointer 以 `thread_id=session_id` 将 state 持久化到 MySQL。
-- `interrupt` 暂停时，当前 state（包括已执行的步骤、待确认的 gate、agent 产出的假设）全部落库。
-- 进程重启后，用同一个 `thread_id` 调 `graph.ainvoke(Command(resume=...), config={"configurable": {"thread_id": session_id}})` 即可从断点恢复。
-- gate 等待状态不丢——即使 agent-service Pod 重启，人确认后 resume 仍能找到对应的 gate 继续。
+- AgentScope 的 `AgentState` 由 `SessionService`（Redis-backed；旧名 `SessionManager` 自 2.0.5 起改名失效）按 `session_id` 持久化，MySQL 不再承担 checkpoint 三表。
+- gate 拦截时，当前 `AgentState`（包括已执行的步骤、待确认的 gate、agent 产出的假设）全部落 会话存储。
+- 进程重启后，用同一个 `session_id` 加载 `AgentState`，由任意副本接着跑——人确认后事件系统触发续跑，即可从断点恢复。
+- gate 等待状态不丢——即使 agent-service Pod 重启，人确认后仍能在别的副本上找到对应的 gate 继续。
 
-**为什么是亮点**：MES 场景下的长程任务不能靠"进程内存"存状态——Pod 重启、发布滚动更新、OOM Kill 都会导致状态丢失。SqlSaver 把 state 外置到 MySQL，让长程任务**跨进程生命周期**存活。这是长程任务设计的第二个分水岭：不懂的人把状态放在进程内存里；懂的人知道"状态外置 + thread_id 恢复"。
+**为什么是亮点**：MES 场景下的长程任务不能靠"进程内存"存状态——Pod 重启、发布滚动更新、OOM Kill 都会导致状态丢失。`AgentState` + `SessionService` 把 state 外置到 Redis，让长程任务**跨进程生命周期**存活，而且天然是无状态水平扩展。这是长程任务设计的第二个分水岭：不懂的人把状态放在进程内存里；懂的人知道"状态外置 + session_id 恢复"。
 
-**防守话术**："换线流程跑一半 Pod 重启了怎么办？LangGraph 的 SqlSaver 把 state 持久化在 MySQL，重启后用同一个 session_id 作为 thread_id 恢复，gate 等待状态、已执行的步骤、agent 产出的假设全在，不会从头重跑。这和 MES 的生产执行一样——状态在数据库里，不在内存里。"
+**防守话术**："换线流程跑一半 Pod 重启了怎么办？`AgentState` 被 `SessionService` 持久化在 Redis，重启后用同一个 session_id 恢复，gate 等待状态、已执行的步骤、agent 产出的假设全在，不会从头重跑；而且不要求回到原来那个副本，任意副本都能接。这和 MES 的生产执行一样——状态在共享存储里，不在进程内存里。"
 
 #### A.3 会话状态表设计
 
@@ -121,33 +122,33 @@ agent_step_record
 
 #### B.1 写动作 confirmation gate（最大闪光点）
 
-**核心机制**（[编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-LangGraph统一架构与流程图.md) §5）：
+**核心机制**（[编排流程图](../AGENT服务/FactoryAgent/FactoryAgent-统一架构与流程图.md) §5）：
 
 ```
 Agent 草拟 intent + draft（动作卡）
-  -> gate interrupt 暂停，推卡给人
+  -> Permission gate 拦截写工具，经事件系统推卡给人
   -> 人查看 evidence + agent_hypothesis + confidence
   -> 人确认/拒绝
-  -> /confirm 端点发 confirmation token（绑定 action:target + 过期）
-  -> resume 后写落库走各上下文应用服务 REST
+  -> /confirm 端点由 Permission 签发确认凭证（绑定 action:target + 过期）
+  -> 确认后事件系统续跑，写落库走各上下文应用服务 REST
   -> 应用服务过聚合根不变式 + 事务发件箱
 ```
 
-**为什么是亮点**：写动作的一致性不是靠"Agent 记住要写什么"，而是靠"**草稿 + 人确认 + token + 走正常应用服务**"四段式。这保证了：
+**为什么是亮点**：写动作的一致性不是靠"Agent 记住要写什么"，而是靠"**草稿 + 人确认 + 凭证 + 走正常应用服务**"四段式。这保证了：
 1. Agent 的输出是 intent + draft，不是最终写结果。
 2. 人确认不是"盲批"——动作卡带 evidence（trace_id 列表）+ agent_hypothesis + confidence，确认人**基于证据确认**。
-3. confirmation token 绑定具体写动作（`isolation.issue:tenant_001`），防篡改（不能拿 A 动作的 token 去做 B 动作）、防重放（带过期）。
+3. Permission 确认凭证绑定具体写动作（`isolation.issue:tenant_001`），防篡改（不能拿 A 动作的凭证去做 B 动作）、防重放（带过期）。
 4. 落库走正常应用服务，过聚合根不变式 + 事务发件箱——与 MES 正规写路径完全一致，只是触发源从"人点按钮"变成"Agent 草拟 + 人确认"。
 
-**防守话术**："Agent 写动作不直写 MES 原始表。它生成的是 intent + draft（动作卡），人确认后发 confirmation token，token 绑定 `action:target` 带过期，落库走各上下文正常应用服务过聚合根不变式 + 事务发件箱。写路径和正常写完全一致，只是触发源从'人点按钮'变成'Agent 草拟 + 人确认'——所以写一致性受 MES 已有的聚合根不变式保护，Agent 不引入新的写风险。"
+**防守话术**："Agent 写动作不直写 MES 原始表。它生成的是 intent + draft（动作卡），人确认后由 Permission 签发确认凭证，凭证绑定 `action:target` 带过期，落库走各上下文正常应用服务过聚合根不变式 + 事务发件箱。写路径和正常写完全一致，只是触发源从'人点按钮'变成'Agent 草拟 + 人确认'——所以写一致性受 MES 已有的聚合根不变式保护，Agent 不引入新的写风险。"
 
-#### B.2 WriteToolGate：写工具不声明就启动失败
+#### B.2 写工具闸门（`gated_write_policy`）：写工具不声明就起不来
 
 **核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §4.3）：
 
 ```python
 class WriteToolGate(Exception):
-    """写工具未声明 requires_confirmation 或未声明 writes_via，拒绝注册。"""
+    """写工具未声明 requires_confirmation 或未声明 writes_via，Permission 拒绝注册。"""
 
 class ToolRegistry:
     def register(self, d: ToolDescriptor) -> None:
@@ -158,26 +159,26 @@ class ToolRegistry:
                 raise WriteToolGate(f"写工具必须声明 writes_via: {d.name}")
 ```
 
-- 任何写工具必须声明 `requires_confirmation=True` 和 `writes_via`（指向具体上下文应用服务），否则**启动断言失败**。
-- 这保证了"红线靠代码兜底，不靠人记"——写工具不可能被"不小心"注册成不需要确认的。
+- 任何写工具必须声明 `requires_confirmation=True` 和 `writes_via`（指向具体上下文应用服务），否则 Permission 直接拒绝——装配期起不来，运行期工具也调不通。
+- 相较"只在启动时断言一次"，`gated_write_policy` 把闸门落到**每一次工具执行**，粒度更细、更难绕过——这保证了"红线靠代码兜底，不靠人记"，写工具不可能被"不小心"注册成不需要确认的。
 
-**防守话术**："不是靠文档或代码审查保证写工具的安全——是靠启动断言。任何写工具必须声明 `requires_confirmation` 和 `writes_via`，否则进程起不来。红线在代码里，不在人脑子里。"
+**防守话术**："不是靠文档或代码审查保证写工具的安全——是靠 Permission 闸门。任何写工具必须声明 `requires_confirmation` 和 `writes_via`，否则进程起不来、工具也执行不了。红线在代码里，不在人脑子里。"
 
 #### B.3 放行能力从架构层切掉
 
 **核心机制**（[流程编排能力](../AGENT服务/FactoryAgent/FactoryAgent-流程编排能力.md) §7.5）：
 
 ```python
-# 启动断言：任何 capability 下均无放行/拦截类工具
+# Permission 校验：任何 capability 下均无放行/拦截类工具
 for cap in ("root_cause", "fault_impact", "traceability", "draft_sop", "draft_8d", "draft_rework_craft"):
-    tools = reg.tools_for(cap, ANY_TENANT)
+    tools = toolkit.tools_for(cap, ANY_TENANT)
     assert not any(t.name.startswith(("pass_judge", "force_release", "release_")) for t in tools), cap
 ```
 
 - 放行/拦截类工具**不注册到任何 capability**，Agent 从架构层不存在放行能力。
 - 实际放行由人确认放行卡后，走过点上下文正常应用服务，过点 P99 ≤200ms 判定仍走规则引擎。
 
-**防守话术**："Agent 能不能放行？不能。不是我'不让他放'，而是架构层就不存在放行工具——任何 capability 下都没有 `pass_judge` / `force_release` / `release_*` 前缀的工具，启动断言校验。放行卡是代码节点结构化拼装的（非 LLM），人确认后走过点上下文正常应用服务，过点 P99 ≤200ms 判定仍走规则引擎。Agent 从架构层切掉了放行能力。"
+**防守话术**："Agent 能不能放行？不能。不是我'不让他放'，而是架构层就不存在放行工具——任何 capability 下都没有 `pass_judge` / `force_release` / `release_*` 前缀的工具，Permission 策略校验。放行卡是确定性节点结构化拼装的（非 LLM），人确认后走过点上下文正常应用服务，过点 P99 ≤200ms 判定仍走规则引擎。Agent 从架构层切掉了放行能力。"
 
 ---
 
@@ -189,21 +190,22 @@ for cap in ("root_cause", "fault_impact", "traceability", "draft_sop", "draft_8d
 
 ```python
 await asyncio.wait_for(
-    self._supervisor.ainvoke(
+    run_orchestration_flow(             # flows/ 应用层编排：顺序 await + asyncio.gather（2.0.0 起无 pipeline/msghub 原语）
+        session.id,
         {"session_id": session.id, "tenant": tenant, **session.context},
-        config={"recursion_limit": 40, "configurable": {"thread_id": session.id}},
+        max_steps=40,                    # 步数与工具调用预算上限
     ),
     timeout=3600.0,  # 含人确认等待的整体上限
 )
 ```
 
-- `recursion_limit=40`：最多 40 步（含代码节点 + agent 节点 + gate 等待），超限抛 `GraphRecursionError` 标 FAILED 转人工。
+- 步数与工具调用预算上限 40：最多 40 步（含确定性节点 + agent 节点 + gate 等待），超限标 FAILED 转人工。（AgentScope 没有 `recursion_limit` 这个参数名，落点是 Agent 的步数与工具调用预算上限。）
 - `timeout=3600.0`：整体 1 小时上限，超时抛 `asyncio.TimeoutError` 标 FAILED 转人工。
 - 双闸门覆盖两类失控：步数爆炸（agent 循环调工具）和整体超时（人长时间不确认）。
 
-**为什么是亮点**：长程任务最怕"无限等待"——人休假了、推送没收到、token 过期了没人管。双闸门确保**任何情况下都不会无限阻塞**。而且两个闸门是**互补的**：步数闸门防 agent 推理循环，时长沙门防人无响应。两者覆盖不同故障模式。
+**为什么是亮点**：长程任务最怕"无限等待"——人休假了、推送没收到、凭证过期了没人管。双闸门确保**任何情况下都不会无限阻塞**。而且两个闸门是**互补的**：步数闸门防 agent 推理循环，时长沙门防人无响应。两者覆盖不同故障模式。
 
-**防守话术**："长程任务怎么保证不无限阻塞？双闸门——`recursion_limit=40` 防 agent 循环调工具，`timeout=3600s` 防人长时间不确认。超限不是默默重试，是标 FAILED 推异常卡给责任人，和 MES 防错理念一致——宁可挂起让人判，也不硬走。"
+**防守话术**："长程任务怎么保证不无限阻塞？双闸门——步数与工具调用预算上限 40 防 agent 循环调工具，`timeout=3600s` 防人长时间不确认。超限不是默默重试，是标 FAILED 推异常卡给责任人，和 MES 防错理念一致——宁可挂起让人判，也不硬走。"
 
 #### C.2 gate deadline：每个确认点都有超时
 
@@ -225,7 +227,7 @@ await asyncio.wait_for(
 | agent 置信度 `low` | 处置卡标 `need_human_review`，列疑点，不自动路由 | `agent_low_confidence_total` +1 |
 | barrier 未 PASS | 禁止推放行卡，分流到 agent 或挂起 | `orchestration_suspended_total` +1 |
 | gate 超 deadline | 挂起 `SUSPENDED`，推责任人 | `orchestration_suspended_total` +1 |
-| 写工具未带有效 token | `WriteToolGate` 拒绝 + P0 告警 | `orchestration_write_rejected_total` +1 |
+| 写工具未带有效确认凭证 | Permission 拒绝 + P0 告警 | `orchestration_write_rejected_total` +1 |
 
 **为什么是亮点**：长程任务中局部失败是常态——agent 某次推理置信度低、人迟迟不确认、工具调用偶发失败。设计的关键不是"保证不失败"，而是**失败隔离**：一个 agent 能力失败不污染其他能力，一个 gate 超时不影响其他 gate，单点失败挂起不整链雪崩。最坏情况是流程退回人工编排——不会越界写、不会错误放行。
 
@@ -296,11 +298,11 @@ A：流程编排能力。它处理的是跨多个限界上下文、含人工确�
 
 **Q：长程任务的状态怎么管理？HTTP 请求一直等到结束吗？**
 
-A：不。HTTP 只负责启动，`asyncio.create_task` 异步驱动后立即返回 session_id。后续流程在后台跑，gate 处 `interrupt` 暂停等人，进程不占连接。调用方通过轮询 session 状态或 WebSocket 收动作卡推送了解进度。这和 MES 过点 P99 ≤200ms 不冲突——长程任务的等待不挂在过点路径上。
+A：不。HTTP 只负责启动，立即返回 session_id，长流程由 `BackgroundTaskManager` 托管在后台跑。后续流程在后台跑，gate 处 Permission 拦截等人，进程不占连接。调用方通过轮询 session 状态或订阅事件流收动作卡推送了解进度。这和 MES 过点 P99 ≤200ms 不冲突——长程任务的等待不挂在过点路径上。
 
 **Q：进程重启了，跑到一半的换线会丢吗？**
 
-A：不会。LangGraph 的 `SqlSaver` 以 `thread_id=session_id` 把 state 持久化到 MySQL。`interrupt` 暂停时当前 state 全落库，重启后用同一个 `thread_id` 恢复即可从断点续跑。这和 MES 的生产执行一样——状态在数据库里，不在内存里。
+A：不会。`AgentState` 由 `SessionService`（Redis-backed）按 `session_id` 持久化。gate 拦截等人时当前 state 全落 会话存储，重启后用同一个 `session_id` 恢复即可从断点续跑，而且任意副本都能接。这和 MES 的生产执行一样——状态在共享存储里，不在进程内存里。
 
 ---
 
@@ -308,14 +310,14 @@ A：不会。LangGraph 的 `SqlSaver` 以 `thread_id=session_id` 把 state 持�
 
 **Q：Agent 写动作的一致性怎么保证？万一 Agent 写了一半挂了怎么办？**
 
-A：Agent 不直接写——它生成 intent + draft（动作卡），人确认后发 confirmation token，落库走各上下文正常应用服务。一致性靠四层保护：
+A：Agent 不直接写——它生成 intent + draft（动作卡），人确认后由 Permission 签发确认凭证，落库走各上下文正常应用服务。一致性靠四层保护：
 
 1. **草稿不落库**：Agent 的输出是意图，不是已落库数据——不存在"写了一半"的问题。
-2. **confirmation token**：token 绑定 `action:target` + 过期，防篡改（A 动作的 token 不能用于 B 动作）、防重放（过期作废）。
+2. **确认凭证**：凭证绑定 `action:target` + 过期，防篡改（A 动作的凭证不能用于 B 动作）、防重放（过期作废）。
 3. **应用服务不变式**：落库走正常应用服务 REST，过聚合根不变式 + 事务发件箱——与正常写路径完全一致。
-4. **启动断言**：写工具必须声明 `requires_confirmation` 和 `writes_via`，否则进程起不来。
+4. **Permission 闸门**：写工具必须声明 `requires_confirmation` 和 `writes_via`，否则进程起不来、工具也执行不了。
 
-所以"写了一半挂了"的问题在 Agent 层不存在——Agent 不持有写能力，只是草拟 + 传递人确认后的 token。真正的写一致性由各上下文的应用服务保证，Agent 不引入新的写风险。
+所以"写了一半挂了"的问题在 Agent 层不存在——Agent 不持有写能力，只是草拟 + 传递人确认后的凭证。真正的写一致性由各上下文的应用服务保证，Agent 不引入新的写风险。
 
 **Q：人确认了工艺激活，但后续钢网核对失败，怎么回滚？**
 
@@ -323,12 +325,12 @@ A：不回滚——这是设计取舍，不是 bug。编排能力的 confirmatio
 
 长程任务的一致性不靠分布式事务的 ROLLBACK，靠的是"草稿不落库 + 人确认 = commit + 聚合根不变式保护写"。如果流程中途失败被挂起，已完成的人确认步骤不撤销，未执行的步骤不执行——人在回路保证了 commit 语义。
 
-**Q：confirmation token 怎么防止被伪造或重放？**
+**Q：确认凭证怎么防止被伪造或重放？**
 
 A：三层：
-1. **绑定 action:target**：token 绑定具体写动作（如 `isolation.issue:tenant_001`），gate 校验 `valid_for(action)`——拿激活工艺的 token 不能去下达隔离。
-2. **过期**：token 有过期时间，超期作废。
-3. **服务端签发**：token 由 `/confirm` 端点的 `ConfirmationStore` 签发（存在 Redis），不是 Agent 自己生成。ACL 写客户端校验 token 时查 `ConfirmationStore` 验证有效性。
+1. **绑定 action:target**：凭证绑定具体写动作（如 `isolation.issue:tenant_001`），Permission 校验 `valid_for(action)`——拿激活工艺的凭证不能去下达隔离。
+2. **过期**：凭证有过期时间，超期作废。
+3. **服务端签发**：凭证由 `/confirm` 端点经 Permission 系统签发（确认状态存 Redis），不是 Agent 自己生成。ACL 写客户端调用时由 Permission 校验凭证有效性。
 
 **Q：为什么写不走 Agent 进程而要绕到应用服务 REST？直接在 Agent 进程里写不是更快？**
 
@@ -355,25 +357,25 @@ A：三个兜底：
 
 **Q：如果 agent-service 整个挂掉（比如 OOM Kill），正在跑的 10 个换线会话怎么办？**
 
-A：状态全在 MySQL（`agent_session` + `agent_step_record` + SqlSaver checkpointer），不在 agent-service 进程内存里。Pod 重启后：
+A：状态全在共享存储——会话 `AgentState` 由 `SessionService` 落 Redis，审计记录在 MySQL（`agent_session` + `agent_step_record`），不在 agent-service 进程内存里。Pod 重启后：
 - 10 个 session 的状态都在，status 可能是 RUNNING/SUSPENDED/GATE_WAITING。
-- 对于 GATE_WAITING 的 session：人仍可通过 `/confirm` 端点 resume（因为 state 从 MySQL 恢复）。
+- 对于 GATE_WAITING 的 session：人仍可通过 `/confirm` 端点确认续跑（因为 `AgentState` 从 Redis 恢复，任意副本都能接）。
 - 对于 RUNNING 的 session：需要重新触发或手动恢复。
 
-关键是**状态外置**——agent-service 是无状态的，状态在 MySQL。这是架构层面的选择：agent-service 只是执行器，不是状态持有者。
+关键是**状态外置**——agent-service 是无状态的，状态在 Redis + MySQL。这是架构层面的选择：agent-service 只是执行器，不是状态持有者。
 
-**Q：如果 MySQL 挂了（SqlSaver 写不进去），长程任务还能跑吗？**
+**Q：如果 Redis 挂了（SessionService 写不进 `AgentState`），长程任务还能跑吗？**
 
-A：不能——这是有意的设计取舍。SqlSaver 写失败意味着 state 无法持久化，此时继续跑风险太高（gate 等人期间如果进程重启，状态全丢）。所以降级策略是：SqlSaver 写失败 -> session 标 FAILED -> 推异常卡 -> 流程退回人工编排。
+A：不能——这是有意的设计取舍。会话存储 写失败意味着 state 无法持久化，此时继续跑风险太高（gate 等人期间如果进程重启，状态全丢）。所以降级策略是：SessionService 写失败 -> session 标 FAILED -> 推异常卡 -> 流程退回人工编排。
 
-这反过来验证了"状态外置"的必要性——如果 state 在进程内存里，MySQL 挂了进程还能跑，但进程重启就全丢。把 state 绑在 MySQL 上，MySQL 挂了你明确知道"现在不能跑长程任务"，而不是"假装能跑但随时可能丢状态"。
+这反过来验证了"状态外置"的必要性——如果 state 在进程内存里，Redis 挂了进程还能跑，但进程重启就全丢。把 state 绑在共享存储上，Redis 挂了你明确知道"现在不能跑长程任务"，而不是"假装能跑但随时可能丢状态"。
 
-**Q：10 个换线同时跑，agent 能力 subgraph 之间会不会互相干扰？**
+**Q：10 个换线同时跑，agent 能力之间会不会互相干扰？**
 
 A：不会。三层隔离：
-1. **工具集互斥**：每个 agent 能力（A/B/C/D）注册时声明 `capability`，`ToolRegistry.tools_for(capability)` 只返回该能力的工具。RootCauseAgent 看不到 FaultImpactAgent 的设备遥测工具。
-2. **subgraph 独立**：每个能力是独立 `StateGraph`，有自己的 `recursion_limit`、system prompt、工具集，互不污染上下文。
-3. **thread_id 隔离**：每个 session 有独立 `thread_id`，state 隔离在 MySQL。
+1. **工具集互斥**：每个 agent 能力（A/B/C/D）注册时声明 `capability`，Toolkit + Permission 策略只放行该能力的工具。RootCauseAgent 看不到 FaultImpactAgent 的设备遥测工具。
+2. **Agent 实例独立**：每个能力是独立 `Agent` 实例（内置 ReAct），有自己的步数与工具调用预算上限、system prompt、工具集，互不污染上下文。
+3. **session_id 隔离**：每个 session 有独立 `session_id`，`AgentState` 隔离在 会话存储。
 
 所以 10 个换线同时跑，每个有自己的 session state、自己的 agent 实例、自己的工具集——互不干扰，并发安全。
 
@@ -387,11 +389,11 @@ A：两个原因。一是 编排能力的写动作个个过 confirmation gate，
 
 设计选择：**不引入 Saga，靠"草稿不落库 + 人确认 = commit"控制写边界**。这也和 [领域总览.md](../领域模型/领域总览.md) §5.3 的"过点主事务零分布式事务"一脉相承——能不跨事务就不跨，能用单点确认就不搞分布式协调。
 
-**Q：为什么用 LangGraph 的 interrupt 而不用消息队列做"暂停/恢复"？**
+**Q：为什么用框架的 Permission gate + 事件系统做"暂停/恢复"，而不用消息队列？**
 
-A：LangGraph 的 `interrupt` / `Command(resume=...)` 是**图级别的暂停恢复**——暂停时 state 落 MySQL，恢复时从同一节点继续，图的其他状态（已执行步骤、中间结果、agent 假设）全保留。如果改用消息队列，需要自己实现 state 的序列化/反序列化、节点定位、恢复逻辑——本质上是在重写一个 LangGraph checkpointer。
+A：AgentScope 的 Permission gate + 事件系统 HITL confirmation 是**会话级的暂停恢复**——拦截时 `AgentState` 落 会话存储，确认后从同一断点继续，其余状态（已执行步骤、中间结果、agent 假设）全保留。如果改用消息队列，需要自己实现 state 的序列化/反序列化、断点定位、恢复逻辑——本质上是在重写框架的会话持久化。
 
-而且 `interrupt` 是显式的图节点——在 StateGraph 的边上看得到"这里有个 gate 等人"，可审计、可追踪。消息队列的"暂停/恢复"是隐式的——你看不到图里哪些节点会等人。
+而且 gate 是显式的声明——在 `flows/` 的编排代码里看得到"这里有个 gate 等人"，Permission 拦截与确认事件都进事件流，可审计、可追踪。消息队列的"暂停/恢复"是隐式的——你看不到哪些步骤会等人。
 
 **Q：为什么 编排能力的 timeout 是 3600 秒而不是更长或更短？**
 
@@ -401,12 +403,12 @@ A：3600 秒（1 小时）是**设计目标**，不是硬上限。选取基于�
 
 **Q：如果未来要支持"跨天的长程任务"（比如等备件维修要等 2 天），现有设计够用吗？**
 
-A：骨架够用，需要调整两个参数。`SqlSaver` 的状态持久化本身就支持跨天——state 在 MySQL 里，放多久都行。`interrupt` 暂停也是持久的。需要改的是：
+A：会话层骨架够用，但要先切清职责：`AgentState` + `SessionService` 的持久化只保证**会话/消息状态**跨进程、跨副本恢复——state 在 Redis 里，放多久都行；**跨天的持久编排（步骤状态机、gate deadline、超时挂起、重试与补偿、审计时间线）归工作流引擎，`flows/` 只做请求内的协同**（[ADR-05](../架构设计v2/00-架构决策记录ADR.md)）。需要改的是：
 1. `timeout` 从 3600s 调到更长时间（或去掉整体 timeout，只靠 gate deadline）。
-2. 增加"休眠唤醒"机制——比如备件到货后通过领域事件唤醒 session，而不是干等。
+2. 增加"休眠唤醒"机制——比如备件到货后通过领域事件唤醒 session（`SchedulerManager` / 事件系统），而不是干等。
 3. deadline 策略从"固定超时"改为"相对超时 + 事件驱动唤醒"。
 
-但核心的"状态外置 + interrupt/resume + confirmation gate + 写不旁路"这套骨架不需要改。这是长程任务设计的可扩展性——**状态持久化与流程编排解耦**，流程时长从 1 小时变 1 天，改的是超时参数，不是架构。
+但核心的"状态外置 + Permission gate + 事件确认续跑 + 写不旁路"这套骨架不需要改。这是长程任务设计的可扩展性——**状态持久化与流程编排解耦**，流程时长从 1 小时变 1 天，改的是超时参数，不是架构。
 
 **Q：和传统工作流引擎（Camunda、Temporal）比，编排能力这套有什么不同？为什么不用它们？**
 
@@ -415,10 +417,10 @@ A：传统工作流引擎做的是"确定性步骤编排 + 人工任务 + 补偿
 - 工作流引擎能做：plan -> 查首件 -> gate -> 查工艺 -> gate -> 查钢网/齐套 -> barrier -> 放行 -> gate。
 - 工作流引擎做不了：钢网 mismatch 时，自适应取证（查钢网借还记录 -> 查到 ST-A 借出未还 -> 自适应查上工单收线记录），根因推理（产线拿错 / 未还库 / 台账改名 / 工艺录错），草拟处置卡（路由给谁 + 建议动作）。
 
-所以 编排能力不是"用 LangGraph 替代工作流引擎"，而是"工作流引擎能做的用代码节点做（零 LLM 调用），工作流引擎做不了的用 agent 能力做"。如果某场景完全确定、没有非确定决策点，那就不该上 编排能力，直接上工作流引擎就够了——这是"懂什么时候不用 AI"的体现。
+所以 编排能力不是"用 AgentScope 替代工作流引擎"，而是**混合分工**："工作流引擎能做的（跨天 gate、步骤状态机、重试补偿、审计时间线）就交给引擎（`[选型待定，见 ADR-05/§14]`），引擎调用的单个节点内部才跑 Agent 推理与工具；工作流引擎做不了的非确定决策点由 agent 能力补"。如果某场景完全确定、没有非确定决策点，那就不该上 编排能力，直接上工作流引擎就够了——这是"懂什么时候不用 AI"的体现。
 
 ---
 
 ## 4. 一句话定位（收尾用）
 
-"MES Agent 的长程任务设计，核心是 流程编排能力的**状态外置 + 人在回路 + 写不旁路**三层一致性保证——LangGraph `SqlSaver` 把 state 持久化到 MySQL 可跨进程续跑，`interrupt`/`resume` 在 confirmation gate 等人确认时不占连接不丢状态，confirmation token 绑定 `action:target` + 过期防篡改防重放，写落库走各上下文正常应用服务过聚合根不变式 + 事务发件箱；`recursion_limit=40` + `timeout=3600s` 双闸门 + gate deadline 防无限阻塞，agent 连续失败/低置信度挂起隔离不污染整链。长程任务的一致性不靠分布式事务 ROLLBACK，靠的是'草稿不落库 + 人确认 = commit + 聚合根不变式保护写'——写的闸门始终在人手里，最坏情况退回人工编排，不会越界写、不会错误放行。"
+"MES Agent 的长程任务设计，核心是 流程编排能力的**状态外置 + 人在回路 + 写不旁路**三层一致性保证——`AgentState` 由 `SessionService`（Redis-backed）按 `session_id` 持久化，可跨进程、跨副本续跑，Permission gate + 事件系统 HITL 确认在等人时不占连接不丢状态，确认凭证绑定 `action:target` + 过期防篡改防重放，写落库走各上下文正常应用服务过聚合根不变式 + 事务发件箱；步数与工具调用预算上限 40 + `timeout=3600s` 双闸门 + gate deadline 防无限阻塞，agent 连续失败/低置信度挂起隔离不污染整链。长程任务的一致性不靠分布式事务 ROLLBACK，靠的是'草稿不落库 + 人确认 = commit + 聚合根不变式保护写'——写的闸门始终在人手里，最坏情况退回人工编排，不会越界写、不会错误放行。"

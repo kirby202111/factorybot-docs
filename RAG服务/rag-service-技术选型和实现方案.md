@@ -6,6 +6,8 @@
 >
 > 制造追溯不使用图检索，不引入 Neo4j、Cypher 或图投影。实现基础是 **MySQL 关系型追溯读模型 + 固定关联查询计划 + MES 只读 REST 补数**。
 >
+> 底座口径：Python 3.12+ 与 **AgentScope 2.0**（`agentscope>=2.0.0`），由 AgentScope 的 **Agent / Toolkit / RAG 模块 / Model / Embedding** 承载 Agentic 编排与文档检索接入；对齐 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §3.2。
+>
 > 口径纪律：RAG 在本项目中是设计阶段的引入规划，本文描述目标方案与落地路径，不代表能力已经上线。
 
 ---
@@ -17,7 +19,7 @@
 | 1 | 一个服务、一个入口 | `POST /rag/query` 接收问题，内部按证据需求组合工具 |
 | 2 | 统一证据契约 | 文档 chunk 和制造记录都转换为 `Evidence`，答案只引用证据 |
 | 3 | 非图追溯 | 业务主键与关联字段查询，白名单查询计划限制展开范围 |
-| 4 | 简单链路优先 | 单次检索足够时不启动多步 Agentic；复杂问题才使用 LangGraph |
+| 4 | 简单链路优先 | 单次检索足够时不启动多步 Agentic；复杂问题才使用 AgentScope `Agent`（内置 ReAct）+ `Toolkit` 做追加检索编排 |
 | 5 | 权限与版本前置 | 在 Port 入参和存储查询中强制执行，不能依赖 prompt 约束 |
 | 6 | 只读与有界 | MES ACL 只读，工具有步数、时间、记录数和 token 预算 |
 | 7 | 可降级、可重建 | 向量索引和追溯读模型都不是权威数据源，可从原始数据重建 |
@@ -30,14 +32,14 @@
 
 | 层次 | 选型 | 建议版本 | 用途 |
 |------|------|---------|------|
-| 语言 | Python | 3.11+ | 服务主体 |
+| 语言 | Python | 3.12+ | 服务主体 |
 | Web | FastAPI + Pydantic v2 | FastAPI 0.110+ / Pydantic 2.6+ | 统一 API、请求与结构化输出校验 |
 | ASGI | uvicorn + gunicorn | 0.29+ / 21.2+ | 服务运行与 worker 管理 |
-| LLM 抽象 | langchain-core `BaseChatModel` | 0.2+ | provider 无关的模型适配与观测包装 |
-| Agentic 编排 | LangGraph | 0.2+ | 有限状态机、工具调用和停止条件 |
-| 文档检索 | LlamaIndex + ChromaDB 适配 | 0.10+ / 0.2+ | 向量索引与检索适配 |
+| Agent 底座 | **AgentScope 2.0** | `agentscope>=2.0.0` | 统一 `Agent` 类（内置 ReAct，`reply` / `reply_stream`）+ `Toolkit` + RAG 模块 + 事件系统，承载 Agentic 编排、工具调用与停止条件 |
+| LLM / 向量抽象 | AgentScope `Model` / `Embedding` | 2.0+ | provider 可插拔（DashScope / Ollama / OpenAI 兼容）的模型与向量化适配 |
+| 文档检索 | AgentScope RAG 模块 + ChromaDB | `agentscope` pin 到具体小版本 / `chromadb>=0.5` | 解析、切块、向量索引与检索适配；⚠️ 框架 RAG 模块**无 ChromaDB 适配器**，接入方式见 §1.2 风险注 |
 | 向量库 | ChromaDB | 0.5+ | chunk 向量与元数据过滤 |
-| Embedding | bge-m3 | 1024 维 cosine | 文档向量化，可本地化部署 |
+| Embedding | bge-m3（经 AgentScope `Embedding` 接入） | 1024 维 cosine | 文档向量化，可本地化部署 |
 | Reranker | bge-reranker-v2-m3 | - | 文档候选精排 |
 | 推理组件 | sentence-transformers + FlagEmbedding | 3.0+ / 1.2+ | 本地或 sidecar 推理 |
 | 关系数据库 | MySQL | 8.0 | 文档元数据、追溯读模型、幂等位点、审计 |
@@ -51,13 +53,17 @@
 | Metrics | prometheus-client | 0.20+ | `rag_` 前缀指标 |
 | Logging | structlog | 24.1+ | JSON 日志与 trace context |
 | 文档解析 | unstructured + pypdf + python-docx | 0.14+ / 4.0+ / 1.1+ | PDF、Office 与半结构化文档解析 |
-| 基础镜像 | python:3.11-slim | - | 单服务镜像 |
+| 基础镜像 | python:3.12-slim | - | 单服务镜像 |
 
 ### 1.2 关键选型说明
 
 #### ChromaDB 只承担文档向量检索
 
-车间文档规模预计为数千文档、数十万 chunk 以内，嵌入式 ChromaDB 可以减少独立基础设施。其使用前提是：
+车间文档规模预计为数千文档、数十万 chunk 以内，嵌入式 ChromaDB 可以减少独立基础设施。检索接入层由 AgentScope **RAG 模块**承载，ChromaDB 只作为其向量存储后端。
+
+> **⚠️ 框架 RAG 模块风险注**：AgentScope 的 `rag/` 模块真实存在（已核实后端为 Qdrant / MilvusLite / Elasticsearch / MongoDB），但**没有 ChromaDB 适配器**，且该模块在 **2.0.0 曾被整体删除、2.0.5 起才回归**（证据见 [架构设计v2/00-架构决策记录ADR.md](../架构设计v2/00-架构决策记录ADR.md) ADR-01 的 RAG 模块行）。因此本方案的落地口径是：`agentscope` **pin 到具体小版本**并在 CI 加 API 漂移检查；ChromaDB 一律经本服务**自持 client**（`chromadb>=0.5`）接入，框架 RAG 抽象只用在解析/切块/召回这类与向量库无关的环节，并封在检索适配层之后。降级预案：若该模块再次缺位或版本升级中断，切换为自持 client 直连 ChromaDB，`search_docs` 的只读契约、元数据过滤与引用口径保持不变。
+
+其使用前提是：
 
 - chunk 不可变，文档升版追加新 chunk；
 - 元数据包含租户、文档状态、文档版本和 `VersionAnchor`；
@@ -73,26 +79,23 @@
 
 该方案避免额外维护图存储、图 Schema 和图同步链路。代价是复杂关联必须提前设计查询计划，不能自由多跳探索；在制造问答场景中，这个限制同时是安全与性能优势。
 
-#### LangGraph 只用于需要追加检索的编排
+#### Agentic 编排只用于需要追加检索的场景
 
-固定的一次文档检索或一次追溯查询使用普通 async application service。只有“追溯发现工艺版本后再查对应 SOP”“首轮证据不足需换种子补查”等多步场景才进入 LangGraph。`recursion_limit` 只是最后防线，应用层仍需独立计算工具次数、时长和证据预算。
+固定的一次文档检索或一次追溯查询使用普通 async application service。只有“追溯发现工艺版本后再查对应 SOP”“首轮证据不足需换种子补查”等多步场景才进入 Agentic 编排，由 AgentScope 统一 `Agent` 类（内置 ReAct）+ `Toolkit` 承载。AgentScope 没有“递归步数上限”这类单一参数，停止条件由应用层独立计算**工具调用次数、时长与证据预算**，编排上限只是最后一道防线。
 
 ### 1.3 依赖清单
 
 ```toml
 [project]
 name = "rag-service"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
+  "agentscope>=2.0.0",
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
   "gunicorn>=21.2",
   "pydantic>=2.6",
   "pydantic-settings>=2.2",
-  "langchain-core>=0.2",
-  "langgraph>=0.2",
-  "llama-index>=0.10",
-  "llama-index-vector-stores-chroma>=0.2",
   "chromadb>=0.5",
   "sentence-transformers>=3.0",
   "FlagEmbedding>=1.2",
@@ -404,7 +407,7 @@ Trace Evidence + Resolved Versions + Missing Evidence
 
 ## 5. Agentic 编排实现
 
-### 5.1 状态定义
+### 5.1 编排状态定义
 
 ```python
 # app/application/orchestrator.py
@@ -419,7 +422,9 @@ class RagState(TypedDict):
     stop_reason: str | None
 ```
 
-状态节点为 `analyze -> plan -> act -> observe -> compose`。`observe` 后根据以下条件决定追加检索或停止：
+Agentic 编排在 AgentScope 统一 `Agent` 类（内置 ReAct）中执行，`RagState` 是这次编排的过程状态；跨请求的会话状态由 `AgentState` + `SessionService`（Redis-backed；**2.0.5 起由 `SessionManager` 改名，旧名不可导入**）承载，不依赖进程内存。工具经 `Toolkit` 注册，`Tool` 的返回以 Content Block（Pydantic BaseModel）挂到 `Msg` 上，便于引用与溯源。
+
+`observe` 阶段后根据以下条件决定追加检索或停止：
 
 - 仍存在可补救的证据缺口；
 - 存在合法且未尝试过的工具动作；
@@ -427,6 +432,8 @@ class RagState(TypedDict):
 - 上一轮产生了新证据或解析出了新版本锚点。
 
 ### 5.2 工具白名单
+
+四个能力都封装为 AgentScope `Tool`，注册进同一个 `Toolkit`（外部检索服务也可按需用 MCP 接入）：
 
 | 工具 | 实现 Port | 典型用途 |
 |------|----------|---------|
@@ -605,7 +612,7 @@ ChromaDB collection 使用 cosine 空间，启动时幂等创建。备份不能�
 
 ### 10.2 Trace 与审计
 
-OTel span 链为 `rag.query -> plan -> document.search/trace.lookup -> llm.compose`。跨服务调用透传 `traceparent`，与 agent-service 和 MES 使用同一个 `trace_id`。
+OTel span 链为 `rag.query -> plan -> document.search/trace.lookup -> llm.compose`，埋点入口用 AgentScope `TracingMiddleware`（自研 obs 层不再自建）。跨服务调用透传 `traceparent`，与 agent-service 和 MES 使用同一个 `trace_id`。
 
 审计保存请求摘要、工具步骤、证据 ID/来源/版本、读模型 freshness、模型与 prompt 版本、停止原因和最终状态。序列号、人员和物料信息按治理规则脱敏，不将完整敏感上下文写入日志。
 
@@ -657,7 +664,7 @@ OTel span 链为 `rag.query -> plan -> document.search/trace.lookup -> llm.compo
 | 维度 | 核心断言 |
 |------|---------|
 | 文档检索 | Recall@k、引用定位、版本过滤、越权过滤 |
-| 制造追溯 | 种子解析、关键记录召回、错误关联、版本对齐、缺失识别 |
+| 制造追溯 | 种子解析、证据集完整率、错误关联、版本对齐、缺失识别 |
 | Agentic | 工具选择、追加检索收益、步数与预算、无新证据停止 |
 | 综合答案 | 忠实度、引用完整、事实/建议/推断区分、冲突表达 |
 | 安全红线 | 写操作、跨租户、失效版本、无证据制造事实任一出现即阻断 |
@@ -673,7 +680,7 @@ OTel span 链为 `rag.query -> plan -> document.search/trace.lookup -> llm.compo
 |------|---------|---------|
 | 一：统一底座与文档检索 | 统一契约、权限/版本策略、摄入管线、`/rag/query` 基础链路 | 文档引用、版本过滤、只读和租户测试通过 |
 | 二：关系型追溯 | 读模型、事件同步、固定查询计划、MES 补数、统一证据融合 | 三类种子、5M1E 召回、错误关联和 freshness 测试通过 |
-| 三：Agentic 编排 | LangGraph 状态机、工具预算、追加检索、审计与证据页面 | 复杂问题有实际收益，预算和停止条件可靠 |
+| 三：Agentic 编排 | AgentScope `Agent` + `Toolkit` 编排、工具预算、追加检索、审计与证据页面 | 复杂问题有实际收益，预算和停止条件可靠 |
 | 四：生产治理 | 压测、备份重建、故障演练、评测门禁与运维看板 | SLO、安全红线、恢复与重建全部通过 |
 
 ---

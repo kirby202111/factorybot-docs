@@ -1,8 +1,8 @@
 # 文档型 RAG 详细设计（向量检索 + 版本治理）
 
-> 本文是 [RAG服务引入路线.md](../RAG服务引入路线.md) §2.2 路线 B（文档型 RAG）的落地展开，输出**技术栈、文档领域建模、摄入与切分、版本治理与重索引、检索生成、与领域耦合点、关键设计决策与约束落地**。
-> **技术栈**：Python（FastAPI + **ChromaDB** + LlamaIndex + Pydantic）。RAG 服务与三大 MES 服务（Java/Spring）跨语言共存，通过 Kafka 只读事件 + REST 只读查询解耦，互不侵入。
-> **口径纪律**：文档型 RAG 在本项目中是**设计阶段的引入规划**，不是线上已落地能力。讲法遵循 [项目亮点与指标卡片.md](../../面试指南/项目亮点与指标卡片.md) §0 的口径纪律--说"规划方向 / 设计取舍"，不说"我们已经做了文档 RAG"。MES 领域对错误答案零容忍（错给一条已失效 SOP 会直接导致批量不良），所以本文强调**向量是主体，但版本治理才是灵魂**--检索必须带版本锚点（`version_kind`+`version`+`version_ref_id`）/ 生效状态过滤，且由领域事件驱动重索引，而非堆模型。
+> 本文是 [RAG服务引入路线.md](RAG服务引入路线.md) §1 所述**文档检索能力**的落地展开，输出**技术栈、文档领域建模、摄入与切分、版本治理与重索引、检索生成、与领域耦合点、关键设计决策与约束落地**。文档检索与制造追溯（关系型读模型）、Agentic 编排同属一个 `rag-service`，是同一服务内的三项能力，不是并列的 RAG 路线。
+> **技术栈**：Python 3.12+（FastAPI + **ChromaDB** + LlamaIndex + Pydantic），底座与依赖口径对齐 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §1.3。RAG 服务与三大 MES 服务（Java/Spring）跨语言共存，通过 Kafka 只读事件 + REST 只读查询解耦，互不侵入。
+> **口径纪律**：文档型 RAG 在本项目中是**设计阶段的引入规划**，不是线上已落地能力。讲法遵循 [项目亮点与指标卡片.md](../面试指南/项目亮点与指标卡片.md) §0 的口径纪律--说"规划方向 / 设计取舍"，不说"我们已经做了文档 RAG"。MES 领域对错误答案零容忍（错给一条已失效 SOP 会直接导致批量不良），所以本文强调**向量是主体，但版本治理才是灵魂**--检索必须带版本锚点（`version_kind`+`version`+`version_ref_id`）/ 生效状态过滤，且由领域事件驱动重索引，而非堆模型。
 
 ---
 
@@ -17,39 +17,39 @@
 1. **操作工 / 线长**："SPI 3 号机报 solder_insufficient 怎么处置？" -> 检索 SPI 报警处置 SOP + 设备维修手册对应章节 -> 给一句话原因 + 一个动作 + 引用片段。
 2. **工艺 / 质量工程师**："首件检验流程是什么？" -> 检索首件检验标准（绑定当前生效工艺版本）-> 给流程步骤 + 引用。
 3. **设备工程师**："贴片机 M-200 报 E027 怎么修？" -> 检索该设备型号维修手册 + 历史同类维修记录 -> 给处置步骤 + 引用。
-4. **与追溯型协同**：追溯型 RAG 给"这条单件用了哪批锡膏、哪台设备"（结构化事实链），本文档给"SPI 报警怎么处置"（处置知识）--两者版本过滤都对齐 `ProcessRouteActivated`。
+4. **与制造追溯协同**：制造追溯（关系型读模型）给"这条单件用了哪批锡膏、哪台设备"（结构化事实链），本文档给"SPI 报警怎么处置"（处置知识）--两者版本过滤都对齐 `ProcessRouteActivated`。
 
 ### 1.2 硬边界（一开口就要讲）
 
 | 边界 | 说明 | 落地 |
 |------|------|------|
 | **只读 MES** | 文档库归 RAG 服务自有；RAG 对 MES 只读--订阅事件 + 只读 REST 查文档绑定关系，从不回写 MES | 文档元数据 / 向量存 ChromaDB（RAG 自有库）；订阅 `process.*` / `material.*` / `quality.*` 只读事件；降级查询只读 REST |
-| **不进过点主事务** | 摄入 / 重索引异步消费事件，与过点判定完全解耦 | 过点 P99 ≤200ms（[领域总览.md](../../领域模型/领域总览.md) §4.1）不受文档索引影响；文档检索容忍秒级延迟（[RAG服务引入路线.md](../RAG服务引入路线.md) §4） |
+| **不进过点主事务** | 摄入 / 重索引异步消费事件，与过点判定完全解耦 | 过点 P99 ≤200ms（[领域总览.md](../领域模型/领域总览.md) §4.1）不受文档索引影响；文档检索容忍秒级延迟（[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §15 关键决策汇总"RAG 只读并退出生产主事务"） |
 | **版本一致性** | 工艺 / BOM / 质量规则有版本生命周期，检索 SOP / 作业指导书必须带版本过滤，否则答出**已失效工艺** | 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`） / `bom_version` / `rule_version`；订阅 `ProcessRouteActivated` 等触发重索引；检索带 `version` + `status=PUBLISHED` 过滤（§5.4 / §6.2） |
 | **权限隔离** | 不同车间 / 产线 / 角色能看的文档不同，检索层带租户 / 权限上下文 | 文档元数据带 `tenant_scope`，向量检索时**前置过滤**（ChromaDB where pre-filter），不是答完再裁剪 |
 | **可观测兜底** | 所有答案带来源引用 + 置信度，低置信度转人工 / 转规则引擎 | 检索结果结构化（chunk_id + 文档版本 + 页码/定位）+ 置信度阈值；与 MES 防错理念一致：宁可拦下让人判 |
 | **部署形态** | 车间网络常与办公网隔离，需本地化向量库 / Embedding / 模型 | ChromaDB + bge-m3 本地化部署；LLM 视安全策略云端 API 或本地化模型二选一（§2.5） |
 
-### 1.3 与追溯型 RAG、诊断能力 Agent 的关系
+### 1.3 与制造追溯、诊断能力 Agent 的关系
 
-文档型 RAG（路线 B）与追溯型 RAG（路线 A，[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md)）不是替代，是**互补分工**，二者共享同一套版本治理契约：
+文档检索（本文）与制造追溯（关系型读模型，[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §4.2 非图制造追溯）不是替代，是同一个 `rag-service` 内的**互补分工**，二者共享同一套版本治理契约：
 
-| | 追溯型 RAG（路线 A） | 文档型 RAG（路线 B，本文） |
-|---|-------------------|--------------------------|
-| 检索主体 | 属性图（GraphRAG + 领域事件流） | 向量库（ChromaDB） |
+| | 制造追溯（关系型读模型） | 文档检索（本文） |
+|---|------------------------|----------------|
+| 检索主体 | MySQL 关系型读模型 + 固定关联查询计划（MES 只读 REST 补数） | 向量库（ChromaDB） |
 | 答的是 | "这条单件 5M1E 全貌"（结构化事实链） | "SPI 报警怎么处置"（处置知识） |
-| 数据来源 | 14 上下文聚合根的事件投影 | SOP / 手册 / 标准 / 8D 等文档 |
-| 版本一致性 | `SNAPSHOT_OF_ROUTE` 快照边锁当时版本 | 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`） + 重索引 |
-| 协同点 | `TraceAnswer.suggested_action` 调本文 `search_docs(query, version_anchor)` | 本文接收追溯型发布的 `rag.reindex.request` 事件触发重索引 |
+| 数据来源 | 14 上下文业务事实的事件投影（`trace_*` 关系表） | SOP / 手册 / 标准 / 8D 等文档 |
+| 版本一致性 | 版本锚点三段（`version_kind`+`version`+`version_ref_id`）+ 固定关联查询计划锁定当时版本 | 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`） + 重索引 |
+| 协同点 | 追溯证据的处置建议调本文 `search_docs(query, version_anchor)`，跨能力委托传 `evidence_set_id` | 本文接收服务内制造追溯侧发布的 `rag.reindex.request` 事件触发重索引 |
 
-- **诊断能力**（[AGENT服务引入路线.md](../../AGENT服务/AGENT服务引入路线.md) §2.2）把本文 `POST /rag/docs/query` 封装成 `search_docs` 工具，作为其多步推理的"处置知识"工具之一；与 `query_traceability_graph`（追溯型）并列。
-- **落地顺序**：先 B 后 A（[RAG服务引入路线.md](../RAG服务引入路线.md) §3）。文档型 2–4 周可出 demo，先验证"车间到底有没有人用 RAG"；追溯型建立在领域事件和过点记录上，是护城河但建模重。
+- **诊断能力**（[AGENT服务引入路线.md](../AGENT服务/AGENT服务引入路线.md) §2.1）把本文 `POST /rag/docs/query` 封装成 `search_docs` 工具，作为其多步推理的"处置知识"工具之一；与 `trace_lookup`（制造追溯工具）并列。
+- **落地顺序**：同一服务的分期增量（[RAG服务引入路线.md](RAG服务引入路线.md) §4、[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §14）。第一阶段先交付统一底座与文档检索，第二阶段加入非图追溯。文档检索 2–4 周可出 demo，先验证"车间到底有没有人用 RAG"；制造追溯建立在领域事件和过点记录上，是护城河但读模型建模重。
 
 ### 1.4 与 Java 技术栈的关系
 
 - RAG 服务用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只订阅 Kafka 只读事件、调只读 REST 查文档绑定关系。
 - 跨语言的物理边界反而是好事：RAG 服务无法共享 Java 事务 / 内存，天然强制只读、不进过点主事务、不旁路应用服务写路径。
-- 复用 [实现说明](../../实现说明/) 既有的 Kafka topic、REST 只读接口、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [消息处理实现说明.md](../../实现说明/业务事件/消息处理实现说明.md) §4.3）、消费侧幂等模式（§6 同事务幂等 + 手动 ack），不造新契约。
+- 复用 [实现说明](../实现说明/) 既有的 Kafka topic、REST 只读接口、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §4.3）、消费侧幂等模式（§6 同事务幂等 + 手动 ack），不造新契约。
 
 ---
 
@@ -59,13 +59,13 @@
 
 | 层次 | 选型 | 选型理由 |
 |------|------|---------|
-| 语言 | Python 3.11+ | 类型提示 + Pydantic 校验，AI 生态最成熟，与追溯型 RAG / 诊断能力 Agent 同栈复用 LLM 抽象 |
-| Web 框架 | **FastAPI** | 异步、原生 OpenAPI，与追溯型一致，适合做检索 HTTP 入口 |
+| 语言 | Python 3.12+ | 类型提示 + Pydantic 校验，AI 生态最成熟，与同服务内制造追溯能力 / 诊断能力 Agent 同栈复用 LLM 抽象（对齐 `pyproject.toml` 的 `requires-python = ">=3.12"`，见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §1.3） |
+| Web 框架 | **FastAPI** | 异步、原生 OpenAPI，与同一 rag-service 内其他能力一致，适合做检索 HTTP 入口 |
 | 向量存储 | **ChromaDB** 0.5+（嵌入式 persistent client，Parquet 持久化） | 跟随 rag-service 进程，零额外 DB service；LlamaIndex `llama-index-vector-stores-chroma` 的 `ChromaVectorStore`；distance=cosine（bge-m3 1024 维）；chunk 不可变 + 强制带版本绕开写事务弱点，见 §2.3 |
 | 向量存储（未来甜区备选） | Milvus / Qdrant | 文档量或 QPS 上到专用向量库甜区时切换，LlamaIndex `VectorStoreIndex` 抽象兜底，见 §2.3 |
-| 检索编排 | **LlamaIndex** `VectorStoreIndex` | 文档摄入 / 切分 / 向量检索 / Rerank 的上层抽象，文档型 RAG 的主场 |
-| LLM 抽象 | `langchain-core` 的 `BaseChatModel` | 模型可插拔，配置切换 Claude / 通义千问 / DeepSeek / 本地化模型，与追溯型 / 诊断能力一致 |
-| Embedding | **bge-m3**（多语种，可本地化，1024 维） | SOP / 手册 / 问题的语义向量化，覆盖中英文，与追溯型同模型同维度 |
+| 检索编排 | **LlamaIndex** `VectorStoreIndex` | 文档摄入 / 切分 / 向量检索 / Rerank 的上层抽象，文档型 RAG 的主场。【待确认】与 rag-service 总体口径"检索接入层由 AgentScope **RAG 模块**承载"（[rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §1.2）尚未收口：框架 `rag/` 无 ChromaDB 适配器且 2.0.0 曾被整体删除，ADR-01 把它列为未决项，取舍需确认 |
+| LLM 抽象 | AgentScope 2.0 **`Model`**（+ 显式 `Credential`） | 模型可插拔，配置切换 Claude / 通义千问 / DeepSeek / 本地化模型；OpenAI 兼容协议（含 DeepSeek）经同一 `Model` 抽象接入，与制造追溯 / 诊断能力同一条抽象（已核实 `pyproject.toml` 无 `langchain` 依赖，旧 `langchain-core BaseChatModel` 写法作废） |
+| Embedding | **bge-m3**（多语种，可本地化，1024 维） | SOP / 手册 / 问题的语义向量化，覆盖中英文，与制造追溯同模型同维度；经 AgentScope `Embedding` 抽象接入 |
 | Rerank | **bge-reranker-v2-m3**（可本地化） | 向量召回后精排，提升 top-k 相关性，中英文兼顾 |
 | 数据校验 | **Pydantic v2** | 检索请求 / 文档视图 / 答案 DTO 的 schema 即类型 |
 | HTTP 客户端 | **httpx**（异步） | 降级查询各上下文只读 REST（查文档与领域版本的绑定关系） |
@@ -74,14 +74,17 @@
 | 缓存 | **redis-py (async)** | 检索结果短期缓存（同 query + 版本 + 租户命中即用） |
 | 可观测 | **OpenTelemetry Python** + `prometheus-client` | trace 串联、指标告警 |
 | 配置 | pydantic-settings | 环境变量 / 配置文件统一管理 |
-| 部署 | 独立微服务 `rag-doc-service`（uvicorn + gunicorn worker） | 与三大服务同网格，K8s 部署 |
+| 部署 | `rag-service` 内的文档检索模块（部署单元沿用 `rag-doc-service`，uvicorn + gunicorn worker） | 与三大 MES 服务同网格，K8s 部署；文档检索与制造追溯是同一服务的两个能力，不拆成两套 RAG 产品 |
 
-### 2.2 为什么是纯向量检索（而非 GraphRAG）
+> ⚠️ **接入层风险注**：rag-service 的总体口径是检索接入层由 AgentScope **RAG 模块**承载、ChromaDB 作为其向量存储后端（[rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §1.2）。该模块**没有 ChromaDB 适配器**，且曾在 2.0.0 被整体删除、2.0.5 起才回归。因此本文的 ChromaDB + LlamaIndex 链路要求：`agentscope` **pin 到具体小版本**并在 CI 加 API 漂移检查；ChromaDB 一律经本服务**自持 client**（`chromadb>=0.5`）接入，框架 RAG 抽象只用在解析 / 切块 / 召回这类与向量库无关的环节，并封在检索适配层之后。降级预案：该模块再次缺位或升级中断时，切自持 client 直连 ChromaDB，`search_docs` 的只读契约、元数据过滤与引用口径不变。
 
-- 文档型 RAG 处理的是**非结构化文本**：SOP 的某段处置步骤、手册的某章故障代码说明，答案集中在少数段落，是"局部、事实性"查询（见 [基础问题.md](../问题归纳/基础问题.md) §二"传统 RAG 适用场景"）。
-- 文档之间是**弱关联**（一份 SOP 和一份手册之间没有 `source_work_order_id` 这种显式引用），向量相似度足以召回，不需要图遍历。
-- 这区别于追溯型 RAG（路线 A）：追溯链是结构化关系（`SN -> 过点记录 -> 设备 / 工艺版本 / 物料批次`），必须 GraphRAG 把引用建成图边（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §2.2）。
-- **一句话**：答案藏在某段话里 -> 向量检索（本文）；答案靠"关系拼出来" -> GraphRAG（追溯型）。两者在 MES 里分工互补（[基础问题.md](../问题归纳/基础问题.md) §五）。
+### 2.2 为什么是纯向量检索（本文），以及追溯为什么也不用图检索
+
+- 文档型 RAG 处理的是**非结构化文本**：SOP 的某段处置步骤、手册的某章故障代码说明，答案集中在少数段落，是"局部、事实性"查询（见 [基础问题.md](问题归纳/基础问题.md) §二"传统 RAG 适用场景"）。
+- 文档之间是**弱关联**（一份 SOP 和一份手册之间没有 `source_work_order_id` 这种显式引用），向量相似度足以召回，不需要任何遍历式检索。
+- 制造追溯（同服务内的另一项能力）同样**不采用图检索**：`SN -> 过点记录 -> 设备 / 工艺版本 / 物料批次` 这条链是**固定深度、模式已知**的关系查询，业务关联字段（`serial_no` / `work_order_id` / `operation_record_id` / `material_lot_id` / `route_ref_id + route_version`）本身已足够表达，用 **MySQL 关系型读模型 + 参数化固定关联查询计划**即可覆盖（[rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §4 非图制造追溯实现、[RAG服务引入路线.md](RAG服务引入路线.md) §2 为什么追溯不使用图检索）。因此追溯读模型把工单、过点、物料批次、设备、工艺版本建成**关系表 + 外键关联**，展开深度由白名单查询计划限定。
+- 引入图数据库（Neo4j / Cypher / 图投影）在本场景**不增加表达力，只增加三笔代价**：① 多一套存储、图 Schema、驱动与备份的运维面；② 事件升版要同步翻转图结构，"版本即节点"一旦漏更新就形成失效版本残留；③ 多跳查询计划不可控，与过点 P99 ≤200ms 争抢资源，也无法逐跳做权限与版本前置。结论保持：**不采用图检索**，代价（不能自由探索任意关系）用"评测出必要计划再显式增加"来补偿。
+- **一句话**：答案藏在某段话里 -> 向量检索（本文）；答案靠"关系拼出来" -> 关系型读模型的固定关联查询（制造追溯）。两者在 rag-service 内分工互补，共用同一套证据与版本契约。
 
 ### 2.3 为什么选 ChromaDB（而非 PGVector / Milvus / Qdrant）
 
@@ -103,16 +106,16 @@
 
 ### 2.4 为什么版本治理建立在领域事件之上
 
-- 文档型 RAG 最危险的环节是**工艺变更后文档没跟上**：工艺路线从 v1 升到 v2，若 SOP 还停在 v1 的处置步骤，操作工按失效 SOP 操作 -> 批量不良。这是和通用 RAG 最大的区别（[RAG服务引入路线.md](../RAG服务引入路线.md) §2.2 / §5 Q&A）。
-- 版本一致性不是文档型 RAG 自己保证的，是**从领域模型兜上来的**--工艺版本有生命周期（`RouteVersionState`：DRAFT/SUBMITTED/ACTIVATED/DEPRECATED/ARCHIVED）、变更发 `ProcessRouteActivated` 事件、过点记录绑 `routeVersion`（[领域总览.md](../../领域模型/领域总览.md) §5.1）。文档型 RAG 只是严格遵循这套契约：
+- 文档型 RAG 最危险的环节是**工艺变更后文档没跟上**：工艺路线从 v1 升到 v2，若 SOP 还停在 v1 的处置步骤，操作工按失效 SOP 操作 -> 批量不良。这是和通用 RAG 最大的区别（[RAG服务引入路线.md](RAG服务引入路线.md) §5 硬约束 / §6 面试防守 Q&A）。
+- 版本一致性不是文档型 RAG 自己保证的，是**从领域模型兜上来的**--工艺版本有生命周期（`RouteVersionState`：DRAFT/SUBMITTED/ACTIVATED/DEPRECATED/ARCHIVED）、变更发 `ProcessRouteActivated` 事件、过点记录绑 `routeVersion`（[领域总览.md](../领域模型/领域总览.md) §5.1）。文档型 RAG 只是严格遵循这套契约：
   1. 订阅 `ProcessRouteActivated` / `ProcessRouteDeprecated` / `BomActivated` / `QualityGateRuleActivated` 事件，触发关联文档重索引 / 重新绑定 / 状态流转（§5.4）。
   2. 检索时带版本锚点（`version_kind`+`version`）+ `status=PUBLISHED` 过滤，从结构上杜绝失效文档（§6.2）。
-  3. 接收追溯型 RAG 发布的内部 `rag.reindex.request` 事件（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §5.4），与追溯型重索引对齐。
-- 这套机制与追溯型 RAG 的"版本即节点 + 快照边"（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §4.4）是**同一套版本契约的两个投影面**：追溯型把版本做成图节点，本文把版本做成文档元数据过滤维度。两者都由 `ProcessRouteActivated` 驱动，保证"图里的工艺版本"与"文档绑定的工艺版本"一致。
+  3. 接收同一 rag-service 内制造追溯侧发布的内部 `rag.reindex.request` 事件（服务内事件消费口径见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §7.1 事件消费），与追溯读模型的更新节奏对齐。
+- 这套机制与制造追溯（关系型读模型）的版本对齐策略是**同一套版本契约的两个落点**（[rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §7.2 版本解析、[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §8 数据一致性与版本传递）：追溯侧按版本锚点三段（`version_kind`+`version`+`version_ref_id`）从目标过点 / 工单记录做固定关联查询，取当时的工艺版本；本文把同一组版本锚点做成文档元数据过滤维度。两者都由 `ProcessRouteActivated` 驱动，保证"追溯读模型查到的工艺版本"与"文档绑定的工艺版本"一致。
 
 ### 2.5 部署形态（车间网隔离）
 
-- 车间网络常与办公网隔离（[RAG服务引入路线.md](../RAG服务引入路线.md) §4 硬约束）。**建议**：向量库（ChromaDB）与 Embedding（bge-m3）/ Rerank（bge-reranker）本地化部署，LLM 视车间安全策略二选一--云端 API（质量高、需出网）或本地化模型（离线、质量折衷）。`BaseChatModel` 抽象保证两者切换零代码改动。
+- 车间网络常与办公网隔离（[RAG服务引入路线.md](RAG服务引入路线.md) §5 硬约束）。**建议**：向量库（ChromaDB）与 Embedding（bge-m3）/ Rerank（bge-reranker）本地化部署，LLM 视车间安全策略二选一--云端 API（质量高、需出网）或本地化模型（离线、质量折衷）。`BaseChatModel` 抽象保证两者切换零代码改动。
 - 原始文档文件（PDF / Word / 图片）不入向量库，ChromaDB 只存文本 chunk + 向量 + 定位（页码 / 段落偏移），避免大文件进 ChromaDB。
 - 车间网若严格离线，LLM 走本地化模型（如 Qwen / DeepSeek 本地部署），bge-m3 / bge-reranker 本地 GPU 或 CPU 推理均可（文档型对延迟不敏感，CPU 推理可接受）。
 
@@ -159,7 +162,7 @@
                           │ aiokafka Consumer   │
                           │ process.* material.*│
                           │ quality.*           │
-                          │ + rag.reindex.*     │← 追溯型 RAG 重索引请求
+                          │ + rag.reindex.*     │← 制造追溯 重索引请求
                           └─────────────────────┘
                                     ▲
                                     │ 各上下文 Outbox 投递（至少一次）
@@ -252,7 +255,7 @@ stateDiagram-v2
 ```
 
 - **PUBLISHED** = 可被默认检索（对应工艺 `ACTIVATED`）。
-- **DEPRECATED** = 不再被默认检索，但**已发布的引用仍可追溯**（历史答案里引用过的 SOP 片段仍能点开）--不删除，对应工艺版本 `DEPRECATED` 不删（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §4.4）。
+- **DEPRECATED** = 不再被默认检索，但**已发布的引用仍可追溯**（历史答案里引用过的 SOP 片段仍能点开）--不删除，对应工艺版本 `DEPRECATED` 不删（同服务内追溯读模型也保留历史版本记录，见 [rag-service-整体结构设计.md](rag-service-整体结构设计.md) §4.1 文档检索"旧版本保留用于历史追溯"）。
 - **新版本 PUBLISHED 时旧版本自动 DEPRECATED**：同文档同类绑定唯一 PUBLISHED（§4.2），与工艺 / BOM 同构。
 - 🔴 **状态机是否完全对齐工艺路线状态机**：工艺有 `SUBMITTED` 审核态，文档是否也需要独立的文档审核流（与工艺审核解耦）？还是文档随工艺 `ProcessRouteActivated` 联动 PUBLISHED（工艺生效即文档生效）？两种策略影响文档发布的责任归属（文档 owner vs 工艺 owner），交还用户决策。本文默认文档有独立审核流，工艺生效事件触发的是"重新绑定 / 重索引"而非"直接 PUBLISHED"。
 
@@ -272,7 +275,7 @@ stateDiagram-v2
 
 ### 4.5 与 14 个限界上下文的关系
 
-文档型 RAG 不投影 14 个上下文的聚合根（那是追溯型 RAG 的活），而是通过**文档绑定关系**与领域版本对齐：
+文档型 RAG 不投影 14 个上下文的聚合根（那是制造追溯读模型的活），而是通过**文档绑定关系**与领域版本对齐：
 
 | 文档类别 | 绑定的领域对象 | 对齐的上下文 | 驱动重索引的事件 |
 |---------|--------------|-------------|----------------|
@@ -283,7 +286,7 @@ stateDiagram-v2
 | 通用知识型 | 无领域版本绑定 | - | 无（按自身版本管理） |
 
 - 文档型 RAG 是 MES 领域的**只读消费者**：只订阅上述事件做重索引 / 重新绑定，不回写任何上下文。
-- 与追溯型 RAG 的边界：追溯型投影聚合根实例（`WipUnit` / `CheckpointRecord` ...）成图节点；文档型不投影聚合根，只把"文档版本绑定哪个领域版本"作为元数据过滤维度。两者通过 `rag.reindex.request` 事件协同（§5.4）。
+- 与制造追溯（关系型读模型）的边界：追溯读模型把聚合根实例（`WipUnit` / `CheckpointRecord` ...）投影成**关系表 + 外键关联**（`trace_*` 表，见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §4.1 读模型），取证走白名单的固定关联查询计划（同上 §4.2 固定查询计划），不建图节点、图边或图投影；文档型不投影聚合根，只把"文档版本绑定哪个领域版本"作为元数据过滤维度。两者通过 `rag.reindex.request` 事件协同（§5.4）。
 
 ---
 
@@ -367,27 +370,27 @@ DocumentIngestionService
 | `ProcessRouteDeprecated` | `process.route.lifecycle` | 关联文档版本 `state` -> `DEPRECATED`（不删），历史引用仍可追溯 |
 | `BomActivated` | `material.bom.lifecycle` | 同上，BOM 相关文档重绑定 |
 | `QualityGateRuleActivated` | `quality.gate.lifecycle` | 检验标准文档重绑定 |
-| `rag.reindex.request` | `rag.reindex.*`（内部） | 追溯型 RAG 发布的重索引请求（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §5.4），按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档 |
+| `rag.reindex.request` | `rag.reindex.*`（内部） | 同一 rag-service 内制造追溯侧发布的重索引请求，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档（服务内事件消费口径见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §7.1 事件消费） |
 | `DocumentVersionPublished` | `rag.doc.lifecycle`（内部） | 文档版本发布，刷新检索可见性 |
 
 **B. 状态流转闸**
 
 - `ProcessRouteActivated` 触发后，关联文档**不自动 PUBLISHED**（🔴 §4.3：文档有独立审核流），而是进入 `PENDING_REBIND`，由文档 owner 人工确认：发新版本（内容变）或继承绑定（内容不变）。
-- 旧版本锚点关联文档若仅此绑定，`ProcessRouteDeprecated` 后 `document_version.state` -> `DEPRECATED`，**不删除**--历史答案引用仍可点开（对齐追溯型"版本即节点不删"）。
+- 旧版本锚点关联文档若仅此绑定，`ProcessRouteDeprecated` 后 `document_version.state` -> `DEPRECATED`，**不删除**--历史答案引用仍可点开（对齐制造追溯"历史版本记录不删"）。
 - **注意区分**：`document_version.state` 是版本层状态（DRAFT/SUBMITTED/PUBLISHED/PENDING_REBIND/DEPRECATED/ARCHIVED），保留原样；`chunk.state` 写入时固定 `PUBLISHED`（chunk 不可变），两者解耦。不再 sync chunk.state--工艺升版时追加新版本 chunk（带新版本锚点），不翻转老 chunk 的 state。版本隔离靠查询 `where version_kind`+`version` 过滤。
 
 **C. 检索过滤闸**
 
 - 检索时 `where state='PUBLISHED'` + 版本过滤（§6.2），`DEPRECATED` / `PENDING_REBIND` 文档天然不召回。
-- 查历史单件 SOP 时带版本锚点（`version`+`version_kind`）= 当时版本（与追溯型 `SNAPSHOT_OF_ROUTE` 同构），不取"当前生效版"。
+- 查历史单件 SOP 时带版本锚点（`version`+`version_kind`）= 当时版本：**按版本锚点做固定关联查询取当时的 SOP**，不取"当前生效版"（与制造追溯的版本解析策略一致，见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §7.2 版本解析）。
 
-> **版本一致性不是文档型 RAG 自己保证的，是从领域模型兜上来的**--工艺版本有生命周期、变更发 `ProcessRouteActivated`、文档绑定对齐版本锚点（`version_kind`+`version`+`version_ref_id`）。RAG 只是严格遵循这套契约，不另搞一套版本管理。这与追溯型 RAG 的版本契约（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §5.4）是同一套，两个投影面。
+> **版本一致性不是文档型 RAG 自己保证的，是从领域模型兜上来的**--工艺版本有生命周期、变更发 `ProcessRouteActivated`、文档绑定对齐版本锚点（`version_kind`+`version`+`version_ref_id`）。RAG 只是严格遵循这套契约，不另搞一套版本管理。这与制造追溯（关系型读模型）的版本契约（[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §8 数据一致性与版本传递）是同一套：同一组版本锚点，文档侧作为元数据过滤维度，追溯侧作为固定关联查询的过滤条件。
 
 ### 5.5 幂等与去重
 
-事件经各上下文 Transactional Outbox **至少一次**投递（[消息处理实现说明.md](../../实现说明/业务事件/消息处理实现说明.md) §1），RAG 侧必须幂等消费，否则重复投递会产生重复重索引 / 重复 chunk。
+事件经各上下文 Transactional Outbox **至少一次**投递（[消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §1），RAG 侧必须幂等消费，否则重复投递会产生重复重索引 / 重复 chunk。
 
-- **重索引幂等**：`event_id + consumer_group` 幂等表（MySQL，与追溯型同构），重复投递的重索引事件被挡住。chunk 不可变让幂等更容易：同一 `event_id` + `(doc_id, version, chunk_seq)` 去重，可安全重跑。
+- **重索引幂等**：`event_id + consumer_group` 幂等表（MySQL，与制造追溯读模型的消费幂等同构），重复投递的重索引事件被挡住。chunk 不可变让幂等更容易：同一 `event_id` + `(doc_id, version, chunk_seq)` 去重，可安全重跑。
 - **摄入幂等**：`file_content_hash` 唯一约束--同一文件重复摄入不产生重复 chunk。
 - **chunk 幂等**：`(doc_id, version, chunk_seq)` 去重--ChromaDB upsert 按 id 覆盖，重复写入幂等。
 - **位点上移**：幂等记录与位点更新同 MySQL 事务，保证"已处理 ⇒ 已 ack"。
@@ -503,7 +506,7 @@ class DocAnswer(BaseModel):
     needs_human_review: bool = False
 ```
 
-- **强制引用 `chunk_id`**：每个答案必须引用至少一个 chunk，无引用的答案判失败重试--与追溯型 RAG"证据强制引用 node_id"同思路（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §6.4），杜绝 LLM 编造。
+- **强制引用 `chunk_id`**：每个答案必须引用至少一个 chunk，无引用的答案判失败重试--与制造追溯"证据强制引用 `evidence_id`、回查统一用 `evidence_set_id`"同思路（统一证据模型见 [rag-service-整体结构设计.md](rag-service-整体结构设计.md) §3.2），杜绝 LLM 编造。
 - **置信度阈值**：`confidence < 0.6` 或无引用 -> `needs_human_review=True`，不展示给操作工，只推工程师；与 MES 防错理念一致，宁可拦下让人判。
 - **系统提示词约束**：明确告诉模型"只能基于提供的 chunks 回答，不得编造未提供的文档内容；若 chunks 无关则回答'未找到相关文档'而非编造；输出严格遵循 DocAnswer 结构"。
 
@@ -513,18 +516,19 @@ class DocAnswer(BaseModel):
 
 - 每个 citation 带 `locator`（页码 / 偏移 / 标题路径），工程师点击能跳到原文档（文件拉取 + 定位）具体位置。
 - `version`+`version_kind` 记录本次检索的版本锚点，答案可溯源"是基于哪个工艺版本的 SOP 答的"。
+- **跨能力回查统一走 `evidence_set_id`**：本文返回的文档片段进入统一 `EvidenceSet` 后，agent-service / 审计按 `evidence_set_id` 回查已固化的证据子集（文档片段 + 制造记录 + 版本锚点），AgentScope `Tool` 形态为 `fetch_evidence_set(evidence_set_id)`（接口与集成口径见 [rag-service-整体结构设计.md](rag-service-整体结构设计.md) §6 对外接口、§7.2 与 agent-service）。**不使用图节点引用或子图引用**。
 
-### 6.6 与追溯型 RAG、诊断能力 Agent 的协同
+### 6.6 与制造追溯、诊断能力 Agent 的协同
 
-- **与追溯型 RAG 协同**：追溯型 `TraceAnswer.suggested_action` 可调本文 `search_docs(query, version_anchor)` 补 SOP 片段（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §6.5）--追溯型给"哪批锡膏、哪台设备"（事实链），本文给"SPI 报警怎么处置"（处置知识），两者版本过滤都对齐 `ProcessRouteActivated`。
-- **与 诊断能力 Agent 协同**：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（[FactoryAgent-诊断能力.md](../../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）；诊断能力在追溯型图检索基础上，按需要调本文补充处置知识。
-- **不互相替代**：追溯型答"是什么、为什么"（事实链），本文答"怎么办"（处置知识）。简单处置用本文够了，复杂根因诊断用追溯型 + 诊断能力。
+- **与制造追溯（关系型读模型）协同**：追溯证据的处置建议可调本文 `search_docs(query, version_anchor)` 补 SOP 片段（一次请求内的典型组合见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §5.3 典型组合，跨能力委托传 `evidence_set_id`）--制造追溯给"哪批锡膏、哪台设备"（事实链，来自固定关联查询），本文给"SPI 报警怎么处置"（处置知识），两者版本过滤都对齐 `ProcessRouteActivated`。
+- **与 诊断能力 Agent 协同**：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（[FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）；诊断能力在 `trace_lookup` 的关系型读模型查询基础上，按需要调本文补充处置知识。
+- **不互相替代**：制造追溯答"是什么、为什么"（事实链），本文答"怎么办"（处置知识）。简单处置用本文够了，复杂根因诊断用制造追溯 + 诊断能力。
 
 ---
 
 ## 7. 实现方案（概要）
 
-本文是设计层全景。**实现层落地**见 [文档型 RAG-实现方案.md](./文档型 RAG-实现方案.md)，聚焦 MVP 一刀（SOP + 设备维修手册 + 检验标准，对齐 [RAG服务引入路线.md](../RAG服务引入路线.md) §3 起步建议），补全：
+本文是设计层全景。**实现层落地**见 [文档型 RAG-实现方案.md](./文档型 RAG-实现方案.md)，聚焦 MVP 一刀（SOP + 设备维修手册 + 检验标准，对齐 [RAG服务引入路线.md](RAG服务引入路线.md) §4 推荐落地顺序的第一阶段），补全：
 
 - 依赖清单（`pyproject.toml`）与 ChromaDB collection 初始化；
 - 摄入管线代码（解析 / 切分 / 向量化 / 持久化）；
@@ -587,7 +591,7 @@ class DocAnswer(BaseModel):
 6. 实现文档版本状态机（DRAFT/SUBMITTED/PUBLISHED/DEPRECATED/ARCHIVED，§4.3）。
 7. 实现文档与领域版本绑定（§4.4 方案 B，含 `inherited` 继承绑定）。
 8. 实现重索引消费者：订阅 `ProcessRouteActivated` / `ProcessRouteDeprecated` / `BomActivated` / `QualityGateRuleActivated`，触发 `PENDING_REBIND` / `DEPRECATED` 状态流转（§5.4）。
-9. 接收追溯型 `rag.reindex.request` 事件，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档。
+9. 接收制造追溯侧（同一 rag-service 内）的 `rag.reindex.request` 事件，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档。
 10. 实现幂等表 + 位点表 + 手动 ack（§5.5）。
 
 ### 阶段三：Rerank、权限加固与可观测（1–2 周）
@@ -601,7 +605,7 @@ class DocAnswer(BaseModel):
 
 15. 接 ACL 降级查询各上下文只读 REST（查文档绑定关系，§7 实现方案）。
 16. 沉淀评测集（典型 SOP / 手册问答 + 预期引用），回归模型 / 提示词 / 切分变更。
-17. 对接追溯型 RAG：`TraceAnswer.suggested_action` 调 `search_docs(query, version_anchor)`。
+17. 对接制造追溯（关系型读模型）：追溯证据的处置建议调 `search_docs(query, version_anchor)`，跨能力委托传 `evidence_set_id`。
 18. 对接 诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
 19. 灰度一条产线（设备维修手册 + SOP + 检验标准），收集工程师 / 操作工反馈。
 
@@ -619,7 +623,7 @@ class DocAnswer(BaseModel):
 - [ ] 检索 `where` 强制 `state='PUBLISHED'`，`DEPRECATED` / `PENDING_REBIND` / `ARCHIVED` 不进候选；`rag_doc_deprecated_leak_total` 应为 0。
 - [ ] 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`） / `bom_version` / `rule_version`；工艺绑定型查询 版本锚点必填（`version`+`version_kind`）（§6.1），缺失拒绝，设备绑定型按 `asset_id` 过滤，通用知识型不带版本。
 - [ ] 订阅 `ProcessRouteActivated` / `ProcessRouteDeprecated` / `BomActivated` / `QualityGateRuleActivated` 触发重索引 / 状态流转（§5.4）。
-- [ ] 接收追溯型 `rag.reindex.request` 事件，与追溯型重索引对齐。
+- [ ] 接收制造追溯侧（同一 rag-service 内）的 `rag.reindex.request` 事件，与追溯读模型的更新节奏对齐。
 - [ ] 文档版本状态机对齐工艺版本生命周期；新版本 PUBLISHED 时旧版本 DEPRECATED 不删（§4.3）。
 - [ ] 工艺升版关联文档进入 `PENDING_REBIND` 人工确认，不自动 PUBLISHED（🔴 §4.3 / §4.4）。
 - [ ] 租户 `tenant_scope` 在向量检索 ChromaDB `where` 前置过滤，权限不达标看不到 chunk。
@@ -637,7 +641,7 @@ class DocAnswer(BaseModel):
 ## 11. 面试防守 Q&A
 
 **Q：文档型 RAG 和通用 RAG 有什么本质区别？**
-A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的工艺路线有版本生命周期（[领域总览.md](../../领域模型/领域总览.md) §5.1），SOP / 作业指导书绑定版本锚点（`version_kind`+`version`+`version_ref_id`）。如果 RAG 检索到一条已失效工艺对应的 SOP 给操作工，会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED）；② 订阅 `ProcessRouteActivated` 等事件触发重索引 / 重新绑定；③ 检索时 ChromaDB 强制 `state="PUBLISHED"` + `version_kind`+`version` 过滤前置。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](../RAG服务引入路线.md) §5 Q&A）。
+A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的工艺路线有版本生命周期（[领域总览.md](../领域模型/领域总览.md) §5.1），SOP / 作业指导书绑定版本锚点（`version_kind`+`version`+`version_ref_id`）。如果 RAG 检索到一条已失效工艺对应的 SOP 给操作工，会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED）；② 订阅 `ProcessRouteActivated` 等事件触发重索引 / 重新绑定；③ 检索时 ChromaDB 强制 `state="PUBLISHED"` + `version_kind`+`version` 过滤前置。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](RAG服务引入路线.md) §5 硬约束 / §6 面试防守 Q&A）。
 
 **Q：为什么选 ChromaDB 而不是 PGVector / Milvus / Qdrant？**
 A：车间 ToB 文档量小（数千文档、数十万 chunk 以内），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成单字段等值），加上 chunk 不可变（写入后不翻转，工艺升版追加新版本 chunk），绕开了 ChromaDB 多记录翻转无事务的弱点。开发极简：嵌入式 persistent client 跟随 rag-service 进程，零额外 DB service，不用装 PG+pgvector+asyncpg+Alembic PG 方言。LlamaIndex `ChromaVectorStore` 是最成熟的向量库集成之一。PGVector 的 SQL 过滤 / 同库事务优势在本场景（等值版本过滤 + chunk 不可变）不再决定性。代价：HA/备份弱（原始文件 + chunk 策略可重建整库）、无聚合（治理/审计 GROUP BY 导出 MySQL）、规模上限（文档少不触发）。Milvus/Qdrant 保留为未来甜区备选。一句话：在文档少 + 强制带版本 + 求简的前提下，ChromaDB 的简大于其弱（§2.3）。
@@ -646,10 +650,13 @@ A：车间 ToB 文档量小（数千文档、数十万 chunk 以内），查询�
 A：订阅 `ProcessRouteActivated` 事件，关联文档进入 `PENDING_REBIND` 待确认状态，由文档 owner 人工判断：SOP 内容若需变则发新版本绑定新版本锚点（`version`+`version_kind`+`version_ref_id`）；若内容不变则继承绑定（`inherited=true`）。**不自动 PUBLISHED**--因为文档有独立审核流，且"SOP 是否需变"不能靠机器假设，宁可让人确认（§4.4）。旧版本文档 DEPRECATED 不删，历史答案引用仍可点开回溯。这是和通用 RAG 最大的区别：通用 RAG 覆盖更新就丢了历史，本文版本即不可变快照。
 
 **Q：会不会拖慢过点？**
-A：不会进过点主事务。过点 P99 ≤200ms（[领域总览.md](../../领域模型/领域总览.md) §4.1）是硬约束，文档摄入 / 重索引是异步消费事件，与过点判定完全解耦。文档检索容忍秒级延迟（[RAG服务引入路线.md](../RAG服务引入路线.md) §4）--它是事后 / 旁边问答工具，不是实时过点判定。
+A：不会进过点主事务。过点 P99 ≤200ms（[领域总览.md](../领域模型/领域总览.md) §4.1）是硬约束，文档摄入 / 重索引是异步消费事件，与过点判定完全解耦。文档检索容忍秒级延迟（[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §15 关键决策汇总"RAG 只读并退出生产主事务"）--它是事后 / 旁边问答工具，不是实时过点判定。
 
-**Q：文档型 RAG 和追溯型 RAG 是不是重复了？**
-A：不重复，是互补分工（[RAG服务引入路线.md](../RAG服务引入路线.md) §2.1/§2.2）。追溯型是 GraphRAG + 领域事件流，答"这条单件 5M1E 全貌"（哪批锡膏、哪台设备），处理结构化关系；文档型是向量检索，答"SPI 报警怎么处置"（处置知识），处理非结构化文档。两者共享同一套版本契约--都由 `ProcessRouteActivated` 驱动，追溯型把版本做成图节点，文档型把版本做成文档元数据过滤维度。追溯型的 `suggested_action` 可调文档型补 SOP 片段，协同闭环（§6.6）。
+**Q：文档型 RAG 和制造追溯是不是重复了？**
+A：不重复，是同一个 `rag-service` 内的互补分工（[RAG服务引入路线.md](RAG服务引入路线.md) §1 三项内部能力、§6 面试防守 Q&A）。制造追溯（关系型读模型）答"这条单件 5M1E 全貌"（哪批锡膏、哪台设备），处理结构化关系；文档检索答"SPI 报警怎么处置"（处置知识），处理非结构化文档。两者共享同一套版本与证据契约--都由 `ProcessRouteActivated` 驱动，追溯侧按版本锚点三段（`version_kind`+`version`+`version_ref_id`）做固定关联查询取当时版本，文档侧把同一组版本锚点做成元数据过滤维度；追溯证据的处置建议再调文档检索补 SOP 片段，在一次请求内闭环（§1.3 / §6.6）。
+
+**Q：追溯为什么不用图检索（GraphRAG / Neo4j）？**
+A：因为不需要，而且代价不对等。追溯链（单件 -> 过点记录 -> 设备 / 工艺版本 / 物料批次）是**固定深度、模式已知**的关系查询，业务关联字段本身已表达清楚，用 MySQL 关系型读模型 + 白名单固定关联查询计划就能覆盖，还能逐跳把权限、版本、时间窗直接落进 SQL 条件。图数据库额外带来的是运维面（多一套存储 / Schema / 同步 / 备份）、版本失效风险（升版要同步翻转图结构）和不可控的多跳查询计划（与过点 P99 ≤200ms 争资源）。所以本项目的红线是**制造追溯不采用图检索**，历史单件按版本锚点做固定关联查询取当时版本，不取当前生效版（[rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §4、[RAG服务引入路线.md](RAG服务引入路线.md) §2）。
 
 **Q：操作工看不懂 LLM 长答案怎么办？**
 A：工位场景要"一句话原因 + 一个动作 + 一个引用"，不是长文。系统提示词约束 LLM 输出精简结构化答案 + 强制引用 chunk；低置信度不硬答，转人工 / 转规则引擎--和 MES 防错理念一致，宁可拦下让人判（§6.4）。
@@ -664,10 +671,10 @@ A：两道防线。一是系统提示词约束"只能基于提供的 chunks 回�
 A：文档库归 RAG 自有，错了不影响 MES 生产--事实源是原始文件 + 领域版本，向量库崩溃返回 503 不阻塞过点。重建靠原始文件 + 事件回放，无需 MES 配合。所有答案带引用 + 置信度，低置信度转人工，与 MES 防错理念一致。
 
 **Q：上线了吗？**
-A：这是设计阶段的引入规划，不是已落地。重点是版本治理对齐工艺生命周期、ChromaDB 选型用 where pre-filter + chunk 不可变兜版本+权限、重索引由领域事件驱动这三条架构判断。落地按"先 B 后 A"推进（[RAG服务引入路线.md](../RAG服务引入路线.md) §3）--文档型 2–4 周可出 demo，先验证车间可用性。诚实 + 体现架构判断力，比硬吹"已上线文档 RAG"得分高。
+A：这是设计阶段的引入规划，不是已落地。重点是版本治理对齐工艺生命周期、ChromaDB 选型用 where pre-filter + chunk 不可变兜版本+权限、重索引由领域事件驱动这三条架构判断。落地按"第一阶段统一底座 + 文档检索、第二阶段加入非图追溯"推进（[RAG服务引入路线.md](RAG服务引入路线.md) §4 推荐落地顺序）--文档检索 2–4 周可出 demo，先验证车间可用性。诚实 + 体现架构判断力，比硬吹"已上线文档 RAG"得分高。
 
 ---
 
 ## 12. 一句话定位
 
-"文档型 RAG 把车间的 SOP / 手册 / 标准做成向量知识库--向量是主体，但版本治理才是灵魂：文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）、状态机对齐工艺生命周期、订阅 `ProcessRouteActivated` 驱动重索引、检索强制 `state='PUBLISHED'` + 版本前置过滤，从结构上杜绝答出已失效 SOP 导致批量不良。选 ChromaDB（嵌入式 persistent client）+ chunk 不可变 + 强制带版本三件套：ChromaDB `where` pre-filter 兜版本/权限/生效状态组合过滤，chunk 写入后不可变绕开多记录翻转无事务的弱点，版本锚点必填（`version`+`version_kind`）避开'在制品不切换工艺'语义陷阱。与追溯型 RAG 共享同一套版本契约、互补分工--追溯型答'是什么、为什么'，文档型答'怎么办'，全程只读 MES、不进过点主事务，低置信度转人工，让 RAG 从旁边问答变成能进车间的处置知识副驾。"
+"文档型 RAG 把车间的 SOP / 手册 / 标准做成向量知识库--向量是主体，但版本治理才是灵魂：文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）、状态机对齐工艺生命周期、订阅 `ProcessRouteActivated` 驱动重索引、检索强制 `state='PUBLISHED'` + 版本前置过滤，从结构上杜绝答出已失效 SOP 导致批量不良。选 ChromaDB（嵌入式 persistent client）+ chunk 不可变 + 强制带版本三件套：ChromaDB `where` pre-filter 兜版本/权限/生效状态组合过滤，chunk 写入后不可变绕开多记录翻转无事务的弱点，版本锚点必填（`version`+`version_kind`）避开'在制品不切换工艺'语义陷阱。与制造追溯（关系型读模型）共享同一套版本与证据契约、互补分工--制造追溯用固定关联查询答'是什么、为什么'，文档型答'怎么办'，全程只读 MES、不进过点主事务，低置信度转人工，让 RAG 从旁边问答变成能进车间的处置知识副驾。"

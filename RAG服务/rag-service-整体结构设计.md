@@ -4,7 +4,9 @@
 >
 > 文档检索负责找到制度、SOP、手册和历史经验；制造追溯负责从关系型读模型与 MES 只读接口还原单件、批次、工单及其 5M1E 证据；Agentic 负责根据问题选择工具、补充检索、交叉核验并组织答案。三者是内部能力，不是独立产品、独立服务或需要用户选择的运行路线。
 >
-> **明确不采用图检索**：不引入 Neo4j、GraphRAG、Cypher、图投影或 `subgraph_ref`。追溯通过业务主键、关联字段、关系型读模型和受限的只读查询完成。
+> **明确不采用图检索**：不引入 Neo4j、GraphRAG、Cypher、图投影，也不引入“追溯子图引用”一类的图语义标识字段；对外证据回查统一用 `evidence_set_id`。追溯通过业务主键、关联字段、关系型读模型和受限的只读查询完成。
+>
+> **底座口径**：rag-service 与 agent-service 同为 Python 3.12+ / **AgentScope 2.0**——Agentic 检索编排用统一 `Agent` 类（内置 ReAct，`reply` / `reply_stream`）+ `Toolkit`，文档检索用 AgentScope **RAG 模块 + `Embedding`**，会话状态用 `AgentState` + `SessionService`（Redis-backed；**2.0.5 起由 `SessionManager` 改名，旧名不可导入**）；文档检索的框架侧接入存在版本风险，见 §5.2 的技术组件表风险注；对齐 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §3.2。框架名不改变本文的能力边界与契约。
 >
 > rag-service 全程只读 MES，不进入过点等生产主事务；答案必须能够回到文档片段或制造记录，无法满足版本、权限或证据约束时应拒答或明确说明证据缺口。
 
@@ -82,7 +84,7 @@
                     RagAnswer + Citations + Missing Evidence
 ```
 
-Agentic 编排位于应用层，不是另一套 RAG。简单问题由 `QueryService` 直接调用检索工具；复杂问题由 `RagOrchestrator` 在有限状态机内多次调用相同工具。
+Agentic 编排位于应用层，不是另一套 RAG。简单问题由 `QueryService` 直接调用检索工具；复杂问题由 `RagOrchestrator` 驱动 AgentScope 统一 `Agent`（内置 ReAct）在预算内多次调用相同工具。
 
 ### 1.3 一次请求的通用流程
 
@@ -92,7 +94,7 @@ Agentic 编排位于应用层，不是另一套 RAG。简单问题由 `QueryServ
 4. **执行检索**：所有工具接收同一个 `RetrievalContext`，强制执行租户和版本过滤。
 5. **判断证据充分性**：证据足够则生成；存在可补救缺口则在预算内追加检索；否则返回缺口。
 6. **组织答案**：分离事实、建议与推断，每个关键陈述绑定证据 ID。
-7. **审计与返回**：保存工具调用、证据快照引用、模型信息和答案摘要，返回统一 `RagAnswer`。
+7. **审计与返回**：保存工具调用、证据集引用（`evidence_set_id`，回查口径见 §6 与 §7.2）、模型信息和答案摘要，返回统一 `RagAnswer`。
 
 ---
 
@@ -111,7 +113,7 @@ rag_service/
 │   │
 │   ├── application/
 │   │   ├── query_service.py             # 统一用例入口
-│   │   ├── orchestrator.py              # Agentic 状态机与停止条件
+│   │   ├── orchestrator.py              # Agentic 编排（AgentScope Agent + Toolkit）与停止条件
 │   │   ├── query_planner.py             # 从问题提取检索需求
 │   │   ├── answer_composer.py           # 基于证据生成统一答案
 │   │   ├── document_ingestion_service.py
@@ -141,7 +143,7 @@ rag_service/
 │   │   │   ├── mes_readonly/            # MES 只读 REST 适配器
 │   │   │   └── query_plans.py           # 白名单关联查询与展开限制
 │   │   ├── orchestration/
-│   │   │   └── langgraph_runner.py
+│   │   │   └── agent_runner.py          # AgentScope Agent + Toolkit 编排与事件流
 │   │   ├── llm/
 │   │   ├── embedding/
 │   │   ├── persistence/
@@ -179,6 +181,7 @@ RagQuery
 
 RagAnswer
 ├── answer_id: str
+├── evidence_set_id: str                # 本次证据集的稳定标识，供后续回查证据集
 ├── summary: str
 ├── sections: list[AnswerSection]         # 事实 / 处置建议 / 待确认事项
 ├── citations: list[Citation]
@@ -209,7 +212,7 @@ RagAnswer
 
 ### 3.3 版本与权限
 
-- `VersionAnchor(kind, ref_id, version)` 覆盖 `route/bom/rule/asset/standard`。
+- **版本锚点三段**：`VersionAnchor` 由 `version_kind`（`route` / `bom` / `rule` / `asset` / `standard`）+ `version`（版本号）+ `version_ref_id`（该版本的权威记录 ID）三段组成；落库、传参与回查一律三段一起，只带版本号的残缺锚点视为无效，解析不到三段时拒答而不是默认取当前生效版。
 - 用户显式指定版本时不得静默切换；未指定时可根据工单或过点记录解析历史版本。
 - 当前操作指导只使用有效且已发布的文档；历史质量分析必须使用该制造记录当时的版本。
 - `TenantContext` 至少包含 `tenant_id` 与 workshop/line scopes，并作为所有检索 Port 的必填参数。
@@ -247,7 +250,7 @@ RagAnswer
 1. **种子解析**：从序列号、批次号、工单号或缺陷记录定位最小查询范围。
 2. **主体取证**：读取工单、单件过点、测试结果等核心记录。
 3. **受限关联展开**：根据白名单查询计划，通过 `work_order_id`、`operation_record_id`、`material_lot_id`、`asset_id`、`operator_id`、`route_version` 等字段追加 5M1E 记录。
-4. **版本对齐**：以目标过点记录为基准确认当时工艺版本，禁止用当前版本覆盖历史事实。
+4. **版本对齐**：以目标过点记录为基准确认当时工艺版本，按版本锚点三段（`version_kind` / `version` / `version_ref_id`）逐条落定并随答案向下传递，禁止用当前版本覆盖历史事实。
 5. **证据裁剪**：按问题与时间范围保留相关记录，对重复记录去重，并标注读模型 freshness。
 6. **缺口处理**：关联字段为空、接口超时或权限不足时写入 `MissingEvidence`，不得虚构关系。
 
@@ -266,7 +269,7 @@ RagAnswer
 
 ### 4.3 Agentic 检索编排
 
-Agentic 的价值是根据证据缺口调整检索，而不是为所有请求增加模型调用。
+Agentic 的价值是根据证据缺口调整检索，而不是为所有请求增加模型调用。实现形态是 AgentScope 统一 `Agent` 类（内置 ReAct）+ `Toolkit`：Agent 只做“选工具、补检索、判断是否收敛”，工具本身仍是下述只读 Port。
 
 ```text
 ANALYZE
@@ -329,12 +332,15 @@ COMPLETE / CLARIFY / INSUFFICIENT_EVIDENCE
 
 | 组件 | 职责 |
 |------|------|
-| LLM 抽象 | 统一模型提供方、超时、重试、token 与延迟观测 |
-| Embedding / Reranker | bge-m3 向量化与重排，支持本地化部署 |
+| Agent 底座 | AgentScope 2.0：统一 `Agent` 类 + `Toolkit` 承载 Agentic 编排，`Tool` 返回以 Content Block 挂到 `Msg` 上 |
+| LLM / 向量抽象 | AgentScope `Model` / `Embedding`：统一模型提供方、超时、重试、token 与延迟观测，provider 可插拔 |
+| RAG / 检索接入 | AgentScope RAG 模块：解析、切块、召回与引用；ChromaDB 只作向量存储后端。**⚠️ 风险注**：该模块真实存在，但已核实的适配器只有 Qdrant / MilvusLite / Elasticsearch / MongoDB，**没有 ChromaDB 适配器**，且 `rag/` 在 **2.0.0 曾被整体删除、2.0.5 起才回归**（证据见 [架构设计v2/00-架构决策记录ADR.md](../架构设计v2/00-架构决策记录ADR.md) ADR-01 的 RAG 模块行）。故 `agentscope` 必须 pin 到具体小版本；ChromaDB 由本服务**自持 client** 接入并封装在检索适配层之后，一旦框架 RAG 抽象再次缺位，降级为自持 client 直连向量库，对外的 `search_docs` 只读契约与引用口径不变 |
+| Embedding / Reranker | bge-m3 向量化与 bge-reranker 重排，支持本地化部署 |
+| 会话状态 | `AgentState` + `SessionService`（Redis-backed；2.0.5 起由 `SessionManager` 改名，旧名不可导入）承载多轮补查与会话恢复，进程无状态 |
 | Persistence | MySQL Engine、ChromaDB client、Redis client 的集中管理 |
 | Kafka | 统一事件 envelope、幂等、位点与错误处理 |
-| MES ACL | 只读 httpx 客户端，统一超时、租户和 `traceparent` 透传 |
-| Observability | OTel tracing、Prometheus metrics、结构化日志与脱敏 |
+| MES ACL | 只读 httpx 客户端，封装为 AgentScope `Tool`，统一超时、租户和 `traceparent` 透传 |
+| Observability | AgentScope `TracingMiddleware`（OTel 入口）、Prometheus metrics、结构化日志与脱敏 |
 | Web | FastAPI lifespan、统一异常、DI、健康检查 |
 
 基础设施可以复用，但不以“被几条路线复用”为归属标准；只要属于当前统一服务的横切能力，就集中定义接口和配置。
@@ -347,6 +353,7 @@ COMPLETE / CLARIFY / INSUFFICIENT_EVIDENCE
 |------|------|------|--------|
 | `/rag/query` | POST | 统一问答；按需组合文档、追溯与 Agentic | 前端、agent-service |
 | `/rag/answers/{answer_id}/evidence` | GET | 查看答案证据、引用和检索步骤摘要 | 前端、审计 |
+| `/rag/trace/evidence-set/{evidence_set_id}` | GET | 按证据集 ID 回查已固化的证据子集（文档片段 + 制造记录 + 版本锚点） | agent-service、前端、审计 |
 | `/rag/documents/ingest` | POST | 摄入或更新 RAG 自有知识文档 | 文档管理员 |
 | `/rag/documents/{document_id}/status` | GET | 查看解析、发布与索引状态 | 文档管理员 |
 | `/health` | GET | 进程存活 | K8s |
@@ -372,7 +379,7 @@ COMPLETE / CLARIFY / INSUFFICIENT_EVIDENCE
 ### 7.2 与 agent-service
 
 - agent-service 将 rag-service 作为统一知识与制造证据提供方。
-- 调用时透传 `traceparent`、租户上下文和主题线索，接收统一 `RagAnswer` 或证据集合。
+- 调用时透传 `traceparent`、租户上下文和主题线索，接收统一 `RagAnswer` 或证据集合；后续补查或草拟复用同一证据时，Agent 侧按 `evidence_set_id` 回查证据集（AgentScope `Tool` 形态，即 `fetch_evidence_set(evidence_set_id)`），不使用图节点引用。
 - 诊断和报告生成可以引用 RAG 证据，但不得绕过 RAG 自行拼装另一套文档/追溯检索实现。
 - rag-service 的 Agentic 仅负责检索与证据组织；跨领域业务流程仍由相应应用服务负责。
 
@@ -472,7 +479,7 @@ MES 领域事件 / 只读记录
 | 维度 | 关键指标 |
 |------|---------|
 | 文档检索 | Recall@k、重排命中、引用定位准确率、版本过滤正确率 |
-| 制造追溯 | 种子解析准确率、关键记录召回率、错误关联率、版本对齐率、缺口识别率 |
+| 制造追溯 | 种子解析准确率、证据集完整率（原称关键记录召回率）、错误关联率、版本锚点正确率（原称版本对齐率；统一口径与 100% 硬闸门定义见 [Agent评测-分层评分方案.md](../RAG与Agent评测/Agent评测-分层评分方案.md)）、缺口识别率 |
 | Agentic | 工具选择正确率、追加检索收益、平均步数、预算超限率、无效应答率 |
 | 综合答案 | 忠实度、答案相关性、引用完整率、事实/建议区分、缺失证据表达 |
 | 安全 | 租户越权、失效版本泄漏、写操作、无证据制造事实均为阻断项 |
@@ -489,8 +496,8 @@ MES 领域事件 / 只读记录
 | 阶段 | 交付内容 | 退出标准 |
 |------|---------|---------|
 | 一：统一检索底座 | 统一契约、权限/版本策略、文档摄入与检索、基础 `/rag/query` | 文档引用与版本过滤评测通过，只读和租户测试通过 |
-| 二：非图追溯 | 关系型读模型、MES 只读适配器、固定查询计划、5M1E 证据输出 | 关键记录召回、错误关联、版本对齐和缺口测试通过 |
-| 三：Agentic 编排 | 有限状态机、工具预算、补充检索、证据融合和答案审计 | 复杂问题收益明确，步数与成本受限，无证据不硬答 |
+| 二：非图追溯 | 关系型读模型、MES 只读适配器、固定查询计划、5M1E 证据输出 | 证据集完整率、错误关联、版本对齐和缺口测试通过 |
+| 三：Agentic 编排 | AgentScope `Agent` + `Toolkit` 编排、工具预算、补充检索、证据融合和答案审计 | 复杂问题收益明确，步数与成本受限，无证据不硬答 |
 | 四：生产治理 | 完整可观测、备份重建、压测、故障演练和评测门禁 | 降级、恢复、重建与安全红线全部通过 |
 
 ---

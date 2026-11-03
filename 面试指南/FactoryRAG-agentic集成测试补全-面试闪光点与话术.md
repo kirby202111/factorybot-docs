@@ -1,5 +1,9 @@
 # FactoryRAG agentic 路线集成测试补全 · 面试闪光点与话术（测真实路径而非降级路径 / 真实组件最大化 / LangGraph 状态按声明过滤 / 集成测试作缺陷发现工具）
 
+> **⚠️ 历史实现记录，不参与本仓库口径统一**：本文描述的是 **FactoryRAG 当时真实发生过的测试与缺陷修复工作**。文中的 LangGraph / `StateGraph` / `CompiledStateGraph` / `_FallbackGraph` / `AgentState` TypedDict 按声明过滤等表述，是**当时代码的实际形态，保留原样**。本仓库 Agent 侧的目标底座已统一为 AgentScope 2.0（见 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md)），但那是**迁移后的设计口径**，不能倒过来改写这段历史——缺陷机理（未声明键被静默丢弃、降级路径掩盖真实路径）在别的框架下未必成立，改成新框架术语会让话术在追问下站不住。
+>
+> 面试讲法：**"这段是在 LangGraph 底座上做出来的，价值在于'测真实路径而非降级路径'的方法论，方法论与框架无关；现在的设计口径已迁到 AgentScope 2.0。"**
+
 > **定位**：本文是对 FactoryRAG（rag-service）E 路线（agentic）**P0 #5 测试缺口**的面试纵深展开，接续 [httpx 资源泄漏修复](FactoryRAG-httpx资源泄漏修复-面试闪光点与话术.md) 那轮遗留的 "#5 agentic 集成测试 | 零集成测试"。与 httpx 那轮"资源生命周期归属"不同，这次是**测试工程与缺陷发现**：E 路线是新增功能但零集成测试，唯一存在的 `test_route_graph.py` 只覆盖 langgraph 不可用时的 `_FallbackGraph` 降级路径--真实 `CompiledStateGraph` 路径完全裸奔。守口径纪律：做了什么如实讲（14 例端到端 + 真实组件最大化 + 3 个 bug 修复），不确定的决策点交还用户拍板（AgentState 修法三选一），残留项诚实交代（GatewayService.chat 层非 HTTP 端点 / 70s 超时未直测 / 证据链读侧未跑真实 DB）。
 >
 > **核心矛盾**：一套分层工整、`_FallbackGraph` 还有测试的 E 路线，真实路径却"裸奔"，而且既有测试给的安心是**虚假**的。补集成测试的第一个用例就失败了--断言 `route_trace.audit_id` 非空，实际是空串。根因：`AgentState` TypedDict 漏声明 `audit_id`/`trace_id`，而 LangGraph `StateGraph` **按声明字段过滤状态**，未声明的键在节点间被丢弃（`traceparent`/`session_id` 声明了所以活下来），`ToolExecutor` 读到 `audit_id=""`，`route_trace` 行挂不上 `answer_audit`，`/agent/explain/{audit_id}` 证据链断裂。而这个 bug **只在真实 langgraph 路径显现**--`_FallbackGraph` 走 plain dict 不过滤，既有测试全绿但生产裸奔。三个判断贯穿全文：**测真实路径而非降级路径**、**真实组件最大化才挖得到集成层 bug**、**集成测试是缺陷发现工具不是覆盖率数字**。

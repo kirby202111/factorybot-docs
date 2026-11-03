@@ -1,5 +1,9 @@
 # Agent 成本优化接入 · 面试闪光点与话术（悬空组件落地 / 护栏读全文 LLM 读摘要 / 降本不牺牲证据链）
 
+> **⚠️ 历史实现记录，不参与本仓库口径统一**：本文描述的是 **factorybot 当时真实发生的一次接入改动**，文中的 `ResultCompactor` / `ToolNode` / `model_node` / `query_traceability_graph` / FIELD_WHITELIST 里的 `subgraph_ref` 等，都是**当时代码的实际形态与真实字段名，保留原样**——"在 ToolNode 压缩会把 nodes 裁掉、护栏瞎了"这条缺陷机理挂在当时的数据流上，换成新框架术语在追问下就站不住。本仓库 Agent 侧的目标底座已统一为 AgentScope 2.0（见 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md)）：目标口径下上下文压缩与超大结果卸载由 **`Offloader` + `ToolOffloadMiddleware`** 承载、追溯证据改为关系型证据子集（`evidence_set_id`），但那是**迁移后的设计口径**，不倒过来改写这段记录。
+>
+> 面试讲法：**"这段是在当时底座上做的接入与缺陷识别，方法论（护栏读全文、LLM 读摘要；压缩只作用于喂 LLM 的副本）与框架无关；现在的设计口径已迁到 AgentScope 2.0 的 Offloader + Middleware。"**
+
 > **定位**：本文是对 factorybot（MES Agent 服务）清单 #25 一条 P0 的面试纵深展开。cost 子系统 7 个降本组件（ModelRouter/EvalGate/CacheControl/ResultCompactor/EarlyStopDetector/PhaseToolBinder/ToolResultCache）设计完备、有边界单测、文档宣传，但 `app/` 下零调用--"设计+文档+零上线"。这次把其中最干净的 ResultCompactor 接入 ReAct 主流程。守口径纪律：做了什么如实讲（思路 D 接入 + #15 告警化），不确定的交还用户拍板（分阶段方向、#15 裁剪强度），残留诚实交代（6 组件仍悬空、real 模式诊断质量未验证）。
 >
 > **核心矛盾**：接入 ResultCompactor 最大的陷阱是"在 ToolNode 压缩 tool 消息"--会破坏诊断护栏 `_guard_no_evidence`。护栏读 `state.messages` 里 tool 消息的全文 `data` 找 BLOCK/FAIL 证据；`query_traceability_graph` 的字段白名单不含 `nodes`，压缩后 `nodes` 被裁，护栏漏判追溯图里的 BLOCK 节点，把"有不良证据"误判成"证据不足"。**降本（省 token）和证据链完整性（护栏读全文）是冲突的，必须解耦**。一个判断贯穿全文：**护栏读全文、LLM 读摘要**--压缩只作用于喂 LLM 的副本，state.messages 全文不动。

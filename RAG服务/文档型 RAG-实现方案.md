@@ -1,12 +1,12 @@
 # 文档型 RAG 实现方案（Python 技术栈：SOP + 手册 + 检验标准 MVP）
 
-> 本文是 [RAG服务引入路线.md](../RAG服务引入路线.md) §2.2 路线 B（文档型 RAG）的**实现层落地**，与 [文档型 RAG-详细设计.md](./文档型 RAG-详细设计.md) 的关系：
+> 本文是 rag-service 统一服务内**文档检索能力**的实现层落地（能力定位见 [rag-service-整体结构设计.md](rag-service-整体结构设计.md) §4.1、[RAG服务引入路线.md](RAG服务引入路线.md) §1「一个 RAG 的三项内部能力」），与 [文档型 RAG-详细设计.md](./文档型 RAG-详细设计.md) 的关系：
 > - **详细设计**是全文档类型的**设计层**（广）--文档领域建模、版本治理设计、检索生成流程的全景；
-> - **本文**是 MVP 一刀（**SOP + 设备维修手册 + 检验标准**，对齐 [RAG服务引入路线.md](../RAG服务引入路线.md) §3 起步建议）的**实现层**（深）--把详细设计的骨架补全到可落地的 MVP，新增**依赖清单、ChromaDB collection 初始化、摄入管线代码、重索引消费者、检索 ChromaDB query、ACL 只读 REST 契约、Docker 部署、测试策略**等实现层内容。
+> - **本文**是 MVP 一刀（**SOP + 设备维修手册 + 检验标准**，对齐 [RAG服务引入路线.md](RAG服务引入路线.md) §4 推荐落地顺序的第一阶段、[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §14 分阶段交付）的**实现层**（深）--把详细设计的骨架补全到可落地的 MVP，新增**依赖清单、ChromaDB collection 初始化、摄入管线代码、重索引消费者、检索 ChromaDB query、ACL 只读 REST 契约、Docker 部署、测试策略**等实现层内容。
 > 其余文档类型（IPC 标准 / 8D / 培训）按 §11 相同范式扩展，MVP 不展开。
 >
-> **技术栈**：Python（FastAPI + **ChromaDB** + LlamaIndex + Pydantic）。RAG 服务与三大 MES 服务（Java/Spring）跨语言共存，通过 Kafka 只读事件 + REST 只读查询解耦，互不侵入。
-> **口径纪律**：文档型 RAG 在本项目中是**设计阶段的引入规划**，不是线上已落地能力。讲法遵循 [项目亮点与指标卡片.md](../../面试指南/项目亮点与指标卡片.md) §0 的口径纪律--说"规划方向 / 设计取舍"，不说"我们已经做了文档 RAG"。MES 领域对错误答案零容忍（错给一条已失效 SOP 会直接导致批量不良），所以本文强调**向量是主体、版本治理是灵魂 + 重索引由领域事件驱动 + 可观测兜底**，而非堆模型。
+> **技术栈**：Python 3.12+（FastAPI + **ChromaDB** + LlamaIndex + Pydantic）。RAG 服务与三大 MES 服务（Java/Spring）跨语言共存，通过 Kafka 只读事件 + REST 只读查询解耦，互不侵入。底座口径与 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §1.1 一致（Python 3.12+、`agentscope>=2.0.0`）：本文的摄入/检索编排沿用 LlamaIndex，LLM 走 AgentScope `Model` 抽象（不再引入 `langchain-core`），ChromaDB 一律由本服务**自持 client** 接入（选型风险注见 §2.3）；本文只做**文档检索**这一项能力，制造追溯是同一 rag-service 内的另一项能力（关系型读模型，不用图检索），不是另一条路线。
+> **口径纪律**：文档型 RAG 在本项目中是**设计阶段的引入规划**，不是线上已落地能力。讲法遵循 [项目亮点与指标卡片.md](../面试指南/项目亮点与指标卡片.md) §0 的口径纪律--说"规划方向 / 设计取舍"，不说"我们已经做了文档 RAG"。MES 领域对错误答案零容忍（错给一条已失效 SOP 会直接导致批量不良），所以本文强调**向量是主体、版本治理是灵魂 + 重索引由领域事件驱动 + 可观测兜底**，而非堆模型。
 
 ---
 
@@ -31,23 +31,23 @@
 | 边界 | 说明 | 落地（MVP 具体动作） |
 |------|------|----------------------|
 | **只读 MES** | 文档库归 RAG 自有；对 MES 只读 | 向量 + metadata 存 ChromaDB（RAG 自有）；订阅 `process.*` 只读事件；降级查询只读 REST；`ReadOnlyIngestionGate` 启动断言禁止写 MES（§9.6） |
-| **不进过点主事务** | 摄入 / 重索引异步消费事件 | 过点 P99 ≤200ms（[领域总览.md](../../领域模型/领域总览.md) §4.1）不受影响；文档检索容忍秒级 |
+| **不进过点主事务** | 摄入 / 重索引异步消费事件 | 过点 P99 ≤200ms（[领域总览.md](../领域模型/领域总览.md) §4.1）不受影响；文档检索容忍秒级 |
 | **版本一致性** | 检索 SOP 必须带版本过滤 | 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）；订阅 `ProcessRouteActivated` 触发重索引；检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 过滤（§6.2） |
 | **权限隔离** | 检索前按车间 / 产线过滤 | ChromaDB metadata 带 `tenant_scope`，`where` 前置过滤 |
 | **可观测兜底** | 答案带引用 + 置信度，低置信度转人工 | `DocAnswer` 强制引用 `chunk_id` + `locator`；`confidence < 0.6` 转人工 |
 | **DEPRECATED 不泄漏** | 失效文档不得召回 | 检索 ChromaDB `where={"state":"PUBLISHED"}` 强制过滤；`rag_doc_deprecated_leak_total` 应为 0，告警兜底（§9.7） |
 
-### 1.3 与详细设计、追溯型 RAG、诊断能力 Agent 的关系
+### 1.3 与详细设计、制造追溯、诊断能力 Agent 的关系
 
 - **与详细设计**：详细设计给全文档类型全景建模与版本治理设计；本文把其中三类文档的摄入管线、重索引消费者、检索 ChromaDB query、ACL 契约补全到可落地代码，并新增实现层内容（依赖、collection 初始化、Docker、测试）。两者互补--详细设计是"地图"，本文是"起步城区施工图"。
-- **与追溯型 RAG**（[追溯型 RAG-实现方案.md](../追溯型 RAG/追溯型 RAG-实现方案.md)）：共享同一套版本契约（`ProcessRouteActivated` 驱动）。追溯型把版本做成 Neo4j 图节点 + `SNAPSHOT_OF_ROUTE` 边；本文把版本做成 ChromaDB metadata 过滤维度（`version_kind`+`version`+`version_ref_id`）。追溯型 §5.4 发布内部 `rag.reindex.request` 事件，本文接收并处理（§5.3）。
-- **与诊断能力**（[FactoryAgent-诊断能力.md](../../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（§9.8）。
+- **与制造追溯**（**关系型读模型**，是同一 rag-service 内的一项能力，不是独立路线；见 [rag-service-整体结构设计.md](rag-service-整体结构设计.md) §4.2 非图制造追溯、[rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §4 非图制造追溯实现）：共享同一套版本契约（都由 `ProcessRouteActivated` 驱动）。制造追溯把版本落在 MySQL 关系表上（`trace_route_binding` / `route_version_fact` 这类事实表 + 外键关联字段），检索时走固定关联查询计划；本文把版本做成 ChromaDB metadata 过滤维度（`version_kind`+`version`+`version_ref_id`）。追溯侧工艺版本切换后发布内部 `rag.reindex.request` 事件，本文接收并处理（§5.3）。
+- **与诊断能力**（[FactoryAgent-诊断能力.md](../AGENT服务/FactoryAgent/FactoryAgent-诊断能力.md)）：诊断能力的 `search_docs` 工具封装本文 `POST /rag/docs/query`（§9.8）。
 
 ### 1.4 与 Java 技术栈的关系
 
 - RAG 服务用 Python，**不替换** MES 三大服务的 Java/Spring 栈--只订阅 Kafka 只读事件、调只读 REST 查文档绑定关系。
 - 跨语言的物理边界反而是好事：RAG 服务无法共享 Java 事务 / 内存，天然强制只读、不进过点主事务、不旁路应用服务写路径。
-- 复用 [实现说明](../../实现说明/) 既有的 Kafka topic、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [消息处理实现说明.md](../../实现说明/业务事件/消息处理实现说明.md) §4.3）、消费侧幂等模式（§6 同事务幂等 + 手动 ack），不造新契约。
+- 复用 [实现说明](../实现说明/) 既有的 Kafka topic、领域事件 envelope（`event_id` / `event_type` / `event_version` / `occurred_at` / `source_service` / `trace_id` / `partition_key`，见 [消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §4.3）、消费侧幂等模式（§6 同事务幂等 + 手动 ack），不造新契约。
 
 ---
 
@@ -57,15 +57,15 @@
 
 | 层次 | 选型 | 版本 | 选型理由 |
 |------|------|------|---------|
-| 语言 | Python | 3.11+ | 类型提示 + Pydantic 校验，与追溯型 / 诊断能力同栈复用 LLM 抽象 |
-| Web 框架 | **FastAPI** | 0.110+ | 异步、原生 OpenAPI，与追溯型一致 |
+| 语言 | Python | 3.12+ | 类型提示 + Pydantic 校验，与制造追溯 / 诊断能力同栈复用 LLM 抽象（代码仓 `pyproject.toml` 为 `>=3.12`） |
+| Web 框架 | **FastAPI** | 0.110+ | 异步、原生 OpenAPI，与制造追溯同服务一致 |
 | 向量存储 | **ChromaDB** | 0.5+ | 嵌入式 persistent client（Parquet 持久化），随 rag-service 进程，无需独立 DB service；chunk 不可变 + 强制带版本查询过滤（§2.3） |
 | ChromaDB 客户端 | **chromadb** Python SDK + `llama-index-vector-stores-chroma` | - | `ChromaVectorStore` 对接 LlamaIndex；distance=cosine（bge-m3 1024 维） |
 | 治理/审计聚合 | **MySQL**（rag_shared schema） | - | 幂等表 / 位点表落 MySQL；ChromaDB 不做聚合查询 |
-| 检索编排 | **LlamaIndex** `VectorStoreIndex` | 0.10+ | 摄入 / 切分 / 向量检索 / Rerank 上层抽象 |
+| 检索编排 | **LlamaIndex** `VectorStoreIndex` | 0.10+ | 摄入 / 切分 / 向量检索 / Rerank 上层抽象。【待确认】与 rag-service 总体口径"检索接入层由 AgentScope **RAG 模块**承载"（[rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §1.2）尚未收口，框架 `rag/` 无 ChromaDB 适配器且曾在 2.0.0 被整体删除，见 [ADR-01](../架构设计v2/00-架构决策记录ADR.md) 未决项 |
 | 文档解析 | **unstructured** + pypdf + python-docx | - | PDF / Word / HTML 结构化解析，保留标题层级 |
-| LLM 抽象 | `langchain-core` 的 `BaseChatModel` | 0.2+ | 模型可插拔，与追溯型 / 诊断能力一致 |
-| Embedding | **bge-m3** | 1.0+ | 1024 维，多语种可本地化，与追溯型同模型 |
+| LLM 抽象 | AgentScope 2.0 **`Model`** + 显式 `Credential` | `agentscope` pin 具体小版本 | 模型可插拔，OpenAI 兼容协议（含 DeepSeek）经同一 `Model` 抽象接入，与制造追溯 / 诊断能力同一条抽象；已核实 `pyproject.toml` 无 `langchain` 依赖，旧 `langchain-core BaseChatModel` 写法作废 |
+| Embedding | **bge-m3** | 1.0+ | 1024 维，多语种可本地化，与制造追溯同模型 |
 | Rerank | **bge-reranker-v2-m3** | - | cross-encoder 精排，中英文兼顾 |
 | 数据校验 | **Pydantic** | v2 | 请求 / 文档视图 / 答案 DTO 的 schema 即类型 |
 | HTTP 客户端 | **httpx** | 0.27+（异步） | 降级查询各上下文只读 REST |
@@ -75,19 +75,22 @@
 | 配置 | pydantic-settings | 2.0+ | 环境变量统一管理 |
 | 部署 | 独立微服务 `rag-doc-service` | - | K8s 部署；MVP 可 docker-compose 本地起 |
 
-### 2.2 为什么是纯向量检索（而非 GraphRAG）
+### 2.2 为什么是纯向量检索（文档侧不做关系检索，全服务不采用图检索）
 
-- 三类文档的答案集中在少数段落（"E027 怎么修"在手册某章、"SPI 报警处置"在 SOP 某步骤），是"局部、事实性"查询（[基础问题.md](../问题归纳/基础问题.md) §二），向量相似度足以召回。
-- 文档之间是弱关联（SOP 和手册之间无 `source_work_order_id` 这种显式引用），不需要图遍历。这与追溯型 RAG 形成分工（[追溯型 RAG-详细设计.md](../追溯型 RAG/追溯型 RAG-详细设计.md) §2.2）。
+- 三类文档的答案集中在少数段落（"E027 怎么修"在手册某章、"SPI 报警处置"在 SOP 某步骤），是"局部、事实性"查询（[基础问题.md](问题归纳/基础问题.md) §二），向量相似度足以召回。
+- 文档之间是弱关联（SOP 和手册之间无 `source_work_order_id` 这种显式引用），不需要多跳关系遍历。
+- **与制造追溯的分工**：追溯链（`SN -> 过点记录 -> 设备 / 工艺版本 / 物料批次`）确实是结构化关系，但它的**深度固定、模式已知、关联字段已由 MES 业务契约给定**，用 MySQL 关系表 + 外键关联 + 固定关联查询计划就能完整覆盖（见 [rag-service-整体结构设计.md](rag-service-整体结构设计.md) §0.1 设计取舍、§4.2 非图制造追溯）。**不采用图检索**的理由是自洽的，不是因为"关系不好建"：① 引入图数据库等于多一套存储、多一套 Schema、多一条同步与重建链路，运维面成倍增加；② 图查询计划由模型或调用方临时拼出，深度与返回规模不可控，与车间要的确定性、可审计的只读取证相冲突；③ 追溯要的是"按当时的版本锚点取那一小撮记录"，等值 + 有限关联就够，多跳自由探索反而放大错误串联。
+- **一句话**：答案藏在某段话里 -> 向量检索（本文）；答案靠已知业务关联拼出来 -> 关系型读模型 + 固定关联查询（制造追溯）。
 
 ### 2.3 为什么选 ChromaDB（而非 PGVector / Milvus / Qdrant）
 
 车间 ToB 文档量小（数千文档 / 数十万 chunk）+ 查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter）+ 求开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点。
 
-- **嵌入式零运维**：ChromaDB persistent client 以 Parquet 持久化，跟随 rag-service 进程，无需独立 DB service。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service。
+- **嵌入式零运维**：ChromaDB persistent client 以 Parquet 持久化，跟随 rag-service 进程，无需独立 DB service。整套 rag-service 只依赖 MySQL（文档元数据 + 制造追溯的关系型读模型）+ 嵌入式 ChromaDB + Redis，既不部署独立向量库 service，也**不部署图数据库、不维护图 Schema**（[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §10 存储与 Schema）。
 - **chunk 不可变**：chunk 写入 ChromaDB 后不再修改（metadata 固定带 `version_kind` / `version_ref_id` / `version` / `state` / `tenant_scope` / `doc_type` / `chunk_seq` / `locator`）。工艺升版时不翻转老 chunk，而是追加新版本 chunk。版本隔离靠查询过滤 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`，老 chunk 保留 PUBLISHED + 老版本锚点，靠 version_kind+version 隔离。
 - **强制带版本**：`DocumentRetrievalService.query` 入口校验 版本锚点必填（`version`+`version_kind`）（工艺绑定型），缺失拒绝，不退回"查最新 ACTIVE"。理由：避开"在制品不切换工艺"语义陷阱。
 - **代价可接受**：HA/备份弱、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。
+- **⚠️ 接入方式风险注（选型不变，只是加风险注）**：本文的 ChromaDB 由本服务**自持 client**（`chromadb>=0.5`）接入并封在检索适配层之后。若改经 AgentScope RAG 模块接 ChromaDB，需注意：该模块**已核实的适配器只有 Qdrant / MilvusLite / Elasticsearch / MongoDB，没有 ChromaDB 适配器**，且 `rag/` 模块在 **2.0.0 曾被整体删除、2.0.5 起才回归**（证据见 [架构设计v2/00-架构决策记录ADR.md](../架构设计v2/00-架构决策记录ADR.md) ADR-01 的 RAG 模块行、[基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §8 附录速查表）。对策：`agentscope` pin 到具体小版本 + CI 加 API 漂移检查，并保留"框架 RAG 抽象缺位时切自持 client 直连 ChromaDB"的降级预案--`POST /rag/docs/query` 的只读契约、元数据过滤与引用口径不变（同口径见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §1.2 风险注）。
 
 ### 2.4 部署形态（车间网隔离）
 
@@ -101,7 +104,7 @@
 [project]
 name = "rag-doc-service"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
@@ -113,7 +116,6 @@ dependencies = [
   "chromadb>=0.5",
   "llama-index>=0.10",
   "llama-index-vector-stores-chroma>=0.2",
-  "langchain-core>=0.2",
   "httpx>=0.27",
   "aiokafka>=0.10",
   "redis>=5.0",
@@ -166,7 +168,7 @@ dependencies = [
                           ┌─────────▼──────────┐
                           │ aiokafka Consumer   │
                           │ process.route.lifecycle│
-                          │ + rag.reindex.*     │← 追溯型 RAG 重索引请求
+                          │ + rag.reindex.*     │← 制造追溯（关系型读模型）重索引请求
                           └─────────────────────┘
                                     ▲
                                     │ 各上下文 Outbox 投递（至少一次）
@@ -178,7 +180,7 @@ dependencies = [
 
 ### 3.1 关键设计决策
 
-- **ChromaDB 嵌入式 + MySQL 治理**：向量存 ChromaDB（嵌入式 persistent client，Parquet 持久化），幂等 / 位点 / 文档元数据存 MySQL；chunk 写入 ChromaDB 后不可变，没有"状态翻转"的一致性问题--比追溯型（Neo4j + MySQL 跨库非分布式）更简单可靠。
+- **ChromaDB 嵌入式 + MySQL 治理**：向量存 ChromaDB（嵌入式 persistent client，Parquet 持久化），幂等 / 位点 / 文档元数据存 MySQL；chunk 写入 ChromaDB 后不可变，没有"状态翻转"的一致性问题。同一服务里的制造追溯读模型同样只用 MySQL 关系表（+ MES 只读 REST 补数），不引入图存储与图同步链路，因此不存在跨库非分布式事务的一致性问题（[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §0.1 设计取舍）。
 - **chunk metadata 即过滤字段**：`state` / `tenant_scope` / `doc_type` / `version_kind` / `version_ref_id` / `version` / `chunk_seq` / `locator` 写入 ChromaDB metadata，检索 `where` 直接在 collection 上 pre-filter，无需 join。chunk 不可变，metadata 写入后不再修改（§5.3 已删除）。
 - **摄入与检索分离**：`DocumentIngestionService`（写）与 `VectorRetriever`（读）解耦，摄入滞后不阻塞检索--未 `PUBLISHED` 的新版本天然不召回。
 - **版本治理三道闸**：① 摄入闸（版本绑定 + 状态机）；② 重索引闸（`ProcessRouteActivated` 驱动 `document_version` 状态流转）；③ 检索闸（ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` pre-filter）。
@@ -368,7 +370,7 @@ class ChunkStrategySelector:
 |---------|------|---------|-----------|
 | `ProcessRouteActivated` | `process.route.lifecycle` | `rag-doc-process` | ① 旧 `route_version` 关联文档版本 -> `PENDING_REBIND`（仅更新 `document_version`）；② 发布 `RebindRequired` 通知文档 owner |
 | `ProcessRouteDeprecated` | `process.route.lifecycle` | `rag-doc-process` | 关联文档版本 -> `DEPRECATED`（仅更新 `document_version`），不删 |
-| `rag.reindex.request` | `rag.reindex.*` | `rag-doc-reindex` | 追溯型 RAG 发布的重索引请求，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档 |
+| `rag.reindex.request` | `rag.reindex.*` | `rag-doc-reindex` | 制造追溯（同一 rag-service 内的关系型读模型能力）发布的重索引请求，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档 |
 | `DocumentVersionPublished` | `rag.doc.lifecycle` | `rag-doc-lifecycle` | 新版本 PUBLISHED 时，同类绑定旧版本 -> `DEPRECATED` |
 
 **新版本 PUBLISHED 时旧版本自动 DEPRECATED**（同类绑定唯一 PUBLISHED）：
@@ -398,7 +400,7 @@ async def publish_version(self, version_id: str) -> None:
 
 ### 5.4 幂等与去重
 
-事件经各上下文 Transactional Outbox **至少一次**投递（[消息处理实现说明.md](../../实现说明/业务事件/消息处理实现说明.md) §1），RAG 侧必须幂等消费。
+事件经各上下文 Transactional Outbox **至少一次**投递（[消息处理实现说明.md](../实现说明/业务事件/消息处理实现说明.md) §1），RAG 侧必须幂等消费。
 
 - **重索引幂等**：`event_id + consumer_group` 幂等表（§4.2），重复投递被挡住。
 - **摄入幂等**：`file_content_hash` 唯一约束--同文件重复摄入抛唯一约束冲突，跳过。
@@ -556,7 +558,7 @@ class DocumentRetrievalService:
         return await self._llm.with_structured_output(DocAnswer).ainvoke(prompt)
 ```
 
-- **强制引用 `chunk_id`**：系统提示词约束"无引用的答案判失败重试"--与追溯型 RAG"证据强制引用 node_id"同思路。
+- **强制引用 `chunk_id`**：系统提示词约束"无引用的答案判失败重试"--与制造追溯侧"答案强制引用证据条目 id（`evidence_id`，整次请求的证据集用 `evidence_set_id` 标识，后续按 `evidence_set_id` 回查关系型证据子集）"同思路（[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §3.2 统一证据模型、§6 对外接口的 `/rag/trace/evidence-set/{evidence_set_id}`）。
 - **置信度阈值**：`confidence < 0.6` 或无引用 -> `needs_human_review`，不展示给操作工。
 - **系统提示词约束**：明确"只能基于提供的 chunks 回答，不得编造；无相关文档则回答'未找到相关文档'；输出严格遵循 DocAnswer 结构"。
 
@@ -564,7 +566,7 @@ class DocumentRetrievalService:
 
 ## 7. ACL 防腐层（只读 REST 契约 + 降级）
 
-图投影滞后或绑定关系缺失时，`VectorRetriever` / `ReindexCoordinator` 经 ACL 降级查询对应上下文只读 REST 补齐。MVP 只读 REST 契约：
+读模型位点滞后或绑定关系缺失时，`VectorRetriever` / `ReindexCoordinator` 经 ACL 降级查询对应上下文只读 REST 补齐。MVP 只读 REST 契约：
 
 | 上下文 | 只读 REST | 用途 | 版本校验 |
 |--------|----------|------|---------|
@@ -670,7 +672,7 @@ rag_doc_service/
   docker-compose.yml
 ```
 
-- `domain/projection.ReindexHandler` 是协议（ISP），每个事件类型实现自己的处理器。
+- `domain/projection.ReindexHandler` 是协议（ISP），每个事件类型实现自己的处理器。这里的 projection 指"领域事件投影到 RAG 自有读模型 / 索引"，与图投影无关（制造追溯不用图检索，见 [rag-service-整体结构设计.md](rag-service-整体结构设计.md) §4.2）。
 - `infrastructure/chromadb/` 是存储落地，检索与摄入分离（SRP）。
 - `infrastructure/acl/` 是防腐层，外部 DTO 经 Mapper 转内部视图，不污染检索核心。
 
@@ -1026,7 +1028,7 @@ volumes:
 7. 实现文档版本状态机（DRAFT/PUBLISHED/PENDING_REBIND/DEPRECATED/ARCHIVED，§4.3）。
 8. 实现文档与工艺版本绑定（`DocumentBinding` 值对象，含 `inherited`）。
 9. 实现重索引消费者：订阅 `process.route.lifecycle`（`ProcessRouteActivated` / `ProcessRouteDeprecated`），触发 `PENDING_REBIND` / `DEPRECATED` 状态流转（仅更新 `document_version`，chunk 不可变，§9.2）。
-10. 接收追溯型 `rag.reindex.request` 事件，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档。
+10. 接收制造追溯侧（同一 rag-service 内的关系型读模型能力）发布的 `rag.reindex.request` 事件，按版本锚点（`version_ref_id`+`version`+`version_kind`）重索引关联文档。
 11. 实现幂等表 + 位点表 + 手动 ack（§5.4，同 MySQL 事务）。
 12. `ReadOnlyIngestionGate` / `assert_no_raw_data_topic` 启动断言（§9.6）。
 
@@ -1040,8 +1042,8 @@ volumes:
 ### 阶段四：ACL 降级、评测与协同对接（1–2 周）
 
 17. 接 ACL 降级查询工艺管理只读 REST（§7），强制版本锚点（`version`+`version_kind`）入参。
-18. 沉淀评测集（典型 SOP / 手册 / 检验标准问答 + 预期引用），回归模型 / 提示词 / 切分变更。
-19. 对接追溯型 RAG：`TraceAnswer.suggested_action` 调 `search_docs(query, version_anchor)`。
+18. 沉淀评测集（典型 SOP / 手册 / 检验标准问答 + 预期引用），回归模型 / 提示词 / 切分变更。评测栈**自建**（自研 `EvalRunner` + 断言 / 指标 / judge 三层 + pass^k + CI 门禁，judge 用独立包 `py-openjudge`）--AgentScope 2.0 已删除 `agentscope.evaluate`，不依赖框架评测模块（[基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §8 附录速查表）。
+19. 与制造追溯协同：追溯读模型从目标过点记录解析出当时的版本锚点后，文档检索按同一版本锚点召回对应版本 SOP 片段（同一 rag-service 内的 `document_search` 工具调用，不是跨路线调用；见 [rag-service-技术选型和实现方案.md](rag-service-技术选型和实现方案.md) §5.3 典型组合）。
 20. 对接 诊断能力 Agent：`search_docs` 工具封装 `/rag/docs/query`。
 21. 灰度一条产线（设备维修手册 + SOP + 检验标准），收集工程师 / 操作工反馈。
 
@@ -1061,7 +1063,7 @@ volumes:
 - [ ] chunk 写入 ChromaDB 时 metadata 带 `state` / `tenant_scope` / `version_kind` / `version_ref_id` / `version` / `chunk_seq` / `locator`，写入后不再修改（chunk 不可变）。
 - [ ] 文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）；检索强制带版本过滤（工艺绑定型 版本锚点必填（`version`+`version_kind`），缺失拒绝）。
 - [ ] 订阅 `ProcessRouteActivated` / `ProcessRouteDeprecated` 触发 `PENDING_REBIND` / `DEPRECATED` 状态流转（§9.2）。
-- [ ] 接收追溯型 `rag.reindex.request` 事件，与追溯型重索引对齐。
+- [ ] 接收制造追溯侧的 `rag.reindex.request` 事件，与追溯读模型的版本切换对齐。
 - [ ] 新版本 PUBLISHED 时同类绑定旧版本自动 DEPRECATED，不删（§5.3）。
 - [ ] 工艺升版关联文档进入 `PENDING_REBIND` 人工确认，不自动 PUBLISHED（🔴 §4.3）。
 - [ ] 租户 `tenant_scope` 在 ChromaDB `where` 前置过滤，权限不达标看不到 chunk。
@@ -1080,10 +1082,10 @@ volumes:
 ## 13. 面试防守 Q&A
 
 **Q：文档型 RAG 和通用 RAG 有什么本质区别？**
-A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的 SOP / 作业指导书绑定版本锚点（`version_kind`+`version`+`version_ref_id`），工艺有版本生命周期（[领域总览.md](../../领域模型/领域总览.md) §5.1）。检索到已失效 SOP 会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED/PENDING_REBIND）；② 订阅 `ProcessRouteActivated` 触发重索引 / 重新绑定；③ 检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 强制过滤 + chunk 不可变。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](../RAG服务引入路线.md) §5 Q&A）。
+A：不是检索模型差异，是**版本治理**。通用 RAG 检索文档不分版本；MES 的 SOP / 作业指导书绑定版本锚点（`version_kind`+`version`+`version_ref_id`），工艺有版本生命周期（[领域总览.md](../领域模型/领域总览.md) §5.1）。检索到已失效 SOP 会直接导致批量不良。所以我的文档型 RAG 做了三件事：① 文档版本绑定领域版本、有状态机（PUBLISHED/DEPRECATED/PENDING_REBIND）；② 订阅 `ProcessRouteActivated` 触发重索引 / 重新绑定；③ 检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` 强制过滤 + chunk 不可变。版本一致性不是 RAG 保证的，是从领域模型兜上来的（[RAG服务引入路线.md](RAG服务引入路线.md) §6 面试防守 Q&A）。
 
 **Q：为什么选 ChromaDB 而不是 PGVector / Milvus / Qdrant？**
-A：车间 ToB 文档量小（数千文档 / 数十万 chunk），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter），开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点：工艺升版时不翻转老 chunk，而是追加新版本 chunk，版本隔离靠查询 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`。代价：HA/备份弱、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。比追溯型更省运维--追溯型 Neo4j+MySQL，文档型 ChromaDB（嵌入式）+MySQL，无独立向量库 service（§2.3）。
+A：车间 ToB 文档量小（数千文档 / 数十万 chunk），查询强制带版本锚点（`version`+`version_kind`）（版本过滤退化成等值，ChromaDB `where` 能做且 pre-filter），开发简--嵌入式零额外服务、LlamaIndex `ChromaVectorStore` 最成熟、少装 PG+pgvector+asyncpg+Alembic PG 方言。chunk 不可变绕开多记录翻转无事务弱点：工艺升版时不翻转老 chunk，而是追加新版本 chunk，版本隔离靠查询 `where={"state":"PUBLISHED","version_kind":"route","version":rv}`。代价：HA/备份弱、无聚合（导出 MySQL）、规模上限（文档少不触发）、单写者并发（重索引量小可接受）。整套 rag-service 因此只有 MySQL + 嵌入式 ChromaDB + Redis 三类存储：制造追溯用 MySQL 关系型读模型 + 固定关联查询，不部署图数据库、不维护图 Schema，文档侧再挂一个嵌入式向量库，没有独立向量库 service（§2.3、[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §10）。
 
 **Q：工艺升版了，SOP 怎么跟着变？**
 A：订阅 `ProcessRouteActivated`，关联文档进入 `PENDING_REBIND` 待确认状态（仅更新 `document_version`，chunk 不可变，检索靠 `version_kind`+`version` 过滤自动隔离），由文档 owner 人工判断：内容需变则发新版本绑定新版本锚点；内容不变则继承绑定（`inherited=true`）。**不自动 PUBLISHED**--"SOP 是否需变"不能靠机器假设，宁可让人确认。旧版本 DEPRECATED 不删，历史答案引用仍可点开（§9.2）。
@@ -1091,8 +1093,8 @@ A：订阅 `ProcessRouteActivated`，关联文档进入 `PENDING_REBIND` 待确�
 **Q：会不会拖慢过点？**
 A：不会进过点主事务。过点 P99 ≤200ms 是硬约束，文档摄入 / 重索引是异步消费事件，与过点判定完全解耦。文档检索容忍秒级延迟--它是事后 / 旁边问答工具，不是实时过点判定。
 
-**Q：文档型 RAG 和追溯型 RAG 是不是重复了？**
-A：不重复，互补分工。追溯型是 GraphRAG + 领域事件流，答"这条单件 5M1E 全貌"（哪批锡膏、哪台设备），处理结构化关系；文档型是向量检索，答"SPI 报警怎么处置"（处置知识），处理非结构化文档。两者共享同一套版本契约--都由 `ProcessRouteActivated` 驱动，追溯型把版本做成图节点，文档型把版本做成文档元数据过滤维度。追溯型的 `suggested_action` 调文档型补 SOP 片段，协同闭环（[详细设计](./文档型 RAG-详细设计.md) §6.6）。
+**Q：文档检索和制造追溯是不是重复了？**
+A：不重复，是**同一个 rag-service 内的两项互补能力**，不是两条路线、更不是两个服务。制造追溯（关系型读模型）答"这条单件 5M1E 全貌"（哪批锡膏、哪台设备），用 MySQL 事实表 + 固定关联查询取结构化记录，**不采用图检索**--追溯链深度固定、模式已知、关联字段由 MES 业务契约给定，多一套图存储与图同步链路只带来运维面和不可控的查询计划（[RAG服务引入路线.md](RAG服务引入路线.md) §2 为什么追溯不使用图检索）；文档检索答"SPI 报警怎么处置"（处置知识），用 ChromaDB 向量召回 + metadata 前置过滤处理非结构化文档。两者共享同一套版本契约--都由 `ProcessRouteActivated` 驱动：追溯侧把版本落在关系表的版本字段上（`trace_route_binding`），本文把版本做成文档元数据过滤维度（`version_kind`+`version`+`version_ref_id`）。追溯解析出当时的版本锚点后，再调文档检索补对应版本 SOP 片段，协同闭环（[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §4.1 / §4.2、[详细设计](./文档型 RAG-详细设计.md) §6.6）。
 
 **Q：LLM 编造文档里没有的内容怎么办？**
 A：两道防线。一是系统提示词约束"只能基于提供的 chunks 回答，无相关文档则回答'未找到'"；二是 `DocAnswer` 强制引用 `chunk_id`，无引用的答案 Pydantic 校验失败、判失败重试。每个引用带 `locator`（页码/偏移），工程师能点开原文核对。低置信度转人工，不硬答（§6.4）。
@@ -1104,10 +1106,10 @@ A：三道闸兜住。① 摄入闸：文档版本有状态机，PUBLISHED 才�
 A：文档库归 RAG 自有，错了不影响 MES 生产--事实源是原始文件 + 领域版本，ChromaDB 不可用返回 503 不阻塞过点。重建靠原始文件 + 事件回放（ChromaDB Parquet 定期备份兜底），无需 MES 配合。所有答案带引用 + 置信度，低置信度转人工，与 MES 防错理念一致。
 
 **Q：上线了吗？**
-A：这是设计阶段的引入规划，不是已落地。重点是版本治理对齐工艺生命周期、ChromaDB 选型用 chunk 不可变 + where pre-filter 兜版本+权限、重索引由领域事件驱动这三条架构判断。落地按"先 B 后 A"推进--文档型 2–4 周可出 demo，先验证车间可用性（[RAG服务引入路线.md](../RAG服务引入路线.md) §3）。诚实 + 体现架构判断力，比硬吹"已上线文档 RAG"得分高。
+A：这是设计阶段的引入规划，不是已落地。重点是版本治理对齐工艺生命周期、ChromaDB 选型用 chunk 不可变 + where pre-filter 兜版本+权限、重索引由领域事件驱动这三条架构判断。落地按统一服务的增量交付顺序推进--先做文档检索这一项能力，2–4 周可出 demo 验证车间有没有人用，再在同一服务内补关系型制造追溯（[RAG服务引入路线.md](RAG服务引入路线.md) §4 推荐落地顺序、[rag-service-整体结构设计.md](rag-service-整体结构设计.md) §14 分阶段交付）。诚实 + 体现架构判断力，比硬吹"已上线文档 RAG"得分高。
 
 ---
 
 ## 14. 一句话定位
 
-"文档型 RAG 把车间的 SOP / 手册 / 检验标准做成向量知识库--向量是主体、版本治理是灵魂：文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）、状态机对齐工艺生命周期、订阅 `ProcessRouteActivated` 驱动重索引、检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` pre-filter + chunk 不可变，从结构上杜绝答出已失效 SOP 导致批量不良。选 ChromaDB 嵌入式零额外服务、chunk 不可变绕开多记录翻转无事务弱点、版本过滤退化成等值 where 能做且 pre-filter，与追溯型 RAG 共享同一套版本契约、互补分工--追溯型答'是什么、为什么'，文档型答'怎么办'，全程只读 MES、不进过点主事务，低置信度转人工，让 RAG 从旁边问答变成能进车间的处置知识副驾。"
+"文档型 RAG 把车间的 SOP / 手册 / 检验标准做成向量知识库--向量是主体、版本治理是灵魂：文档版本绑定版本锚点（`version_kind`+`version`+`version_ref_id`）、状态机对齐工艺生命周期、订阅 `ProcessRouteActivated` 驱动重索引、检索 ChromaDB `where={"state":"PUBLISHED","version_kind":"route","version":rv}` pre-filter + chunk 不可变，从结构上杜绝答出已失效 SOP 导致批量不良。选 ChromaDB 嵌入式零额外服务、chunk 不可变绕开多记录翻转无事务弱点、版本过滤退化成等值 where 能做且 pre-filter，与同一 rag-service 内的制造追溯（关系型读模型 + 固定关联查询，不用图检索）共享一套版本契约、互补分工--追溯答'是什么、为什么'，文档答'怎么办'，全程只读 MES、只写 RAG 自有的索引 / 读模型 / 审计，不进过点主事务，低置信度转人工，让 RAG 从旁边问答变成能进车间的处置知识副驾。"

@@ -4,7 +4,7 @@
 
 > 适用范围：本文用于说明业务事件消息处理中的 MySQL 表结构、Outbox 事件表、消费幂等表、Publisher 领取 SQL、恢复 SQL 与清理策略。
 >
-> MySQL 服务器参数、Spring MyBatis、连接池、事务基础配置等项目级初始化内容，见《[../MySQL配置说明](../MySQL配置说明.md)》。
+> MySQL 服务器参数、Spring MyBatis、连接池、事务基础配置等项目级初始化内容，见《[../基础设施/MySQL配置说明](../基础设施/MySQL配置说明.md)》。
 
 ---
 

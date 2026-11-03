@@ -19,7 +19,7 @@
 | **懂什么时候不用 AI** | 编排能力换线顺利时 `agent_llm_invocation_total` 应趋近 0，全靠 CODE 节点跑--少调 LLM 才是健康 | §5.2 / §7.4 |
 | **提示词即代码** | prompt 必带 `prompt_version`，改 prompt 必改版本号必过 EvalRunner 回归，可追溯可回滚 | §8.3 / §10 |
 | **兜底矩阵全分支落观测** | 11 类兜底每条都落 trace+指标+日志，P0 告警盯写工具被拦--最后一道闸自己必须被盯着 | §12 |
-| **跨语言 traceparent 不强求 Java 改造** | W3C TraceContext + httpx 自动注入，Java 挂 OTel agent 即续接，没挂则链路断但 Agent 侧自洽 | §4.3 / §1.4 |
+| **跨语言 traceparent 不强求 Java 改造** | W3C TraceContext + `TracingMiddleware` 在工具出站时注入，Java 挂 OTel agent 即续接，没挂则链路断但 Agent 侧自洽 | §4.3 / §1.4 |
 
 > 这组是 Agent 可观测的"门面"。被问"你这套和普通 APM 区别在哪"时，直接甩"证据链 + 置信度标定 + 评测漂移 + token 成本"四件通用 APM 没有的东西。
 
@@ -42,7 +42,7 @@
 **核心机制**（[可观测方案](../AGENT服务/Agent可观测性-设计与实现方案.md) §4.5 / §7.2）：
 - 一次会话产出一棵 span 树（root=会话，子=每步 LLM 调用 + 工具调用）。
 - trace span 树给 SRE 看火焰图（Tempo/Jaeger）；**业务侧看的是它的平铺投影**--`tool_call_trace` 表，每个 tool span 落一行。
-- 报告里 `Hypothesis.evidence` 存的是 `tool_call_trace.trace_id` 列表，工程师点假设 -> 弹证据 -> 回溯到具体工具入参出参与下游 REST 调用。**两者同源**（都来自 ToolNode 同一次调用），trace 是底、证据链是面。
+- 报告里 `Hypothesis.evidence` 存的是 `tool_call_trace.trace_id` 列表，工程师点假设 -> 弹证据 -> 回溯到具体工具入参出参与下游 REST 调用。**两者同源**（都来自 Toolkit 工具执行的同一次调用），trace 是底、证据链是面。
 
 **为什么是亮点**：这是把"可观测性"从 SRE 的监控工具，重新定位成"**给工艺/质量工程师的 AI 决策审计工具**"。MES 场景下 AI 决策必须可回溯（和防错同构），普通 APM 出的火焰图工程师看不懂也用不上；证据链平铺表才是他们要的--点假设、看证据、查到下游哪条 REST。**受众分治**是关键洞察：SRE 看 span 树、工程师看平铺表、AI 负责人看评测，一套数据三种投影。
 
@@ -53,7 +53,7 @@
 **核心机制**（§7.2 / §12）：
 - `ReportParser` 校验每条 hypothesis 的 `evidence` 列表**必须非空**且至少引用 1 条 `trace_id`，否则判 schema 失败重试。
 - `trace_id` 必须真实存在于本会话的 `tool_call_trace` 表--**模型编造的 trace_id 校验不过**（查不到对应行）。
-- 草稿 `evidence_refs` 引用 `trace_id` + `subgraph_ref`，编排能力动作卡 `evidence` 引用 `trace_id` + `agent_hypothesis`，同构约束。
+- 草稿 `evidence_refs` 引用 `trace_id` + `evidence_set_id`，编排能力动作卡 `evidence` 引用 `trace_id` + `agent_hypothesis`，同构约束。
 
 **为什么是亮点**：这是证据链的**完整性保证**。LLM 会"自信地编"--给一个看似合理的假设但压根没查过对应数据。强约束逼它"结论必有据"，编造的 trace_id 因查不到行而被 schema 校验拦下重试。和 诊断能力报告的 Pydantic 强约束一脉相承：**用 schema 校验守住"证据-结论"的物理绑定**，不是靠提示词劝模型"请给证据"。
 
@@ -85,7 +85,7 @@
 #### B.2 DIP：ObservabilityPort 抽象，观测失败不阻断业务
 
 **核心机制**（§2.2 / §14.2）：
-- 业务节点（`ToolNode`、`DraftBuilder`、`supervisor`）依赖 `ObservabilityPort` 抽象接口，**不直接依赖 OTel/prometheus 具体实现**。
+- 业务侧（工具执行、`DraftBuilder`、本项目 `flows/` 应用层编排的入口步骤）依赖 `ObservabilityPort` 抽象接口，**不直接依赖 OTel/prometheus 具体实现**。
 - 测试时可换 `InMemoryObservability`；生产实现挂了（OTel exporter 挂、prometheus 挂），业务照跑，只是该次无 trace。
 - 符合 SRP（`Tracing` / `MetricsCollector` / `LlmCallLogger` / `EvalRunner` 各司一职）+ OCP（新增观测层或新 LLM provider 不改观测核心，只加 label/维度）。
 
@@ -96,8 +96,8 @@
 #### B.3 兜底矩阵全分支落观测，无一例外
 
 **核心机制**（§12）：
-- 11 类兜底（低置信 / 工具连续失败 / recursion_limit / 整会话超时 / LLM schema 失败 / 写工具被拦 / 证据为空 / subgraph 回查空 / 草稿恒需确认 / gate 超时 / barrier 未 PASS / agent 连续失败）**每条都落 trace 事件 + 指标 + 日志**。
-- 写工具被拦（编排能力未带有效 confirmation token）触发 **P0 告警**（PagerDuty/钉钉），因为它意味着红线可能被绕过。
+- 11 类兜底（低置信 / 工具连续失败 / 步数预算超限 / 整会话超时 / LLM schema 失败 / 写工具被拦 / 证据为空 / 证据集回查空 / 草稿恒需确认 / gate 超时 / barrier 未 PASS / agent 连续失败）**每条都落 trace 事件 + 指标 + 日志**。
+- 写工具被拦（编排能力未带有效确认凭证）触发 **P0 告警**（PagerDuty/钉钉），因为它意味着红线可能被绕过。
 - 兜底触发的报告都带 `disclaimer`：辅助假设，最终处置需工程师确认。
 
 **为什么是亮点**：哲学一致性--**兜底是最后一道闸，它自己必须被盯着**。如果兜底动作不可观测，就不知道"转人工"到底转了多少、为什么转、是不是某个兜底失效了。P0 盯写工具被拦体现"懂什么是真正的红线"：MES 防错的红线是"AI 不能绕过确认直接写"，一旦被绕过就是质量事故级，必须 P0。这和 [生产执行服务-面试闪光点.md](生产执行服务-面试闪光点.md) 的"宁可让人判"一脉相承。
@@ -179,15 +179,15 @@
 
 ### E. LLM 观测与成本--provider 无关，懂什么时候不用 AI
 
-#### E.1 ObservableChatModel--多 provider 观测一致性
+#### E.1 `Model` 抽象 + 观测 Middleware--多 provider 观测一致性
 
 **核心机制**（§8.4）：
-- `llm_factory` 出品的模型统一包一层 `ObservableChatModel`（继承 `BaseChatModel`，拦截 `_agenerate`），拦截所有 provider 调用，统一记 `llm_call_log` + 指标。
+- 所有模型统一经 AgentScope `Model` 抽象接入（provider 可插拔），其上挂观测 Middleware（`TracingMiddleware` + 自定义成本埋点 Middleware），拦截所有 provider 调用，统一记 `llm_call_log` + 指标。
 - 无论 Claude / 通义千问 / DeepSeek / 本地模型，观测口径一致。
-- 不同 provider 的 token 计数口径差异（如中文 token）在包装层**归一化**，避免指标不可比。
-- prompt 全文**不落库**（体积大 + 敏感），只落摘要 + `prompt_version`；复跑靠版本号 + 会话 state 重建。
+- 不同 provider 的 token 计数口径差异（如中文 token）在 Middleware 层**归一化**，避免指标不可比。
+- prompt 全文**不落库**（体积大 + 敏感），只落摘要 + `prompt_version`；复跑靠版本号 + 会话 `AgentState` 重建。
 
-**为什么是亮点**：解决"换了模型就观测口径对不上"的工程痛点。token 计数各 provider 口径不同（OpenAI 用 tiktoken、Anthropic 自有分词、中文 token 数差异大），不归一化就没法横向比成本/延迟。包装层是正确的归一化位置--provider 无关。prompt 不落库是脱敏 + 成本考量，但保留 `prompt_version` 保证可复跑，这是"可复现 vs 不泄密"的平衡。
+**为什么是亮点**：解决"换了模型就观测口径对不上"的工程痛点。token 计数各 provider 口径不同（OpenAI 用 tiktoken、Anthropic 自有分词、中文 token 数差异大），不归一化就没法横向比成本/延迟。Middleware 层是正确的归一化位置--provider 无关。prompt 不落库是脱敏 + 成本考量，但保留 `prompt_version` 保证可复跑，这是"可复现 vs 不泄密"的平衡。
 
 #### E.2 token 与成本追踪
 
@@ -204,7 +204,7 @@
 **核心机制**（§5.2 / §7.4）：
 - 编排能力的 `node_trace.node_type` 区分 `CODE`（纯 Python 函数节点，不调 LLM）与 `agent`（调 LLM + 工具）。
 - `agent_llm_invocation_total` 与 `agent_step_total{node_type=CODE}` 的占比是 编排能力核心健康指标：**换线顺利时 LLM 调用应趋近 0**，全靠代码节点跑。
-- 编排能力写动作过 confirmation gate，写工具未带有效 token 被 `WriteToolGate` 拒（`orchestration_write_rejected_total` +1，P0 告警）。
+- 编排能力写动作过 Permission gate，写工具未带有效确认凭证被 Permission 拒（`orchestration_write_rejected_total` +1，P0 告警）。
 
 **为什么是亮点**：这是全篇最有"反直觉洞察"的点。多数人以为"AI 用得越多越智能"，这里反过来--**真正成熟的 流程编排是"该用代码时绝不调 LLM"**。换线全程 PASS 是确定性流程，跑代码节点又快又省钱又稳，只有遇到异常/不确定才唤起 agent。把"LLM 调用占比"当健康指标（低=健康），体现你懂"AI 是特种部队不是常规军"--贵且不稳，用在刀刃上。这个认知比"我们接了大模型"高一个段位。
 
@@ -215,14 +215,14 @@
 ### F. 跨语言链路与集成--不强求 Java 改造
 
 **核心机制**（§4.3 / §1.4 / §15.2）：
-- OTel 的 `httpx` instrumentation 在每次出站 REST 自动注入 W3C `traceparent` header。
+- `TracingMiddleware` 在出站工具调用（httpx 封装为 `Tool`）时注入 W3C `traceparent` header。
 - Java 侧（生产执行/制造资源服务）若挂了 OTel agent（Spring），从 `traceparent` 续接 span，Tempo 里跨语言连成一条。
 - **不要求 Java 改造**：只要透传 W3C TraceContext（行业默认）。没接 OTel 的 Java 服务，链路在那断，但 Agent 侧 span 仍完整自洽--降级可接受。
-- ACL 客户端**不手动拼 traceparent**，靠 instrumentation 自动注入，避免人为出错；只额外带 `X-Tenant-*` 做权限。
-- Kafka 侧：`aiokafka` 消费时从消息 header 取 `traceparent` 续接，或为自发事件新建 root span。
+- ACL 客户端**不手动拼 traceparent**，靠 `TracingMiddleware` 统一注入，避免人为出错；只额外带 `X-Tenant-*` 做权限。
+- Kafka 侧：`aiokafka` 消费时从消息 header 取 `traceparent` 续接，或为自发事件新建 root span，再桥接进事件系统。
 - 指标/日志各自独立栈（Agent 用 prometheus + Loki，Java 用既有栈），只在 trace 层互通。
 
-**为什么是亮点**：务实的集成哲学--**不为了可观测性强迫全公司改造**。W3C TraceContext 是行业标准，httpx 自动注入，Java 已有的 OTel agent 自然续接。没接的降级可接受（Agent 侧自洽）。这比"要求所有服务统一上某套 APM"现实得多。指标/日志各自独立、只在 trace 互通，也是尊重既有投资。
+**为什么是亮点**：务实的集成哲学--**不为了可观测性强迫全公司改造**。W3C TraceContext 是行业标准，Middleware 统一注入，Java 已有的 OTel agent 自然续接。没接的降级可接受（Agent 侧自洽）。这比"要求所有服务统一上某套 APM"现实得多。指标/日志各自独立、只在 trace 互通，也是尊重既有投资。
 
 ---
 
@@ -236,7 +236,7 @@
 
 ### 话术 2：trace 落 Tempo 又落 MySQL 不是重复吗
 
-"不重复，是同一份 trace 的两种投影。Tempo/Jaeger 给 SRE 看火焰图，是底；`tool_call_trace` 是平铺视图给工程师 UI 用，是面。工程师不需要懂 span 树，他点假设、弹证据、看工具入参出参，这个交互用 MySQL 平铺表最直接。**两者同源**，都来自 ToolNode 同一次调用，trace_id 串起来。受众不同--SRE 看 span 树排障，工程师看平铺表审计 AI 决策，AI 负责人看评测，一套数据三种投影。"
+"不重复，是同一份 trace 的两种投影。Tempo/Jaeger 给 SRE 看火焰图，是底；`tool_call_trace` 是平铺视图给工程师 UI 用，是面。工程师不需要懂 span 树，他点假设、弹证据、看工具入参出参，这个交互用 MySQL 平铺表最直接。**两者同源**，都来自 Toolkit 工具执行的同一次调用，trace_id 串起来。受众不同--SRE 看 span 树排障，工程师看平铺表审计 AI 决策，AI 负责人看评测，一套数据三种投影。"
 
 ### 话术 3：观测挂了会不会影响 Agent 跑
 
@@ -252,7 +252,7 @@
 
 ### 话术 6：跨语言怎么把链路串起来，Java 要改吗
 
-"靠 W3C traceparent。Agent 调 Java REST 时 OTel 的 httpx instrumentation 自动注入 header，Java 侧挂了 OTel agent 就续接同一 trace，在 Tempo 里跨语言连成一条。Java 不用为这个改--只要透传 W3C TraceContext，这是行业默认。某个 Java 服务没接 OTel，链路在那断开，但 Agent 侧 span 仍完整自洽，降级可接受。指标和日志各自独立栈，只在 trace 层互通，尊重 Java 侧既有投资。"
+"靠 W3C traceparent。Agent 调 Java REST 时由 `TracingMiddleware` 在工具出站自动注入 header，Java 侧挂了 OTel agent 就续接同一 trace，在 Tempo 里跨语言连成一条。Java 不用为这个改--只要透传 W3C TraceContext，这是行业默认。某个 Java 服务没接 OTel，链路在那断开，但 Agent 侧 span 仍完整自洽，降级可接受。指标和日志各自独立栈，只在 trace 层互通，尊重 Java 侧既有投资。"
 
 ### 话术 7：转人工比例为什么不一上来就告警上限
 
@@ -260,7 +260,7 @@
 
 ### 话术 8：token 成本怎么管，会不会烧钱
 
-"三层。一是 agent_token_total 按 prompt 和 completion 分桶计数，agent_cost_usd_total 按单价估算，按租户聚合给管理层看。二是成本漂移检测，token/会话 P95 超基线 1.5 倍告警，可能是提示词变长、模型啰嗦或反复重试。三是 recursion_limit 限制最大步数，从根本上限死单会话 token 上限。但最关键的是 编排能力换线顺利时 LLM 调用应趋近 0，全靠代码节点跑--懂什么时候不用 AI，就是最大的省钱。"
+"三层。一是 agent_token_total 按 prompt 和 completion 分桶计数，agent_cost_usd_total 按单价估算，按租户聚合给管理层看。二是成本漂移检测，token/会话 P95 超基线 1.5 倍告警，可能是提示词变长、模型啰嗦或反复重试。三是步数与工具调用预算上限卡住最大步数，从根本上限死单会话 token 上限。但最关键的是 编排能力换线顺利时 LLM 调用应趋近 0，全靠代码节点跑--懂什么时候不用 AI，就是最大的省钱。"
 
 ---
 
@@ -275,17 +275,17 @@ A：Platt 是用逻辑回归拟合一个 2 参数映射 calibrated = sigmoid(a·
 **Q：PSI 公式是什么？为什么 0.2 阈值？和 KL 散度什么关系？**
 A：PSI = Σ(actual_i − expected_i)×ln(actual_i/expected_i)，把基线分布和当前分布按相同分箱，算每箱占比差乘对数比之和。它其实是双向 KL 散度的和：PSI = KL(actual‖expected) + KL(expected‖actual)，对称化版本。行业经验：<0.1 稳定、0.1~0.2 轻微偏移需关注、>0.2 显著漂移告警。这是信用评分领域验证分布稳定性的标准阈值，借用到 LLM 输出分布监控。0.2 不是数学推导，是经验值，🔴 我会在线上数据积累后复验调整。
 
-**Q：ObservableChatModel 怎么实现？token 计数怎么归一化？**
-A：继承 LangChain 的 BaseChatModel，在 `_agenerate` 里包一层：调内层模型、计时、从 `resp.usage_metadata` 取 prompt_tokens/completion_tokens、调 `obs.llm_called` 落 `llm_call_log` 和指标，异常调 `llm_failed`。token 归一化在包装层做--不同 provider 的 usage 字段口径不同（有的算系统提示有的不算，中文 token 数因分词器不同差异大），在包装层统一成"输入 token / 输出 token"两个口径，保证指标横向可比。provider 无关是关键--换模型不用改业务节点的埋点。
+**Q：观测 Middleware 怎么实现？token 计数怎么归一化？**
+A：在 AgentScope `Model` 抽象上挂自定义 Middleware（观测/成本埋点），所有 provider 的调用都过这一层：调内层模型、计时、从 `Msg` 的 `usage` 取 prompt_tokens/completion_tokens、调 `obs.llm_called` 落 `llm_call_log` 和指标，异常调 `llm_failed`。token 归一化在 Middleware 层做--不同 provider 的 usage 字段口径不同（有的算系统提示有的不算，中文 token 数因分词器不同差异大），在这一层统一成"输入 token / 输出 token"两个口径，保证指标横向可比。provider 无关是关键--换模型不用改业务节点的埋点。
 
 **Q：trace_id 怎么从 OTel 落到 MySQL 的 tool_call_trace？格式是什么？**
-A：OTel span context 的 trace_id 是 128 位整数，格式化成 32 位十六进制串（`f"{ctx.trace_id:032x}"`）。`ToolNode` 调 `trace_repo.save_*` 时把当前 span 的 trace_id 一起存进 `tool_call_trace`，作为证据链的 FK。日志里也通过 `_inject_context` processor 注入同一个 trace_id。所以 trace（Tempo）、日志（Loki）、证据链（MySQL）三方靠同一个 trace_id 串起来。证据引用 trace_id 时 ReportParser 校验它必须在本会话 tool_call_trace 里查得到，保证不是编的。
+A：OTel span context 的 trace_id 是 128 位整数，格式化成 32 位十六进制串（`f"{ctx.trace_id:032x}"`）。工具执行（Toolkit 调 `Tool`）落 `trace_repo.save_*` 时把当前 span 的 trace_id 一起存进 `tool_call_trace`，作为证据链的 FK。日志里也通过 `_inject_context` processor 注入同一个 trace_id。所以 trace（Tempo）、日志（Loki）、证据链（MySQL）三方靠同一个 trace_id 串起来。证据引用 trace_id 时 ReportParser 校验它必须在本会话 tool_call_trace 里查得到，保证不是编的。
 
-**Q：recursion_limit 怎么定？和 token 成本什么关系？**
-A：LangGraph 的 recursion_limit 限制图的最大迭代轮数，命中抛 GraphRecursionError。它直接等价于"单会话最多调几轮 LLM"= 单会话 token 上限的硬天花板。我会在 root span 记 `agent.recursion_limit_hit` 事件并标 TIMEOUT，转人工。阈值要平衡：太小会误杀真复杂问题，太大会烧钱 + 死循环。配套看工具调用模式漂移（§11.1）--如果某会话反复查同一上下文，是死循环信号不是真复杂。🔴 阈值需线上调参。
+**Q：步数与工具调用预算上限怎么定？和 token 成本什么关系？**
+A：它限制单会话最多迭代几轮、最多调几次工具（AgentScope 没有 `recursion_limit` 这个参数名，是能力配置不是同名参数），命中就中止。它直接等价于"单会话最多调几轮 LLM"= 单会话 token 上限的硬天花板。我会在 root span 记一次 `agent.step_budget_hit` 事件并标 `agent.status=TIMEOUT`，同时 `agent_step_budget_hit_total{capability}` +1，转人工。阈值要平衡：太小会误杀真复杂问题，太大会烧钱 + 死循环。配套看工具调用模式漂移（§11.1）--如果某会话反复查同一上下文，是死循环信号不是真复杂。🔴 阈值需线上调参。
 
-**Q：LangGraph checkpointer 和 trace 怎么协同？中断恢复的会话 trace 怎么续？**
-A：checkpointer 的 `thread_id = session_id`，使中断恢复的会话与原 trace 同属一棵树--恢复时续 root span，不是新建一棵。这样工程师看一个会话的完整证据链不会因为中途中断/恢复而断成两段。obs_ctx（含 trace_id/session_id/tenant/level/prompt_version）是不可变值对象，随会话流动注入每个节点，保证恢复后属性一致。
+**Q：`SessionService`（`AgentState`，Redis-backed；2.0.5 起由旧名改名而来）和 trace 怎么协同？中断恢复的会话 trace 怎么续？**
+A：会话状态由 `SessionService` 按 `session_id` 持久化，使中断恢复的会话与原 trace 同属一棵树--恢复时按 `session_id` 取回原 `trace_id` 续 root span，不是新建一棵。这样工程师看一个会话的完整证据链不会因为中途中断/恢复而断成两段。obs_ctx（含 trace_id/session_id/tenant/level/prompt_version）是不可变值对象，随会话流动注入每个步骤，保证恢复后属性一致。
 
 **Q：Redactor 为什么是纯函数？怎么按租户配置不同策略？**
 A：脱敏是安全相关逻辑，必须是纯函数（输入决定输出、无副作用）才好单测--脱敏错了是合规事故，必须能跑覆盖全部字段类型的单测。按租户配置不同策略靠策略对象注入（ISP 接口隔离）：A 车间可能序列号保留前 4 后 2，B 车间要求全打码，Redactor 接收一个 `RedactionPolicy`，不同租户传不同 policy。纯函数 + 策略注入 = 可测 + 可配置。
@@ -301,10 +301,10 @@ A：下层为上层供数，各层可独立演进。基础设施层（OTel SDK/c
 A：Agent 调 RAG 时的 span 衔接约定归本篇（Agent 侧 `tool.invoke` -> RAG 侧），但 RAG 服务自己的内部观测（检索召回、向量库延迟）归 RAG 各路线方案，本篇不替它埋点。边界原则：**每个服务观测自己内部**，跨服务靠 traceparent 串，不互相侵入。和"不替 MES 业务表埋点"同理--Agent 只读它们，不替它们观测。
 
 **Q：SLI/SLO 怎么定？告警怎么分级？**
-A：SLI 有会话 P99（诊断能力 ≤60s / 编排能力 ≤120s，P2）、工具错误率（<1%，>5% 告警 P1）、LLM schema 失败率（<0.5%，>2% 告警 P2）、递归上限命中率（<2%，>5% 告警 P2）、低置信转人工（盯突增 P3）、token/会话 P95（超基线 1.5× 告警 P3 成本漂移）、写工具被拦（=0，任意 >0 告警 **P0**）。分级逻辑：P0 是红线越界（AI 绕过确认写），P1 是影响可用性，P2 是质量退化，P3 是趋势性信号。低置信不告警上限告警突增是特别设计的信号-噪声分治。
+A：SLI 有会话 P99（诊断能力 ≤60s / 编排能力 ≤120s，P2）、工具错误率（<1%，>5% 告警 P1）、LLM schema 失败率（<0.5%，>2% 告警 P2）、步数/工具调用预算命中率（<2%，>5% 告警 P2）、低置信转人工（盯突增 P3）、token/会话 P95（超基线 1.5× 告警 P3 成本漂移）、写工具被拦（=0，任意 >0 告警 **P0**）。分级逻辑：P0 是红线越界（AI 绕过确认写），P1 是影响可用性，P2 是质量退化，P3 是趋势性信号。低置信不告警上限告警突增是特别设计的信号-噪声分治。
 
 **Q：K8s 部署怎么搭？观测后端复用还是独立？**
-A：`agent-service` Pod 挂 OTel SDK（sidecar 或 SDK 直发 Collector），prometheus `/metrics` 端口被 scrape。观测后端（Collector/Tempo/Prometheus/Grafana/Loki）若 MES 已有则复用，没有则随 Agent 一起部署。Agent 与 Java 共用一个 OTel Collector，trace 在 Tempo 跨语言连成一条；指标各存各 prometheus 或同一 prometheus 不同 job，Grafana 统一画。🔴 后端复用 vs 独立待运维确认。
+A：`agent-service` Pod 挂 OTel SDK（sidecar 或 SDK 直发 Collector），prometheus `/metrics` 端口被 scrape。观测后端（Collector/Tempo/Prometheus/Grafana/Loki）若 MES 已有则复用，没有则随 Agent 一起部署。Agent 与 Java 共用一个 OTel Collector，trace 在 Tempo 跨语言连成一条；指标各存各 prometheus 或同一 prometheus 不同 job，Grafana 统一画。研发期调试可视化不依赖框架自带 UI（`AgentScope Studio` 已归档、不再作为独立工具维护，**不列为选型**）：单次会话看 OTel trace 瀑布（Tempo/Jaeger）+ `reply_stream` 事件流回放（事件落 JSONL 后按 `session_id` 本地重放），跨会话聚合看 Grafana。🔴 后端复用 vs 独立待运维确认。
 
 **Q：数据保留怎么定？增长快的表怎么办？**
 A：`llm_call_log` / `tool_call_trace` 增长快，🔴 建议热数据 30 天 + 冷归档 1 年，按合规调整。评测数据（`eval_run`）长期保留，用于版本对比和标定历史。`diagnosis_report` 含证据链，建议随工单归档周期保留便于质量追溯复盘。MySQL 业务可观测表复用 MES MySQL 但独立 schema，不混业务表。
@@ -319,7 +319,7 @@ A：生产问题按比例（🔴 如 5%）影子复制一份给新模型/新 pro
 A：用更强模型当裁判评弱模型输出的根因假设是否合理（完整设计在评测方案）。judge 不准的风险靠三点缓解：① judge 用明确 rubric（评分标准）而非自由发挥；② 关键 case 人工抽检校准 judge；③ judge 结果和人工标注算一致性，一致性低就换 judge 模型或改 rubric。诚实：LLM-as-judge 是评测规模化手段，不是金标准，金标准还是人工标注，judge 是在人工标注不够时的高性价比补充。
 
 **Q：多 provider 切换时观测怎么保持一致？**
-A：靠 ObservableChatModel 包装层（§8.4）。所有 provider 的模型都过这一层，统一记 `llm_call_log` + 指标，token 口径在包装层归一化。换 provider 不改业务节点埋点，只改 llm_factory 出品时注入的 inner model。OCP 体现：新增一个 provider 不改观测核心，只多一组 label 维度。
+A：靠 `Model` 抽象之上的观测 Middleware（§8.4）。所有 provider 的模型都过这一层，统一记 `llm_call_log` + 指标，token 口径在 Middleware 层归一化。换 provider 不改业务节点埋点，只换 `Model` 抽象下注入的 provider 实现。OCP 体现：新增一个 provider 不改观测核心，只多一组 label 维度。
 
 ---
 
@@ -337,14 +337,14 @@ A：不单点信任标定。多层：① PSI 监控置信度分布漂移（§11.
 **Q：评测集本身有 bias 怎么办？你的准确率指标是基于一个有偏的集子算的。**
 A：诚实说，评测集质量是 AI 质量的上限，这是个持续工程不是一次性。缓解：① 三来源（历史真实/转人工闭环/人工构造边界）降低单一来源 bias，其中转人工闭环最贴近线上真实分布；② 在线影子评测补离线覆盖不足，用线上真实分布对比发现离线集没覆盖的退化；③ 评测集持续积累，转人工报告持续回流当新样本；④ 评测集本身要 review 覆盖度（5M1E 各维度是否均衡）。但我不假装能消除 bias--只能持续扩大覆盖、用多来源对冲、用在线信号兜底。
 
-**Q：recursion_limit 命中转人工，但万一是真复杂问题需要更多步呢？你把真复杂的也转人了。**
-A：区分"模型死循环"和"真复杂"。看三个信号：① 工具调用模式--是否反复查同一上下文（漂移信号 §11.1），反复查=死循环不是真复杂；② token 成本--是否在烧钱却没收敛；③ 工具成功率--是否大量失败。真复杂 case 本就该转人--AI 不该硬撑，MES 防错就是"宁可让人判"。recursion_limit 是兜底防失控，不是追求"AI 一定要自己搞定"。🔴 阈值需线上调参平衡误杀和烧钱。
+**Q：步数预算命中转人工，但万一是真复杂问题需要更多步呢？你把真复杂的也转人了。**
+A：区分"模型死循环"和"真复杂"。看三个信号：① 工具调用模式--是否反复查同一上下文（漂移信号 §11.1），反复查=死循环不是真复杂；② token 成本--是否在烧钱却没收敛；③ 工具成功率--是否大量失败。真复杂 case 本就该转人--AI 不该硬撑，MES 防错就是"宁可让人判"。步数与工具调用预算上限是兜底防失控，不是追求"AI 一定要自己搞定"。🔴 阈值需线上调参平衡误杀和烧钱。
 
 **Q：token 成本告警了，但准确率不能降，你怎么权衡？降本和保准冲突时选哪个？**
-A：准确率优先。成本是 P3 趋势信号，准确率回归是发版门禁（更高优先级）--不能为省钱牺牲准确率。但可以分"必要成本"和"浪费成本"：必要的（查够证据得出结论）不能砍，浪费的（提示词啰嗦、模型重复输出、死循环重试）要砍。手段：优化 prompt 长度、简单 case 用代码节点不调 LLM（编排能力的 CODE 节点）、recursion_limit 兜底、按场景选模型档位。本质是"该花的钱花、不该花的省"，不是一刀切降本。
+A：准确率优先。成本是 P3 趋势信号，准确率回归是发版门禁（更高优先级）--不能为省钱牺牲准确率。但可以分"必要成本"和"浪费成本"：必要的（查够证据得出结论）不能砍，浪费的（提示词啰嗦、模型重复输出、死循环重试）要砍。手段：优化 prompt 长度、简单 case 用代码节点不调 LLM（编排能力的 CODE 节点）、步数与工具调用预算上限兜底、按场景选模型档位。本质是"该花的钱花、不该花的省"，不是一刀切降本。
 
 **Q：编排能力换线全程 PASS 时 LLM 为 0，但万一代码节点有 bug 误判 PASS，放行了不良品呢？AI 没介入反而出事了。**
-A：这正是 `node_type` 区分的价值--CODE 节点不是黑盒，它的执行也落 `node_trace`（node_type=CODE），可回溯。代码节点 bug 出事了能查到是哪个节点哪次执行判错的。而且 编排能力的**真正放行动作（推放行卡）过 confirmation gate**--代码节点判定 PASS 和物理放行之间还有 gate，写工具未带有效 token 会被 WriteToolGate 拒（P0 告警）。所以"代码节点判定"和"物理放行"是两层，中间有 gate 兜底。代码节点 bug 是代码质量问题靠测试/回归守，不是靠 AI 兜--把 AI 当代码 bug 的兜底是错配。
+A：这正是 `node_type` 区分的价值--CODE 节点不是黑盒，它的执行也落 `node_trace`（node_type=CODE），可回溯。代码节点 bug 出事了能查到是哪个节点哪次执行判错的。而且 编排能力的**真正放行动作（推放行卡）过 Permission gate**--代码节点判定 PASS 和物理放行之间还有 gate，写工具未带有效确认凭证会被 Permission 拒（P0 告警）。所以"代码节点判定"和"物理放行"是两层，中间有 gate 兜底。代码节点 bug 是代码质量问题靠测试/回归守，不是靠 AI 兜--把 AI 当代码 bug 的兜底是错配。
 
 **Q：跨租户共享评测案例库，但运行时 trace 严格租户隔离，不矛盾吗？**
 A：不矛盾，是两个层面。评测数据是**知识资产**（脱敏后的不良案例），跨租户共享让所有车间都能从一个案例库学习，提升评测覆盖；运行时观测数据是**数据安全**（trace/报告/工具调用），严格按租户隔离，A 车间查不到 B 车间 trace。脱敏是桥梁--真实案例脱敏后失去租户归属才能共享。🔴 是否可跨租户共享待合规确认，但设计上"评测数据脱敏共享 + 运行时数据严格隔离"是不矛盾的分层。
@@ -360,7 +360,7 @@ A：不是过度，是 LLM 已知缺陷的必要应对。RLHF 后的模型系统
 ## 7. 设计权衡题（考架构判断力）
 
 **Q：为什么选 OpenTelemetry 不自己造埋点框架？**
-A：标准 + 跨语言 + 生态。OTel 是 CNCF 标准，httpx instrumentation 自动注入 traceparent，Java 侧 Spring OTel agent 能续接同一 trace--自己造的做不到跨语言互通。生态成熟（Collector/Tempo/Prometheus/Grafana 都原生支持）。而且 OTel 不锁定后端，trace 后端 Tempo/Jaeger 可换。自己造的成本高、没人续接、锁死。除非有极特殊需求，标准方案永远优先。
+A：标准 + 跨语言 + 生态。OTel 是 CNCF 标准，`TracingMiddleware` 在工具出站时注入 traceparent，Java 侧 Spring OTel agent 能续接同一 trace--自己造的做不到跨语言互通。生态成熟（Collector/Tempo/Prometheus/Grafana 都原生支持）。而且 OTel 不锁定后端，trace 后端 Tempo/Jaeger 可换。自己造的成本高、没人续接、锁死。除非有极特殊需求，标准方案永远优先。
 
 **Q：为什么 trace 既落 Tempo 又落 MySQL，不只用一个？**
 A：受众和查询模式不同。Tempo 是时序 trace 存储，擅长 span 树查询、火焰图、按 trace_id 检索，给 SRE；MySQL 平铺表擅长按 session_id/hypothesis/tenant 关联业务字段做工程师 UI 的证据下钻。如果只用 Tempo，工程师 UI 要跨 Tempo + 业务库 join，慢且复杂；只用 MySQL，丢了 span 树的层次结构和 SRE 火焰图。两套并存、同源（trace_id 串）、各服务各受众，是受众驱动的双投影，不是冗余。
@@ -391,10 +391,10 @@ A：两个维度。git diff 是**开发时**的版本控制（谁改了什么）
 | 观测分层 | **5 层**（L0 基础设施 / 链路 / 指标 / 业务视图 / L4 评测质量） | [可观测方案](../AGENT服务/Agent可观测性-设计与实现方案.md) §3.1 |
 | 共用底座 | 诊断型 / 草稿型 / 流程编排型 **三 Agent 共用** | §定位 |
 | 技术栈 | OpenTelemetry Python + prometheus-client + 结构化日志（JSON） | §定位 |
-| 通用指标 | 14 个（session/tool/llm/token/cost/low_confidence/recursion/schema_error 等） | §5.2 |
+| 通用指标 | 14 个（session/tool/llm/token/cost/low_confidence/步数预算/schema_error 等） | §5.2 |
 | 草稿能力专属指标 | 7 个（draft_total/adoption/rejected/active_trigger/acl_error 等） | §5.2 |
 | 编排能力专属指标 | 9 个（node_total/llm_invocation/gate_decision/suspended/write_rejected 等） | §5.2 |
-| SLI/SLO | 7 项（会话 P99 / 工具错误率 / schema 失败率 / 递归命中 / 转人工突增 / 成本漂移 / 写工具被拦） | §5.4 |
+| SLI/SLO | 7 项（会话 P99 / 工具错误率 / schema 失败率 / 步数预算命中 / 转人工突增 / 成本漂移 / 写工具被拦） | §5.4 |
 | 兜底分支 | **11 类**全分支落观测 | §12 |
 | 观测表族 | 6 张（tool_call_trace / draft_trace / node_trace / llm_call_log / diagnosis_session / diagnosis_report） + eval_case/eval_run/drift_report | §7.1 / §13 |
 
@@ -405,7 +405,7 @@ A：两个维度。git diff 是**开发时**的版本控制（谁改了什么）
 | 会话 P99 延迟 | 诊断能力 ≤60s / 编排能力 ≤120s | §5.4 |
 | 工具调用错误率 | <1%（>5% 告警 P1） | §5.4 |
 | LLM schema 失败率 | <0.5%（>2% 告警 P2） | §5.4 |
-| 递归上限命中率 | <2%（>5% 告警 P2） | §5.4 |
+| 步数/工具调用预算命中率 | <2%（>5% 告警 P2） | §5.4 |
 | 低置信转人工 | 盯**突增**（同比 +50% 告警 P3），不盯上限 | §5.4 |
 | token/会话 P95 | 基线 ±20%（超 1.5× 告警 P3 成本漂移） | §5.4 |
 | 写工具被拦 | =0（任意 >0 告警 **P0**） | §5.4 |
@@ -421,7 +421,7 @@ A：两个维度。git diff 是**开发时**的版本控制（谁改了什么）
 | 可度量 | 14 通用 + 7 草稿能力 + 9 编排能力指标，7 项 SLI/SLO，P0~P3 分级告警 |
 | 可干预 | 三源融合置信度 + 标定 + 阈值转人工 + 11 类兜底矩阵全分支观测 |
 | 可回归 | 提示词即代码（prompt_version）+ EvalRunner 评测回归 + 在线影子评测 |
-| 可成本 | token/cost 指标 + 成本漂移检测 + recursion_limit 兜底 + "懂什么时候不用 AI" |
+| 可成本 | token/cost 指标 + 成本漂移检测 + 步数与工具调用预算兜底 + "懂什么时候不用 AI" |
 | 不反噬 | 只读旁路 + DIP 抽象 + 观测失败不阻断业务 + 不进过点主事务 + 租户隔离 |
 
 ---

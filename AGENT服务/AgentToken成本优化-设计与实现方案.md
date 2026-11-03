@@ -4,6 +4,10 @@
 > - **可观测性那篇解决"测得清"**：`agent_token_total` 计数、`agent_cost_usd_total` 估算、token/会话 P95 漂移告警（§8.2 / §11.3 / §19）。
 > - **本篇解决"降得下"**：在计量之上，把"钱花在哪、怎么省、省了不碰红线不降质量"系统化。
 > **与 编排能力的关系**：编排能力的"编排代码层 + 4 类 agent 能力"（[流程编排能力](FactoryAgent/FactoryAgent-流程编排能力.md) §0）已体现了最大的降本杠杆--**懂什么时候不用 AI**。本篇把这条杠杆系统化，并补齐 编排能力没展开的提示词层 / 缓存层 / 模型层 / 观测闭环降本手段。
+> **底座口径**：Agent 框架底座为 **AgentScope 2.0**（Python `>=3.12`）。成本侧的底座能力取框架公开的
+> `Offloader` / `ToolOffloadMiddleware`（上下文压缩与超大结果卸载）+ `Model` 抽象（provider 可插拔，分层路由的地基）；
+> 缓存标记、早停、预算拦截等由**本项目自定义 Middleware** 实现。文中 `ModelRouter` / `EvalGate` / `OffloadCompactPolicy`
+> 一类是本项目的内部封装命名，不代表框架 API；`llm_call_log` 的 token 口径统一取消息 `usage` 字段。
 > **口径纪律**：本篇讲的是**设计规划**，不是说"已落地降本 X%"。所有量化收益标记 🔴 待实测，绝不编业务效果数字。降本的前提是**不碰 MES 红线**（只读、不进过点、版本一致性、confirmation gate、证据不可空）--任何降本手段若牺牲这些，一律不做。
 
 ---
@@ -86,7 +90,7 @@
 | **提示词层** | 工具描述精简 + 动态工具集裁剪 | tool_definitions | capability 裁剪提了，阶段裁剪见 §6.2 | 中 |
 | **循环层** | 工具结果摘要 / 截断 / 字段裁剪 | history 累积 | **未提** §7.1 | 大（多步累积场景） |
 | **循环层** | 并行工具调用减少往返 | 步数 N | **未提** §7.2 | 中 |
-| **循环层** | 早停 / 收敛检测 + recursion_limit | 步数 N | recursion_limit 已有，早停见 §7.3 | 中 |
+| **循环层** | 早停 / 收敛检测 + 步数与工具调用预算上限 | 步数 N | 预算上限已有，早停见 §7.3 | 中 |
 | **缓存层** | 工具结果缓存（版本化） | 整次工具调用+其结果进历史 | 诊断能力 §9 提了 redis，见 §8.1 | 中 |
 | **缓存层** | 语义缓存（最终答案） | 整次会话归零 | **未提，MES 有风险** §8.2 | 中（谨慎） |
 | **输出层** | 结构化输出 + max_tokens | 输出 token | Pydantic/Enum 已有，见 §9 | 小 |
@@ -109,7 +113,7 @@
 | **自治** | 缓存层 | 这次的调用能不能整个跳过？ | 中--命中即归零，但有正确性风险 |
 | 闭环 | 观测驱动 | 省了之后怎么验证没退步、怎么持续找下一桶？ | 持续 |
 
-下面逐层展开实现细节与代码骨架。所有代码骨架与现有 [诊断能力 §7](FactoryAgent/FactoryAgent-诊断能力.md) / [可观测性 §8.4](Agent可观测性-设计与实现方案.md) 的抽象对齐：`ObservableChatModel`、`ToolDescriptor` / `ToolRegistry`、`ToolNode`、`ObservabilityPort`、`llm_factory`、`prompt_version`、`TenantContext`、`version_anchor`。
+下面逐层展开实现细节与代码骨架。所有代码骨架与现有 [诊断能力 §7](FactoryAgent/FactoryAgent-诊断能力.md) / [可观测性 §8.4](Agent可观测性-设计与实现方案.md) 的抽象对齐：AgentScope `Model` 抽象、`Toolkit` / `Tool`、`Offloader` / `ToolOffloadMiddleware`、自定义 Middleware 链（缓存标记 / 早停 / 预算拦截）、本项目的 `ObservabilityPort`、`prompt_version`、`TenantContext`、`version_anchor`。
 
 ---
 
@@ -117,9 +121,9 @@
 
 这是优先级最高、MES 场景下最该讲的杠杆。**一次调用都不发生，成本就是零**，比任何 prompt 优化都狠。
 
-### 4.1 代码节点不调 LLM（编排能力已落地，系统化重述）
+### 4.1 代码节点不调 LLM（编排能力的设计原则，系统化重述；**尚未落地**）
 
-[编排能力 §0](FactoryAgent/FactoryAgent-流程编排能力.md) 的核心判断："输入是否开放 / 是否需推理生成 / 分支是否难穷举"，三问皆否走代码节点。换线 5 步里编排、结构化比对、barrier、gate、写落库全是代码节点，**换线全程 PASS 时 `agent_llm_invocation_total=0`**。
+[编排能力 §0](FactoryAgent/FactoryAgent-流程编排能力.md) 的核心判断："输入是否开放 / 是否需推理生成 / 分支是否难穷举"，三问皆否走代码节点（**三问判定是本仓库自有判据，官方文档没有给出何时该拆/何时该用 Agent 的量化标准**）。换线 5 步里编排、结构化比对、barrier、gate、写落库全是代码节点，**设计目标：换线全程 PASS 时 `agent_llm_invocation_total=0`**（指标尚未埋点）。
 
 降本视角的补充：
 - 代码节点不只是"防越界"，它同时是**最大的降本手段**--把它单列出来强调，体现你懂"架构降本 > 提示词降本"。
@@ -142,6 +146,7 @@
 - **收益**：大量"查一下某工单状态""这条 SOP 怎么写"的简单问题，本不需要 ReAct 多步推理。Router 把它们直送 RAG 单次回答，省掉"系统提示+工具定义"的 N 次重发。
 - **Router 用便宜的**：分类器用小模型（如 Haiku / DeepSeek / 本地小模型）甚至规则 + embedding 相似度，单次成本远低于跑一遍 ReAct。
 - **MES 约束**：Router 不做写动作、不进过点；它只是个只读分发器。误路由最坏是"简单问题走了 Agent 多绕几步"或"复杂问题直答不够深"--前者浪费钱，后者降体验，都不碰红线。
+- **口径澄清**：这个 Router 是**本仓库自建的普通分发函数/分类器**（框架侧只有 `classifier` + 模型路由这一用途的入口），**AgentScope 2.0 从未提供 `Handoffs` / `Routing` 移交原语**。真实落地形态：分诊 = 单 Agent 的 ReAct + `Toolkit` 工具选择；跨能力委托 = **显式服务调用**，传 `evidence_set_id` / `session_id` / `traceparent`，不是框架级 agent 移交。
 
 ### 4.3 离线预处理：能预计算的不放实时路径
 
@@ -153,7 +158,7 @@ RAG 路线 D 防错即时辅助（已 descoped） 的思路：过点时刻靠**�
 
 ### 5.1 思路
 
-现有 `llm_factory` 已支持模型可插拔（[诊断能力 §2.1](FactoryAgent/FactoryAgent-诊断能力.md)）。降本视角进一步：**不是全会话用一个模型，而是按"能力 / 阶段"分派不同规格模型**。
+现有 AgentScope **`Model` 抽象**已支持 provider 可插拔（[诊断能力 §2.1](FactoryAgent/FactoryAgent-诊断能力.md)）。降本视角进一步：**不是全会话用一个模型，而是按"能力 / 阶段"分派不同规格模型**。
 
 | 任务 | 模型规格 | 理由 |
 |------|---------|------|
@@ -164,9 +169,9 @@ RAG 路线 D 防错即时辅助（已 descoped） 的思路：过点时刻靠**�
 | 工具调用的"下一步查什么"决策 | 中 | ReAct 的 tool selection |
 | 结构化报告收口 | 中 | 按 schema 收口，Enum 约束 |
 
-### 5.2 实现：ModelRouter + 评测门禁
+### 5.2 实现：`Model` 抽象之上的分层路由 + 评测门禁
 
-模型路由不是拍脑袋配的，是**评测背书**的：某能力只有过 `EvalRunner` 证明小模型质量不退（准确率 / 校准误差达标），才允许从大模型降级到小模型。
+模型路由不是拍脑袋配的，是**评测背书**的：某能力只有过 `EvalRunner` 证明小模型质量不退（准确率 / 校准误差达标），才允许从大模型降级到小模型。路由本身落在框架的 `Model` 抽象上（provider 可插拔），`ModelRouter` / `EvalGate` 是本项目的分层路由与门禁封装，非框架 API。
 
 ```python
 # app/infrastructure/ai/model_router.py
@@ -244,37 +249,38 @@ Anthropic / 部分国产模型的 prompt caching：把一段稳定前缀（syste
 
 对 ReAct 循环：system prompt + 工具定义在整会话内**完全不变**，天然适合缓存。N 步会话里，这块从"发 N 次全价"变成"写 1 次 + 读 N-1 次缓存价"，输入成本大幅下降。
 
-#### 6.1.2 实现：在 ObservableChatModel 上加缓存标记
+#### 6.1.2 实现：在模型调用的 Middleware 链上加缓存标记
 
-现有 `ObservableChatModel`（[可观测性 §8.4](Agent可观测性-设计与实现方案.md)）是所有 provider 调用的统一包装层。缓存标记加在这里，provider 无关、业务无感：
+现有 `ModelObsMiddleware`（[可观测性 §8.4](Agent可观测性-设计与实现方案.md)）是所有 provider 调用的统一观测段，它插在 AgentScope `Model` 抽象的调用链上。缓存标记同样加在这条 Middleware 链上，provider 无关、业务无感：
 
 ```python
-# app/infrastructure/obs/llm_obs.py（扩展现有 ObservableChatModel）
-class ObservableChatModel(BaseChatModel):
-    def __init__(self, inner, obs, model_name, prompt_version,
-                 cache_control: CacheControl | None = None) -> None:
-        self._inner = inner
+# app/infrastructure/obs/llm_obs.py（与 ModelObsMiddleware 同链的自定义段）
+class CacheMarkMiddleware:
+    """本项目的缓存标记 Middleware：插在 `Model` 调用链上，给稳定前缀打 provider 缓存标记并归因收益。
+    （方法签名是本项目内部封装命名，非框架 API。）"""
+
+    def __init__(self, cache_control: CacheControl, obs: ObservabilityPort,
+                 model_name: str, prompt_version: str) -> None:
+        self._cache_control = cache_control   # None = 不启用缓存
         self._obs = obs
         self._model = model_name
         self._prompt_version = prompt_version
-        self._cache_control = cache_control   # None = 不启用缓存
 
-    async def _agenerate(self, messages, **kw):
+    async def on_model_call(self, next_call, messages, **kw):
         # 1. 注入 cache_control 到稳定的系统前缀块
-        if self._cache_control:
-            messages = self._cache_control.apply(messages)
+        messages = self._cache_control.apply(messages)
         t0 = time.perf_counter()
-        resp = await self._inner._agenerate(messages, **kw)
+        resp = await next_call(messages, **kw)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         # 2. 观测：分别记录 cache 命中/未命中的 token，归因降本收益
-        usage = resp.usage_metadata
+        usage = resp.usage                                   # 消息自带 usage（框架能力）
         self._obs.llm_called(
             model=self._model, prompt_version=self._prompt_version,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            cache_read_tokens=getattr(usage, "cache_read_tokens", 0),    # 新增
-            cache_write_tokens=getattr(usage, "cache_creation_tokens", 0),  # 新增
-            latency_ms=latency_ms, finish_reason=resp.response.finish_reason,
+            prompt_tokens=usage.input_tokens,
+            completion_tokens=usage.output_tokens,
+            cache_read_tokens=getattr(usage, "cache_read_tokens", 0),      # 新增
+            cache_write_tokens=getattr(usage, "cache_creation_tokens", 0), # 新增
+            latency_ms=latency_ms, finish_reason=resp.finish_reason,
         )
         return resp
 ```
@@ -282,7 +288,8 @@ class ObservableChatModel(BaseChatModel):
 ```python
 # app/infrastructure/ai/cache_control.py
 class CacheControl:
-    """把 system prompt + 工具定义标记为可缓存前缀。provider 适配在此收敛。"""
+    """把 system prompt + 工具定义标记为可缓存前缀。provider 适配在此收敛
+    （provider 侧缓存标记的数据形状，非框架 API）。"""
 
     def __init__(self, enabled: bool, ttl: str = "5m") -> None:
         self._enabled = enabled
@@ -362,14 +369,15 @@ few-shot 示例很贵（占输入 token 大头之一），且会被缓存（若�
 
 ReAct 第 k 步的输入要带前 k-1 步的全部工具结果。若工具返回大 JSON（如 `query_pass_records` 返回 100 条过点记录、`query_device_params` 返回长时序），history 二次放大。模型其实只需要其中的关键字段。
 
-#### 7.1.2 实现：ResultCompactor（喂模型摘要，落 trace 全文）
+#### 7.1.2 实现：`Offloader` / `ToolOffloadMiddleware`（喂模型摘要，落 trace 全文）
 
 关键设计：**模型看到的是摘要，`tool_call_trace` 落的是全文**--证据链不丢，红线不碰。
+超大结果的卸载与"回灌前替换为摘要"由框架的 `Offloader` + `ToolOffloadMiddleware` 承载；具体裁哪些字段、截多长是**本项目的压缩策略**（`OffloadCompactPolicy`，非框架 API）。
 
 ```python
-# app/infrastructure/ai/result_compactor.py
-class ResultCompactor:
-    """工具结果回灌前的压缩：字段裁剪 + 列表截断 + 摘要。喂模型的是压缩版，trace 落全文。"""
+# app/infrastructure/ai/offload_policy.py（本项目压缩策略，由 Offloader / ToolOffloadMiddleware 调用）
+class OffloadCompactPolicy:
+    """工具结果回灌前的压缩规则：字段裁剪 + 列表截断 + 摘要。喂模型的是压缩版，trace 落全文。"""
 
     def __init__(self, rules: dict) -> None:
         # rules: {tool_name: {keep_fields: [...], max_list: 20, summarize: bool}}
@@ -389,27 +397,25 @@ class ResultCompactor:
 ```
 
 ```python
-# app/infrastructure/ai/tool_node.py（修订现有 ToolNode：落全文，喂摘要）
-class ToolNode:
+# app/infrastructure/obs/tool_obs.py（与可观测性 §14.3 同一段：落全文，喂摘要）
+class ToolObsMiddleware:
     def __init__(self, registry, trace_repo, obs: ObservabilityPort,
-                 compactor: ResultCompactor) -> None:
+                 policy: OffloadCompactPolicy) -> None:
         self._registry = registry
         self._trace_repo = trace_repo
         self._obs = obs
-        self._compactor = compactor
+        self._policy = policy
 
-    async def __call__(self, state: AgentState) -> AgentState:
-        for call in state["pending_tool_calls"]:
-            # ... 权限校验、执行（同现有实现）...
-            view = await tool.handler(**args.model_dump(), tenant=obs_ctx.tenant)
-            # 1. trace 落全文（证据链完整，红线）
-            await self._trace_repo.save_ok(call["name"], tool.bounded_context,
-                                           args, view, latency_ms, obs_ctx)
-            # 2. 喂模型的是压缩版（降本）
-            compacted = self._compactor.compact_for_llm(tool.name, view)
-            results.append(self._ok_result(call, compacted))
-        state["tool_results"] = results
-        return state
+    async def on_tool_call(self, call: dict, obs_ctx: ObservabilityContext) -> dict:
+        tool = self._registry.get(call["name"])
+        # ... Permission 判定、租户校验、执行（同现有实现）...
+        view = await tool.handler(**args.model_dump(), tenant=obs_ctx.tenant)
+        # 1. trace 落全文（证据链完整，红线）
+        await self._trace_repo.save_ok(call["name"], tool.bounded_context,
+                                       args, view, latency_ms, obs_ctx)
+        # 2. 喂模型的是压缩版（降本）；整包超大结果交给 Offloader 卸载，历史里只留引用
+        compacted = self._policy.compact_for_llm(tool.name, view)
+        return self._ok_result(call, compacted)
 ```
 
 #### 7.1.3 MES 约束
@@ -422,26 +428,26 @@ class ToolNode:
 
 #### 7.2.1 原理
 
-ReAct 每次往返（model -> tool -> model）都要重发整个上下文。若模型一次产出**多个独立 tool call**，LangGraph 的 `ToolNode` 并行执行后一次性回灌，就把"3 次往返"压成"1 次往返"--省掉 2 次"系统提示+历史"的重发。
+ReAct 每次往返（model -> tool -> model）都要重发整个上下文。若模型一次产出**多个独立 tool call**，统一 `Agent` 类的内置 ReAct 会把它们一并执行后一次性回灌，就把"3 次往返"压成"1 次往返"--省掉 2 次"系统提示+历史"的重发。
 
 诊断里"查同批次锡膏 + 查贴片机参数"是独立的，本就可并行（[诊断能力 §5.1](FactoryAgent/FactoryAgent-诊断能力.md) 第 3 步同时查两个）。
 
 #### 7.2.2 实现
 
-- LangGraph 的 `ToolNode` 已原生支持一次执行多个 tool call 并行（`asyncio.gather`）。**只需在 system prompt 里明确鼓励**："对相互独立的查询，一次性发起多个工具调用，不要串行等待。"
+- 一次执行多个 tool call 由框架的 `Toolkit` / `Agent` 内置 ReAct 承载，本项目不再自己写并发分发。**只需在 system prompt 里明确鼓励**："对相互独立的查询，一次性发起多个工具调用，不要串行等待。"
 - 这是**纯提示词侧 + 框架已支持**的改动，零基础设施成本。
 - 观测验证：`agent_tool_call_total` 不变，但 `agent_llm_invocation_total`（往返次数）下降--用这个比值量化并行度收益。
 
 #### 7.2.3 约束
 
 - 只对**独立**的工具调用并行。有依赖的（先查过点拿 routeVersion，再查工艺）必须串行--模型需自行判断依赖，提示词里讲清"有数据依赖时仍串行"。
-- 并行调用受 `ToolNode` 的权限过滤与 `route_version` 校验约束不变，红线不因并行而松动。
+- 并行调用受 `Toolkit` 工具执行处的 `Permission` 判定与 `route_version` 校验约束不变，红线不因并行而松动。
 
 ### 7.3 早停 / 收敛检测
 
-#### 7.3.1 recursion_limit（已有，硬兜底）
+#### 7.3.1 步数与工具调用预算上限（硬兜底）
 
-`recursion_limit=20`（[诊断能力 §5.1](FactoryAgent/FactoryAgent-诊断能力.md)）是硬上限，从根上限死单会话 token 上限。这是"防失控"的兜底，不是"省着用"的优化。
+**步数与工具调用预算上限 = 20**（[诊断能力 §5.1](FactoryAgent/FactoryAgent-诊断能力.md)）是硬上限，从根上限死单会话 token 上限。这是"防失控"的兜底，不是"省着用"的优化。它是本项目的预算约束（Agent 的 ReAct 循环按预算停止），**不是框架提供的开关名**。
 
 #### 7.3.2 早停：够了就收口
 
@@ -611,7 +617,7 @@ MES 追溯的"正确答案"**会随后续数据变化**：
 
 ### 10.4 限流（防失控烧钱）
 
-- **每会话**：`recursion_limit`（已有）限步数 = 限单会话 token 上限。
+- **每会话**：步数与工具调用预算上限（20）限步数 = 限单会话 token 上限。
 - **每租户**：redis 信号量限并发会话数（[诊断能力 §9 阶段五](FactoryAgent/FactoryAgent-诊断能力.md) 已提）。
 - **每日预算**：🔴 可选，按租户设日 token 预算，超限降级（如关闭主动巡检触发、Router 强制走 RAG 直答）。这是"硬省钱"开关，防止异常情况烧爆。
 
@@ -677,7 +683,7 @@ llm_call_log
 
 ### 阶段三：循环层 + 缓存层
 
-8. `ResultCompactor` 接入 `ToolNode`（§7.1）：trace 落全文、模型喂摘要，先对大返回工具（过点记录 / 设备遥测）配规则。
+8. `ResultCompactor` 接入工具执行节点（本项目在 `Toolkit` 工具执行处的封装，§7.1）：trace 落全文、模型喂摘要，先对大返回工具（过点记录 / 设备遥测）配规则。
 9. system prompt 鼓励并行 tool call（§7.2），量 `agent_llm_invocation_total` 下降。
 10. `EarlyStopDetector`（§7.3）：冗余检测 + 模型自评收口，触发转人工不硬答。
 11. `ToolResultCache`（§8.1）：先缓存工艺路线（版本不可变，最安全），再灰度批次台账。
@@ -703,7 +709,7 @@ llm_call_log
 - [ ] 早停触发转人工（`needs_human_review`），不直接出报告硬答。
 - [ ] 语义缓存默认关闭；开启仅限时变性不敏感场景，追溯 / 根因 / 实时状态禁用。
 - [ ] `llm_call_log` 记 `cache_read/write_tokens` / `capability` / `phase`，降本收益按 lever 可归因。
-- [ ] `recursion_limit` / 每租户并发上限 / 日预算（可选）形成"步数 + 并发 + 预算"三闸门。
+- [ ] 步数与工具调用预算上限（20）/ 每租户并发上限 / 日预算（可选）形成"步数 + 并发 + 预算"三闸门。
 - [ ] 量化收益标 🔴 待实测，不编"已降本 X%"的业务效果数字。
 
 ---

@@ -4,7 +4,7 @@
 
 > 适用范围：本文用于说明业务事件消息处理中的 Kafka Topic 命名、分区键、Producer/Consumer 可靠性参数、事件 Header、DLT、可靠性边界与检查项。
 >
-> Kafka broker、Spring Kafka 基础连接、默认 Producer/Consumer、错误处理器等项目级初始化配置，见《[../Kafka配置说明](../Kafka配置说明.md)》。
+> Kafka broker、Spring Kafka 基础连接、默认 Producer/Consumer、错误处理器等项目级初始化配置，见《[../基础设施/Kafka配置说明](../基础设施/Kafka配置说明.md)》。
 
 ---
 

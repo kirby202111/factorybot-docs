@@ -2,7 +2,7 @@
 
 > 适用范围：本文是项目初始化后的 Kafka 与 Spring Kafka 统一配置说明，仅描述项目级基础设施配置，不包含具体业务 Topic、业务事件 Header、Outbox、消费幂等、DLT 业务处理等实现细节。
 >
-> 业务事件相关的 Topic 命名、分区键、Producer/Consumer 可靠性参数、事件 Header、DLT 与 Outbox 可靠性边界，见《[业务事件/Kafka配置说明](业务事件/Kafka配置说明.md)》。
+> 业务事件相关的 Topic 命名、分区键、Producer/Consumer 可靠性参数、事件 Header、DLT 与 Outbox 可靠性边界，见《[../业务事件/Kafka配置说明](../业务事件/Kafka配置说明.md)》。
 
 ---
 

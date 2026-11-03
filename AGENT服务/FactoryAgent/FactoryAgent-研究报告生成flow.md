@@ -1,7 +1,7 @@
-# FactoryAgent —— 研究报告生成子图（Research Report）定义与实现方案
+# FactoryAgent —— 研究报告生成 flow（应用层代码）（Research Report）定义与实现方案
 
-> **本文定位**：定义**图形态⑤ `research_report`**——"复杂研究报告生成"这一类需求的运行时形态。回答五件事：它与 RCA 取证的分工、五段链路里到底哪里需要 LLM、数字与口径如何保证不出错、子 Agent 该在哪一层才出现、以及什么条件下**不该**用这条链路。
-> **与既有文档的关系**：[中心化聚合子图](FactoryAgent-中心化聚合子图.md)（下称"聚合篇"）给出图形态④ `fanout_aggregate` 的完整定义，本文的**取证段直接复用它的实现与契约**，只增量定义"取证之后"的分析、叙事、校验三段；[单运行时三能力架构](FactoryAgent-单运行时三能力架构.md) 给能力矩阵、十条硬约束、启动断言与可拆分性；[总体设计与实现方案](FactoryAgent-总体设计与实现方案.md) §7 给包结构。多 Agent 的必要性判据以 [哪些场景真正需要 Multi-Agent 系统](../哪些场景真正需要Multi-Agent系统.md) 与 [Multi-Agent 必要性复核](../Multi-Agent必要性-独立复核与批判.md) 的三条硬判据（C1' / C3' / C8）+ 成本闸门为准，业务场景以 [车间 MES 的 Multi-Agent 真实业务场景详解](../车间MES的Multi-Agent真实业务场景详解.md) 为准。
+> **本文定位**：定义**运行时形态⑤ `research_report`**——"复杂研究报告生成"这一类需求的运行时形态。回答五件事：它与 RCA 取证的分工、五段链路里到底哪里需要 LLM、数字与口径如何保证不出错、子 Agent 该在哪一层才出现、以及什么条件下**不该**用这条链路。
+> **与既有文档的关系**：[中心化校验的 fan-in 归并（应用层代码）](FactoryAgent-中心化聚合flow.md)（下称"聚合篇"）给出运行时形态④ `fanout_aggregate` 的完整定义，本文的**取证段直接复用它的实现与契约**，只增量定义"取证之后"的分析、叙事、校验三段；[单运行时三能力架构](FactoryAgent-单运行时三能力架构.md) 给能力矩阵、十条硬约束、启动断言与可拆分性；[总体设计与实现方案](FactoryAgent-总体设计与实现方案.md) §7 给包结构。多 Agent 的必要性判据以 [哪些场景真正需要 Multi-Agent 系统](../哪些场景真正需要Multi-Agent系统.md) 与 [Multi-Agent 必要性复核](../Multi-Agent必要性-独立复核与批判.md) 的三条硬判据（C1' / C3' / C8）+ 成本闸门为准，业务场景以 [车间 MES 的 Multi-Agent 真实业务场景详解](../车间MES的Multi-Agent真实业务场景详解.md) 为准。
 > **口径纪律**：本文是**设计定义**，不声明"已上线"；文中数字均为**目标示例值**，用于说明该衡量什么，不是行业基准。文中"子 Agent"一律指**同进程内的短命子会话**，不是独立部署的智能体。
 > **本文不覆盖**：RCA 的假设生成与红队机制（见聚合篇与场景详解场景二）；写操作与处置决策（保持单线程，回编排 gate 或草稿 confirmation）。
 
@@ -9,13 +9,13 @@
 
 ## 0. 要点结论
 
-1. **报告不是"又一个 Agent"，是一个能力条目 + 一段图**：取证段复用图形态④的实现与 `EvidencePack` 契约，只增量分析、叙事、校验三段。`AgentRuntime` / `ToolRegistry` / `ToolPolicyGate` / checkpointer / trace 零改动。
+1. **报告不是"又一个 Agent"，是一个能力条目 + 一段应用层 flow 代码**：取证段复用运行时形态④的实现与 `EvidencePack` 契约，只增量分析、叙事、校验三段。`AgentRuntime` / `Toolkit` / `Permission` / `SessionService` / trace 零改动。
 2. **报告是覆盖驱动，RCA 是搜索驱动**：报告的章节由模板**枚举**出来，RCA 的分支由现象**搜索**出来。两者的多 Agent 部分是同一套机制，区别在它外面包了什么。
 3. **LLM 只出现在三处**：开放文本 → `report_type` 的受限分类、正文叙事、校验环节的合规判断。**取证路径、数字计算、排序、join 全部是代码。**
 4. **数字不出自模型**：模板槽位 + `MetricItem` 注入，模型只写叙述骨架。幻觉面从"数字"收窄到"措辞"——数字错了没人能看出来，措辞错了人能一眼看出。
 5. **口径是数据，不是代码**：口径注册表 + 版本化 + owner。查不到已注册口径就写 `gaps(UNDEFINED_CALIBER)`，**不许现场编一个**。
 6. **报告不能分章并行**：报告是强一致性文档，并行分章必然导致摘要与正文、结论与数字、前后章节口径互不一致。
-7. **并发 ≠ 子 Agent**：多个数据源要快，用 `asyncio.gather` 直调 tool（0 token、200ms 级）；子会话是**上下文隔离**手段，与并发正交。
+7. **并发 ≠ 子会话**：多个数据源要快，用 `asyncio.gather` 并发各自独立的 `Agent.reply()` / 直调 tool（0 token、200ms 级；框架的 `fanout` 协同原语已删除，不存在"交给框架"这个选项）；子会话是**上下文隔离**手段，与并发正交。各取证分支只读同一份 `evidence_set_id`，**彼此不看对方的中间结论**——扇出式互看会放大错误（无中心校验 17.2× vs 中心化 4.4×）。
 8. **子 Agent 只在四层解法的最后一层**：工具聚合 → 引用式返回 → reducer 节点 → 子会话。前三层不花 LLM token，覆盖 90% 的结构化数据。
 9. **唯一的质量收益来自校验**：校验方必须能用**另一条路径**把数字重算一遍（命中 C8）。其余收益只有覆盖、压缩、延迟三项。
 10. **评测前五项全自动**：数字一致性、引用覆盖率、口径版本、覆盖完整性、结论方向——意味着每次改动都能跑全量回归。这是报告类能工程化、RCA 不能的根本区别。
@@ -26,7 +26,7 @@
 
 ### 1.1 与 RCA 取证的分工
 
-| 维度 | RCA 取证（图形态④，假设驱动） | 研究报告（图形态⑤，覆盖驱动） |
+| 维度 | RCA 取证（运行时形态④，假设驱动） | 研究报告（运行时形态⑤，覆盖驱动） |
 |---|---|---|
 | 触发 | 事件驱动（不良率突增） | 周期或请求驱动（月报、季度复盘、8D 材料） |
 | 终态产物 | 一个判断：根因排序 + 影响面 | 一份文档：叙述 + 数字 + 建议 |
@@ -44,30 +44,30 @@
 
 > 补充：RCA 场景里其实混了两种模式——"根因"部分是假设驱动，"影响面五级清点"部分是覆盖驱动。**报告生成天然同构于后者**，这也是它比 RCA 更容易做对、更容易评测的原因。
 
-### 1.2 它不是"第五种 Agent"，是一段组合图
+### 1.2 它不是"第五种 Agent"，是一段组合 flow
 
 ```text
 L1 运行时 Runtime（零改动）
         │
-        ▼ 按 capability key 取：spec + graph + tool 切片
+        ▼ 按 capability key 取：spec + flow 步骤/能力节点 + tool 切片
 L2 能力条目（新增一条）
-   diagnosis(open_react)  drafting(fixed_chain)  orchestration(supervisor)
+   diagnosis(open_react)  drafting(fixed_chain)  orchestration(flow_code)
    aggregate(fanout_aggregate)  report(research_report) ← 本文：只读取证 + 分析 + 叙事 + 校验
         │
         ▼
-L3 图形态⑤ research_report
-   取证段 = 图形态④的实现（原样复用）
+L3 运行时形态⑤ research_report
+   取证段 = 运行时形态④的实现（原样复用）
    分析/叙事/校验段 = 一段 fixed_chain
 ```
 
-**关于 `GraphShape` 枚举是否新增值**：语义上它是"④ + fixed_chain"的组合，实现上建议**新增 `RESEARCH_REPORT` 标签**，以满足"`graphs` 启动时按能力装配一次、运行时只按 key 取图"的纪律（聚合篇 §1）。图内部由两个子图拼接，启动断言按子图逐段检查；不新增进程、不新增协议。
+**关于 `FlowShape` 枚举是否新增值**：语义上它是"④ + fixed_chain"的组合，实现上建议**新增 `RESEARCH_REPORT` 标签**，以满足"`flows` 启动时按能力装配一次、运行时只按 key 取 flow 步骤 / 能力节点"的纪律（聚合篇 §1）。该 flow 内部由两段（取证段 + 固定链段）拼接，启动断言按段逐段检查；不新增进程、不新增协议。
 
 ### 1.3 为什么"5 个子任务"式的计划编排是反模式
 
 常见的产品叙事是这样：
 
 ```text
-用户提问 → Plan 模式自动创建 5 个子任务
+用户提问 → 任务清单工具（`TaskCreate`/`TaskList`/`TaskUpdate`）自动创建 5 个子任务
   ① 调数据平台 API 取同行数据
   ② 知识库检索我方历史策略
   ③ 调数据分析子 Agent 做多维对比
@@ -89,7 +89,7 @@ L3 图形态⑤ research_report
 
 **如果做成 5 个 Agent 串行**：成本上升一个数量级，可靠性反而下降——单步 95% 可靠时，5 步链整体约 77%，10 步约 60%。这是"看起来像多 Agent 架构、实际是劣化的单 Agent 流程"的典型。
 
-**同样禁止"Plan 由 LLM 自由生成"**：同一份数据两次跑出不同结构的报告，在质量与合规场景不可交付（审核人无法比对、无法归档、无法追责）。`plan` 必须是**映射表**（见 §3.2）。
+**同样禁止"`plan` 步骤由 LLM 自由生成"**：同一份数据两次跑出不同结构的报告，在质量与合规场景不可交付（审核人无法比对、无法归档、无法追责）。`plan` 必须是**映射表**（见 §3.2）。注意框架没有独立"Plan 模块"——规划就是 `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate` 四个工具写进 `Task`/`TaskContext`（挂在 `AgentState` 上），长链路的持久规划归工作流引擎。
 
 ---
 
@@ -106,9 +106,9 @@ L3 图形态⑤ research_report
 
 ---
 
-## 3. 图
+## 3. flow 步骤序列
 
-### 3.1 图
+### 3.1 步骤序列
 
 ```text
 invoke("report", payload, tenant, parent_session_id=?)     ← 复用唯一入口
@@ -117,9 +117,9 @@ invoke("report", payload, tenant, parent_session_id=?)     ← 复用唯一入�
   ├─[CODE] classify    自然语言 → report_type + 锚点(产线/工序/时间段/产品族)   ★ 受限分类
   ├─[CODE] plan        ReportSpec → 章节清单 + 必备数据槽位                      ★ 映射表，非 LLM 规划
   │
-  ├─═════ 第一段：取证（复用图形态④，不改契约）═════
+  ├─═════ 第一段：取证（复用运行时形态④，不改契约）═════
   │   ├─[CODE] probe        每路一次 count / 覆盖期探测
-  │   ├─[CODE] fan_out      只对命中路径并发取证
+  │   ├─[CODE] fan_out      只对命中路径并发取证（`asyncio.gather`，各自独立 `Agent.reply()`）
   │   │     ├─ 路径确定的源  → asyncio.gather 直调 tool（不建 session）
   │   │     ├─ 需要语义压缩的源 → 子会话（role=FACT/CONDITION/MATERIAL/INSPECTION/ACTION/DOC）
   │   │     └─ 每路只回 EvidencePack
@@ -158,7 +158,7 @@ invoke("report", payload, tenant, parent_session_id=?)     ← 复用唯一入�
 
 | 位置 | 允许 / 禁止 | 形态 |
 |---|---|---|
-| 开放文本 → `report_type` + 锚点 | ✅ 允许 | `with_structured_output` 受限分类，枚举内选 |
+| 开放文本 → `report_type` + 锚点 | ✅ 允许 | **受限分类**（`Content Block` / Pydantic BaseModel 承载），枚举内选 |
 | 数据异常 → 归因 | ✅ 允许 | 输入只有 `MetricItem[]` 与 `gaps`，输出必须引用 `metric_id` |
 | 正文叙事 | ✅ 允许 | 单 Agent 顺序生成，只填模板槽位，不自造数字 |
 | 校验环节的合规判断 | ✅ 允许 | 对照条款库/规则库，输出必须回指条款编号 |
@@ -435,10 +435,10 @@ if len(rows) > max_rows:
 ### 8.1 `CapabilitySpec` 增量
 
 ```python
-class GraphShape(str, Enum):
+class FlowShape(str, Enum):
     OPEN_REACT = "open_react"
     FIXED_CHAIN = "fixed_chain"
-    SUPERVISOR = "supervisor"
+    FLOW_CODE = "flow_code"
     FANOUT_AGGREGATE = "fanout_aggregate"
     RESEARCH_REPORT = "research_report"       # ⑤ 本文：取证段复用 ④
 
@@ -451,7 +451,7 @@ class ReportPolicy(BaseModel):
     parallel_sections: bool = False           # 固定 False，见 §9 硬约束 4
 ```
 
-建议的 `report` spec：`writes_allowed=False`、`max_recursion=14`、`session_timeout_s=120`、`tool_tags=["read:*"]`（实际下发仍受 `toolboxes` 二次约束）。
+建议的 `report` spec：`writes_allowed=False`、步数与工具调用预算上限 14、`session_timeout_s=120`、`tool_tags=["read:*"]`（实际下发仍受 `toolboxes` 二次约束）。
 
 ### 8.2 文件落点（相对 `agent_service/app/`）
 
@@ -460,23 +460,23 @@ class ReportPolicy(BaseModel):
 | `domain/report.py` | `ReportSpec` / `SectionSpec` / `MetricItem` / `NarrativeClaim` | domain |
 | `domain/caliber.py` | `CaliberSpec` + 注册表访问 | domain |
 | `domain/evidence.py` | `CoverageGap.kind` 增 `UNDEFINED_CALIBER` / `SECTION_INCOMPLETE` | domain |
-| `ai/report_graph.py` | 图形态⑤装配（**建议文件名就叫 `report_graph.py`**） | ai |
-| `ai/code_nodes/plan_report.py` | `ReportSpec` → 章节 + 槽位映射表 | ai |
-| `ai/code_nodes/analyze.py` | 分析原语库调度，产出 `MetricItem[]` | ai |
-| `ai/code_nodes/render.py` | 模板 + 槽位注入 → `ReportArtifact` | ai |
-| `ai/agent_nodes/narrate.py` | 单 Agent 顺序叙事 | ai |
-| `ai/agent_nodes/verify.py` | 数字回算 / 引用溯源 / 方向一致 / 条款比对 | ai |
+| `ai/report_flow.py` | 运行时形态⑤装配（**建议文件名就叫 `report_flow.py`**） | ai |
+| `ai/flow_steps/plan_report.py` | `ReportSpec` → 章节 + 槽位映射表 | ai |
+| `ai/flow_steps/analyze.py` | 分析原语库调度，产出 `MetricItem[]` | ai |
+| `ai/flow_steps/render.py` | 模板 + 槽位注入 → `ReportArtifact` | ai |
+| `ai/capability_nodes/narrate.py` | 单 Agent 顺序叙事（一次 `Agent.reply()`，不分章并发） | ai |
+| `ai/capability_nodes/verify.py` | 数字回算 / 引用溯源 / 方向一致 / 条款比对 | ai |
 | `ai/prompts/narrate_v1.md` | 版本化 prompt；只允许引用 `metric_id` | ai |
 | `application/runtime.py` | **不改 `invoke()` 签名** | application |
 | `infrastructure/obs/metrics.py` | 新增报告类指标（§10） | infra |
 
-### 8.3 与聚合图的关系
+### 8.3 与聚合篇 fan-in 归并段的关系
 
 | 项 | 处理 |
 |---|---|
 | `fan_out` / `fan_in` / `probe` | **原样复用**，不复制代码 |
 | `EvidencePack` / `EvidenceItem` | **零改动**，只扩 `CoverageGap.kind` 枚举 |
-| `ToolRegistry.toolboxes` | 复用；报告额外需要"面向分析的工具"分组（聚合视图、统计接口） |
+| `Toolkit.toolboxes` | 复用；报告额外需要"面向分析的工具"分组（聚合视图、统计接口） |
 | 指标命名空间 | 挂在既有命名空间，不另起一套 |
 
 ---
@@ -489,7 +489,7 @@ class ReportPolicy(BaseModel):
 | 分析段 | 单节点串行，超时 20s | 全确定性，慢说明查询设计有问题 |
 | 叙事段 | 单 Agent，输出 ≤6k token | 强一致性文档，不能并行 |
 | 校验段 | 不允许跳过 | 跳过即无质量收益 |
-| 父会话总预算 | `max_recursion=14`、120s | 比诊断宽松（分析链更长），比编排紧 |
+| 父会话总预算 | 步数与工具调用预算上限 14、120s | 比诊断宽松（分析链更长），比编排紧 |
 | 单源失败 | `PARTIAL` + `gaps`，对应章节标注未覆盖 | 不重跑全链 |
 | 关键源全失败 | 不出正文，直接 `need_human_review` + 列出缺哪几章 | 不许在空证据上叙事 |
 | 校验不通过 | 回 `narrate` 重试 ≤2 次；仍不通过 → 输出草稿 + 差异清单 | 让人看差异，不让系统硬出 |
@@ -499,7 +499,7 @@ class ReportPolicy(BaseModel):
 ## 10. 硬约束（聚合篇 §7 在本形态的延伸）
 
 1. 子会话 `writes_allowed=False`，不得持有写 client；断言覆盖父、子两级 spec。
-2. 报告图自身不持工具（只有子会话与 `attribute` / `verify` 持）。
+2. 报告 flow 自身不持工具（只有子会话与 `attribute` / `verify` 持）。
 3. 子会话不读写父会话 state，只回 `EvidencePack`。
 4. **章节顺序生成**，`parallel_sections` 固定为 `False`；启动断言拒绝该值为 `True` 的 spec。
 5. **数字只能由 `analyze` 产出**；`narrate` 的输出若出现未绑定 `metric_id` 的数值，直接判失败。
@@ -576,7 +576,7 @@ class ReportPolicy(BaseModel):
 | 阶段 | 动作 | 目的 |
 |---|---|---|
 | 1 | 单 Agent + 全代码分析 + 模板注入渲染 | **先把"不幻觉"做对**。这一步就能出可交付报告 |
-| 2 | 取证段复用图形态④，先 2 路 | 解决上下文污染与覆盖，`single` 做基线 |
+| 2 | 取证段复用运行时形态④，先 2 路 | 解决上下文污染与覆盖，`single` 做基线 |
 | 3 | 加 `verify`（数字回算 + 引用溯源） | 拿到 C8 的质量收益，这是唯一能写进 KPI 的 |
 | 4 | 扩到 4~6 路 + `attribute` 归因 | 动态收敛，`probe` 常开 |
 | 5 | 多 `report_type` 模板化 | 横向复制到客诉 8D、MRB 材料、月度核对 |
@@ -615,4 +615,4 @@ A：没有。本文是设计定义，落地依赖聚合篇的取证段先跑通�
 
 ## 16. 一句话总结
 
-> **报告 = 覆盖驱动，不是搜索驱动**：章节由模板枚举，数字由代码算，正文由**单 Agent 顺序**写，口径由注册表决定。多 Agent 只出现在取证段（复用图形态④），并发用协程不用子会话，数字只注入不由模型写。唯一的质量收益来自 `verify` 能用另一条路径把数字重算一遍——其余都只是覆盖、压缩和延迟。**报告的可信度不来自数字看起来合理，而来自同一个问题永远得到同一个答案。**
+> **报告 = 覆盖驱动，不是搜索驱动**：章节由模板枚举，数字由代码算，正文由**单 Agent 顺序**写，口径由注册表决定。多 Agent 只出现在取证段（复用运行时形态④的中心化 fan-in 归并，应用层 `asyncio.gather` + 显式合并），并发用协程不用子会话，数字只注入不由模型写。唯一的质量收益来自 `verify` 能用另一条路径把数字重算一遍——其余都只是覆盖、压缩和延迟。**报告的可信度不来自数字看起来合理，而来自同一个问题永远得到同一个答案。**
