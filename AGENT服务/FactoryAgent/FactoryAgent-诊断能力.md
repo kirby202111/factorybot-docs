@@ -10,7 +10,7 @@
 
 ### 1.1 这项能力解决什么
 
-把 rag-service **制造追溯**的单跳检索升级成**多步只读推理**：模型不再一次性检索，而是自己决定下一步查什么，逐步收敛到根因，按 **5M1E** 给出假设排序与证据链。
+把制造追溯的**单跳取证**升级成**多步只读推理**：模型不再一次性检索，而是自己决定下一步查什么，逐步收敛到根因，按 **5M1E** 给出假设排序与证据链。注意分工：追溯工具（`trace_lookup`）只负责“给定种子与锚点取回证据”，多步推理与结论归诊断能力（[制造追溯-需求与实现效果.md](../../制造追溯-需求与实现效果.md) §5）。
 
 典型链路（"单件 SN-001 焊接不良"）：
 
@@ -115,9 +115,10 @@
 | 设备工装台账 | `query_asset_status(asset_id)` / `query_stencil_lending` / `query_stencil_master_history` | 设备状态、钢网借还与主数据变更 |
 | 返修 / 返工 | `query_repair_history(serial_no)` / `query_rework_orders(wo_id)` | 历史返修返工 |
 | 质量 | `query_defect_rate(batch_no)` / `query_history_8d(keywords)` | 批次不良率、历史同类 8D |
-| RAG 服务 | `query_traceability` / `search_docs(query, version_anchor)` | 追溯读模型（**首位注册**）、文档检索 |
+| 制造追溯（只读，归属待定） | `trace_lookup` / `record_expand` / `version_resolve` | 追溯读模型（**首位注册**） |
+| 文档知识工具 | `search_docs(query, version_anchor)` | 文档检索与引用 |
 
-> `query_traceability` 注册在诊断 toolset 首位，system prompt 引导"先查追溯读模型"；固定关联查询覆盖不足时再降级到各上下文 REST 补齐。
+> `trace_lookup` 注册在诊断 toolset 首位，system prompt 引导"先查追溯读模型"；固定关联查询覆盖不足时再降级到各上下文 REST 补齐。
 
 **工具元数据**：
 
@@ -363,7 +364,7 @@ A：工具注册时声明 `required_tenant_scopes`，`ToolNode` 调用前按会�
 A：报告带置信度，`< 0.5` 标 `needs_human_review` 只推工程师；工具连续失败 3 次终止转人工；报告含 disclaimer。诊断全程只读，最坏情况是"没诊断出来"，不产生写副作用——和 MES 防错理念一致，宁可拦下让人判。
 
 **Q：为什么把追溯工具注册在首位？**
-A：追溯走的是 rag-service 的关系型读模型（`query_traceability` → 按 `evidence_set_id` 回查关系型证据子集），版本锚点在写入证据集时就和批次/工单/工序钉在一起，一次查询就能拿到"当时生产用的工艺版本 + 跨上下文证据"，避免模型多次往返后才对齐版本。这正是版本锚点三段传递链（诊断 → 草稿 → 写意图）的第一环。固定关联查询计划覆盖不足时再降级到各上下文 REST 只读补齐。这是"先证据集后 REST"的顺序，不是二选一；**不引入图数据库/Cypher/图投影**（ADR-03 非图追溯红线）。
+A：追溯走 MySQL 关系型读模型（`trace_lookup` → 返回 `Evidence[]` + 三段锚点，整次请求用 `evidence_set_id` 统一回查），版本锚点在写入证据集时就和批次/工单/工序钉在一起，一次查询就能拿到"当时生产用的工艺版本 + 跨上下文证据"，避免模型多次往返后才对齐版本。这正是版本锚点三段传递链（诊断 → 草稿 → 写意图）的第一环。固定关联查询计划覆盖不足时再降级到各上下文 REST 只读补齐。这是"先证据集后 REST"的顺序，不是二选一；**不引入图数据库/Cypher/图投影**（[制造追溯-需求与实现效果.md](../../制造追溯-需求与实现效果.md) §1.3、ADR-13）。
 
 ---
 

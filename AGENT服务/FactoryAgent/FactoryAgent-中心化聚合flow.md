@@ -80,7 +80,7 @@ L3 运行时形态④ fanout_aggregate
 
 | 视角 | `role` | 装什么 | 压缩形态 | 典型工具（只读） |
 |---|---|---|---|---|
-| 事实链 | `FACT` | 过点记录 / 在制位置 / 工单进度 / 批次谱系 | 事件序列 + 里程碑 | `query_pass_records` / `query_wip_position` / `query_traceability` |
+| 事实链 | `FACT` | 过点记录 / 在制位置 / 工单进度 / 批次谱系 | 事件序列 + 里程碑 | `query_pass_records` / `query_wip_position` / `trace_lookup` |
 | 条件链 | `CONDITION` | 设备参数时序 / 工艺版本与审计 / 点检计量状态 | 时间窗统计（漂移、越限次数），**不是原始曲线** | `query_equipment_telemetry` / `query_process_route`（强制版本） / `query_asset_status` |
 | 检验链 | `INSPECTION` | 测试数据 / 检验记录 / 历史客诉 | 分布 + 异常样本 | `query_test_results` / `query_repair_history` / `search_docs` |
 

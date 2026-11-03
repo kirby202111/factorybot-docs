@@ -1,6 +1,6 @@
 # Kafka 集成全景与实现说明
 
-> **定位**：本文是本 MES 项目 Kafka 集成的**全景审查文档**。以"业务场景与节点"为经、"Kafka 使用方式 / 架构闪光点 / 实施重难点"为纬，系统梳理三大服务（制造资源 / 设备管理 / 生产执行）14 个限界上下文 + 两个 Python 旁路服务（agent-service / rag-service）中**所有需要集成 Kafka 的具体业务场景**，并提炼每一类使用模式的架构闪光点与实施重难点。
+> **定位**：本文是本 MES 项目 Kafka 集成的**全景审查文档**。以"业务场景与节点"为经、"Kafka 使用方式 / 架构闪光点 / 实施重难点"为纬，系统梳理三大服务（制造资源 / 设备管理 / 生产执行）14 个限界上下文 + Python 旁路侧（agent-service / rag-service / 制造追溯读模型投影，后者归属待定）中**所有需要集成 Kafka 的具体业务场景**，并提炼每一类使用模式的架构闪光点与实施重难点。
 >
 > **与既有文档的关系（不重复造事实源）**：
 > - **怎么做（How）**——业务事件的可靠投递机制（Outbox 表结构 / Publisher / 限流 / 幂等 / DLT / 重放）权威源是 [Outbox设计方案](业务事件/Outbox设计方案.md)；高频采集的管道实现（边缘网关 / 协议适配 / 断点续传 / 去重 / 乱序矫正 / 存储分层）权威源是 [MES高频数据方案](高频数据/MES高频数据方案.md)；Kafka 集群 / Spring Kafka 基础配置权威源是 [基础设施/Kafka配置说明](基础设施/Kafka配置说明.md)。
@@ -85,7 +85,8 @@
 
 | 服务 | 语言栈 | Kafka 角色 | topic | 边界 |
 |---|---|---|---|---|
-| rag-service | Python（aiokafka） | **只读投影消费者**：订阅 `mes.*/process.*/material.*/quality.*` 增量构建 MySQL 关系型追溯读模型（`trace_*` 关系表 + 外键 + 固定关联查询） | 复用既有领域事件 topic | 只读投影，`ReadOnlyProjectionGate` 禁止历史覆盖性删除/改写；不订 `dc.*` 原始流 |
+| rag-service | Python（aiokafka） | **重索引消费者**：订阅文档与工艺事件（`DocumentVersionPublished` / `ProcessRouteActivated` 等）增量更新文档索引与版本绑定 | 复用既有领域事件 topic | 只做文档知识，不再承载制造追溯；不订 `dc.*` 原始流 |
+| 制造追溯（归属待定） | Python（aiokafka） | **只读投影消费者**：订阅 `mes.*/process.*/material.*/quality.*` 增量构建 MySQL 关系型追溯读模型（`trace_*` 关系表 + 外键 + 固定关联查询） | 复用既有领域事件 topic | 只读投影，`ReadOnlyProjectionGate` 禁止历史覆盖性删除/改写；不订 `dc.*` 原始流 |
 | agent-service | Python（aiokafka） | **主动触发消费者**：订阅 `ProcessRouteActivated` / `equipment.fault` / 不良率突增等只读事件，触发草稿能力草拟 / 流程编排 | 复用既有领域事件 topic | 只读旁路，物理隔离不进过点主事务 |
 | agent-service | Python（aiokafka） | **动作卡生产者**：编排能力 confirmation gate 的动作卡 WebSocket（实时）+ Kafka 持久兜底 | `agent.action_cards`（key=`session_id`） | 双通道，Kafka 兜底离线可达可回溯 |
 
@@ -322,26 +323,26 @@ Kafka 只承载"窄而快"的结构化流与大载荷的**引用**，"大而慢"
 
 ---
 
-### 模式 G：事件投影到关系型读模型（rag-service ReadModelProjector）
+### 模式 G：事件投影到关系型读模型（制造追溯 ReadModelProjector，归属待定）
 
 **典型业务节点**
 
-rag-service 的 `ReadModelProjector` 订阅领域事件流，增量构建 / 更新 MySQL 关系型追溯读模型（`trace_*` 关系表，按 5M1E 业务关联组织）：
+制造追溯的 `ReadModelProjector`（**归属待定**：并入 agent-service 或独立 trace-query-service）订阅领域事件流，增量构建 / 更新 MySQL 关系型追溯读模型（`trace_*` 关系表，按 5M1E 业务关联组织）：
 
 - MVP 4 上下文：在制品执行（`mes.checkpoint.lifecycle` / `mes.routing.progress` / `wip.*`）+ 工艺管理（`process.route.lifecycle`）+ 物料（`material.bom.lifecycle` / `material.inventory.changed`）+ 质量（`quality.inspection.verdict` / `quality.anomaly.batch`）
 - 后续扩展：设备（`eam.*`）、环境（`dc.*` 语义事件，非原始流）
 
 **Kafka 核心使用方式与作用**
 
-读模型不是凭空建模，是各上下文领域事件的**只读投影**——与在制品执行的 `ProcessRouteCache` / `EquipmentAvailabilityCache` 同构，只是投影目标是一组带索引的关系表而非键值缓存（[rag-service-技术选型和实现方案 §4 非图制造追溯实现](../RAG服务/rag-service-技术选型和实现方案.md)、[rag-service-整体结构设计 §4.2 非图制造追溯](../RAG服务/rag-service-整体结构设计.md)）。Kafka 承担"事实流 -> 读模型表增量写入"的投影通道。复用既有领域事件 envelope 与消费侧幂等模式，不造新契约。
+读模型不是凭空建模，是各上下文领域事件的**只读投影**——与在制品执行的 `ProcessRouteCache` / `EquipmentAvailabilityCache` 同构，只是投影目标是一组带索引的关系表而非键值缓存（[制造追溯-需求与实现效果.md §3.1 数据面](../制造追溯-需求与实现效果.md)；[ADR-13](../架构设计v2/00-架构决策记录ADR.md)）。Kafka 承担"事实流 -> 读模型表增量写入"的投影通道。复用既有领域事件 envelope 与消费侧幂等模式，不造新契约。
 
 **架构闪光点**
 
-1. **读模型是只读投影，事实源是聚合根**：`ReadOnlyProjectionGate` 启动断言禁止任何历史覆盖性删除 / 改写（不开放对既有事实行的 DELETE / UPDATE）。读模型库归 RAG 服务自有，从不回写 MES。跨语言物理边界天然强制只读。
+1. **读模型是只读投影，事实源是聚合根**：`ReadOnlyProjectionGate` 启动断言禁止任何历史覆盖性删除 / 改写（不开放对既有事实行的 DELETE / UPDATE）。读模型库归追溯能力自有（独立 schema），从不回写 MES。跨语言物理边界天然强制只读。
 2. **版本一致性确定性兜底**：`CheckpointRecord` 对应的过点行带版本锚点三段（`version_kind` / `version` / `version_ref_id`，此处锚的是工艺版本），固定关联查询按锚点取当时版本；工艺变更（`ProcessRouteActivated`）只新增版本行、旧版本 `DEPRECATED` 不删，历史行不动（INV-CX-02）。把"版本一致性"从"LLM 自觉带版本"变成"读模型结构 + 确定性过滤保证"。
 3. **不进过点主事务，允许秒级最终一致**：读模型投影异步消费事件，过点 P99 ≤200ms 不受读模型投影影响（[领域总览 §5.3](../领域模型/领域总览.md)）。读模型挂了过点照常，只是追溯查询退化。
 4. **高频原始流不全量入读模型**：`assert_no_raw_data_topic` 启动断言兜底，MVP 不订 `dc.*` 原始流（读模型要的是语义事件不是原始报文）。
-5. **跨语言复用既有契约**：Python rag-service 用 aiokafka 订阅 Java 主体发布的同一套领域事件 envelope（`event_id`/`event_type`/`event_version`/`partition_key`），`event_id` 幂等 + consumer offset（MySQL）+ ACL 降级 REST，不造新管道。对外证据回查统一用 `evidence_set_id`（AgentScope `Tool` 形态 `fetch_evidence_set(evidence_set_id)`），见 [rag-service-整体结构设计 §7.2 与 agent-service](../RAG服务/rag-service-整体结构设计.md)。
+5. **跨语言复用既有契约**：Python 侧（rag-service 订阅文档重索引事件；追溯投影消费者订阅制造事件）均用 aiokafka 订阅 Java 主体发布的同一套领域事件 envelope（`event_id`/`event_type`/`event_version`/`partition_key`），`event_id` 幂等 + consumer offset（MySQL）+ ACL 降级 REST，不造新管道。对外证据回查统一用 `evidence_set_id`（由 agent 侧 EvidenceRegistry 签发），见 [制造追溯-需求与实现效果.md §3.4](../制造追溯-需求与实现效果.md)。
 
 **实施重难点与技术挑战**
 
@@ -539,7 +540,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 | 服务 | 前缀 | 核心 topic |
 |---|---|---|
 | agent-service | `agent.*` | `agent.action_cards`（生产） |
-| rag-service / agent-service | （复用上述） | 消费 `mes.*`/`process.*`/`material.*`/`quality.*`/`eam.*`/`equipment.fault` 等 |
+| 制造追溯 / agent-service / rag-service | （复用上述） | 消费 `mes.*`/`process.*`/`material.*`/`quality.*`/`eam.*`/`equipment.fault` 等 |
 
 ---
 
@@ -564,7 +565,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 | 维修 `repair.*` | | ✓（试产验证） | | | | | | | | ✓（完成->恢复/报废） | ✓（保养建议） | | — | |
 | 设备数据接入 `dc.*` | | ✓（实时数据 REST） | | | | | ✓（线边仓事件） | | ✓（采样） | ✓（通信/报警/度量） | | | | — |
 
-> Python 旁路消费：rag-service ReadModelProjector 消费 `mes.*`/`process.*`/`material.*`/`quality.*`；agent-service 消费 `process.route.lifecycle`/`equipment.fault`/不良率突增等。均不在上表（上下文外，复用契约）。
+> Python 旁路消费：追溯 `ReadModelProjector`（归属待定）消费 `mes.*`/`process.*`/`material.*`/`quality.*`；rag-service 消费文档与工艺事件做重索引；agent-service 消费 `process.route.lifecycle`/`equipment.fault`/不良率突增等。均不在上表（上下文外，复用契约）。
 
 ---
 

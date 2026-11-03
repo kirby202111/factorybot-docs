@@ -2,7 +2,7 @@
 
 > **定位**：本文承接"统一入口 + 意图路由 + 跨能力委托"职责，落地形态是独立微服务 **`agent-gateway-service`**。它是 Agent 能力的**收口形态**，不是第四项 Agent 能力，也**不属于 Agentic RAG**。
 >
-> **与 Agentic RAG 的关系**：[Agentic RAG](../RAG服务/Agentic%20RAG-详细设计.md) 只负责**检索内编排**（在文档检索与制造追溯两个只读工具之间决定"是否追加检索、查什么、何时停止"）；入口分诊、跨能力委托、统一答案收敛全部归本文的网关。
+> **与编排层的关系**：编排权唯一在 `agent-service`（[ADR-13](../架构设计v2/00-架构决策记录ADR.md)）。`rag-service` 只提供文档知识工具 `search_docs`，制造追溯是 agent 侧只读工具（归属待定，见 [制造追溯-需求与实现效果.md](../制造追溯-需求与实现效果.md)）；网关完成分诊后，请求进入**单层**编排，不存在第二层 ReAct。入口分诊、跨能力委托、统一答案收敛全部归本文的网关。
 >
 > **口径纪律**：这是设计阶段的引入规划，不是线上已落地能力。讲法说"规划方向 / 设计取舍"，不说"我们已经上线了统一入口网关"。
 >
@@ -18,13 +18,13 @@
 |------|--------|------|
 | **① 入口分诊** | 自然语言 → 该找哪项能力（检索 / 诊断 / 草稿） | **本文网关** |
 | **② 能力分派与委托** | 选定能力 → 发起调用、统一收敛答案 | **本文网关** |
-| **③ Agent 内部工具选择** | 选哪个检索工具、下一步查什么 | **Agentic RAG / 诊断能力内部** |
+| **③ Agent 内部工具选择** | 选哪个工具、下一步查什么 | **`agent-service` 编排层（单层）** |
 
-把 ① 放进 Agentic RAG 会让检索模块承担入口职责，违背 [RAG服务引入路线.md](../RAG服务/RAG服务引入路线.md) §3 的定位："Agentic 不是所有请求必须经过的入口层，它只负责什么时候再查一次、查什么、什么时候停止"。
+把 ① 放进检索侧会让文档服务承担入口职责，违背 [rag-service-整体设计.md](../RAG服务/rag-service-整体设计.md) §0 的定位：“文档知识工具只回答一件事：给定问题与版本锚点，召回可引用证据”，**多步编排归 `agent-service`**（[ADR-13](../架构设计v2/00-架构决策记录ADR.md)）。
 
 ### 1.2 为什么独立成网关，而不是并进 agent-service
 
-- **依赖方向会成环**：若入口放进 agent-service，它要反向依赖 rag-service 检索；而网关侧又要委托 agent-service 诊断/草稿，两个服务互相依赖，发布与故障隔离全耦合。
+- **依赖方向会成环**：若入口放进 agent-service，它要反向依赖 rag-service 文档工具与追溯工具；而网关侧又要委托 agent-service 诊断/草稿，两个服务互相依赖，发布与故障隔离全耦合。
 - **流量性质不同**：入口是"人在问"（同步、低 QPS、强审计）；agent-service 还有"主动触发"（订阅 `equipment.fault` 等事件巡检）。混在一起，限流与扩容策略打架。
 - **变化频率不同**：渠道、鉴权、限流、会话、审计这些入口职责变化远快于"5M1E 推理链"，绑在一起会拖慢能力迭代。
 - **单一职责**：诊断/草稿是"深而专"的专精能力，不该兼做"广而浅"的分诊。
@@ -37,12 +37,12 @@
 
 ## 2. 职责边界
 
-| 维度 | 本文网关 | Agentic RAG（rag-service） | 诊断能力 | 草稿能力 |
+| 维度 | 本文网关 | agent-service 编排层（检索内 flow） | 诊断能力 | 草稿能力 |
 |------|---------|---------------------------|---------|---------|
-| 形态 | 入口分诊 + 确定性分派 + 统一答案 | 检索内多跳编排 + 证据收口 | 多步只读 ReAct 诊断 | 固定链草拟（不落库） |
+| 形态 | 入口分诊 + 确定性分派 + 统一答案 | 单层 ReAct + 确定性 flow（`version_resolve` → `trace_lookup` → `search_docs`）+ 证据收口 | 多步只读 ReAct 诊断 | 固定链草拟（不落库） |
 | 是否做意图分类 | **是** | 否 | 否 | 否 |
-| 是否跨能力委托 | **是** | 否 | 否 | 否 |
-| 推理深度 | 浅（分派，无 ReAct） | 轻（≤2 次工具调用） | 深（≤10 步 5M1E） | 中（拉数据 + 草拟） |
+| 是否跨能力委托 | **是** | 否（工具调用不是委托） | 否 | 否 |
+| 推理深度 | 浅（分派，无 ReAct） | 轻（≤3 次工具调用） | 深（≤10 步 5M1E） | 中（拉数据 + 草拟） |
 | 写权限 | 无 | 无 | 无 | 草稿不落库 |
 | 典型问题 | "这问题该找谁" | "还要再查哪份证据" | "根因是什么" | "草拟返工单" |
 
@@ -50,16 +50,16 @@
 
 ## 3. 意图分类（3 类能力 + 1 兜底）
 
-意图**只对齐能力边界**，不再细分检索内部类型（追溯事实 / 文档查询的区分下沉到 Agentic RAG 的工具选择）：
+意图**只对齐能力边界**，不再细分检索内部类型（追溯事实 / 文档查询的区分下沉到 `agent-service` 编排层的工具选择）：
 
 | 意图 | 分派到 | 形态 | 典型问题 |
 |------|--------|------|---------|
-| `RETRIEVAL_REQUEST` | Agentic RAG `POST /rag/agentic/query` | 检索编排 | "SN-001 过了哪几站""SPI 报警怎么处置""这批用了哪批锡膏" |
+| `RETRIEVAL_REQUEST` | `agent-service` 编排层 `POST /agent/retrieval` | 单层检索编排 | "SN-001 过了哪几站""SPI 报警怎么处置""这批用了哪批锡膏" |
 | `DIAGNOSIS_REQUEST` | 诊断能力 `POST /agent/diagnose` | 显式委托 | "SN-001 焊接不良根因""这批不良 5M1E" |
 | `DRAFT_REQUEST` | 草稿能力 `POST /agent/draft` | 显式委托 | "给这批不良草拟返工单""草拟 8D 报告" |
 | `UNKNOWN` | 转人工 | 兜底 | 路由不了的问题 |
 
-> **边界原则**：问"过了哪几站 / 用了哪批 / SOP 怎么处置"都是 `RETRIEVAL_REQUEST`——是否需要多步、走追溯还是文档，由 Agentic RAG 在检索内决定。问"为什么不良"是 `DIAGNOSIS_REQUEST`——需要多步 5M1E 推理，委托诊断能力。
+> **边界原则**：问"过了哪几站 / 用了哪批 / SOP 怎么处置"都是 `RETRIEVAL_REQUEST`——是否需要多步、先查 `trace_lookup` 还是 `search_docs`，由编排层在检索内决定。问"为什么不良"是 `DIAGNOSIS_REQUEST`——需要多步 5M1E 推理，委托诊断能力。
 
 ---
 
@@ -104,7 +104,7 @@ IntentRouter.classify(question)
 
 ---
 
-## 6. 与 Agentic RAG 的契约
+## 6. 与 agent-service 编排层的契约
 
 ### 6.1 请求
 
@@ -121,11 +121,11 @@ class RetrievalRequest(BaseModel):
 
 ### 6.2 响应（`RagAnswer`）
 
-由 Agentic RAG 返回，网关经 Mapper 转成 `AgentAnswer`：
+由编排层返回，网关经 Mapper 转成 `AgentAnswer`：
 
 | RagAnswer 字段 | 含义 |
 |----------------|------|
-| `retrieval_path` | `traceability` / `doc_search` / `doc_search+traceability` |
+| `retrieval_path` | `trace_lookup` / `search_docs` / 两者组合（工具序列，非能力路由） |
 | `tool_chain` | 实际调用的检索工具序列 |
 | `stop_reason` | 为何停（enough / no_new_evidence / budget / conflict），网关只透传不改写 |
 | `evidence_set_id` | 本次证据集标识，供回查 |
@@ -222,7 +222,7 @@ class GatewayService:
     def __init__(
         self,
         intent_router: IntentRouter,
-        retrieval_client: RetrievalClient,       # 调 Agentic RAG
+        retrieval_client: RetrievalClient,       # 调 agent-service 检索端点
         delegation_client: DelegationClient,     # 调诊断 / 草稿
         cache: QueryCache,
         audit_repo: AnswerAuditRepo,
@@ -244,7 +244,7 @@ class GatewayService:
         try:
             match intent:
                 case GatewayIntent.RETRIEVAL_REQUEST:
-                    rag_answer = await self._retrieval_client.delegate(
+                    retrieval_answer = await self._retrieval_client.delegate(
                         RetrievalRequest(
                             question=request.question,
                             seed=request.seed,
@@ -255,7 +255,7 @@ class GatewayService:
                         ),
                         tenant,
                     )
-                    answer = self._to_agent_answer(request, intent, rag_answer)
+                    answer = self._to_agent_answer(request, intent, retrieval_answer)
                 case GatewayIntent.DIAGNOSIS_REQUEST:
                     report = await self._delegation_client.invoke_diagnosis(
                         request.question, request.evidence_set_id or "",
@@ -308,7 +308,7 @@ agent_gateway_service/
         classifier_factory.py   # 兜底分类 Agent（不挂工具，Enum 输出）
         model_factory.py        # AgentScope Model 接入（provider 可插拔）
       acl/
-        retrieval.py            # 调 Agentic RAG /rag/agentic/query
+        retrieval.py            # 调 agent-service POST /agent/retrieval
         diagnosis_delegation.py # 显式委托诊断
         draft_delegation.py     # 显式委托草稿
       persistence/
@@ -327,7 +327,7 @@ agent_gateway_service/
   docker-compose.yml
 ```
 
-- 启动断言：`assert_dependencies_reachable`（Agentic RAG 与诊断/草稿能力必须可达），否则拒绝启动——网关是收口，依赖没就绪就是套壳。
+- 启动断言：`assert_dependencies_reachable`（`agent-service` 的检索 / 诊断 / 草稿端点必须可达），否则拒绝启动——网关是收口，依赖没就绪就是套壳。
 - 部署：独立微服务 `agent-gateway-service`（uvicorn + gunicorn worker），K8s 同网格；MVP 可 docker-compose 本地起。
 
 ---
@@ -373,7 +373,7 @@ agent_gateway_service/
 
 ### 阶段二：委托与统一答案（2 周）
 
-4. 实现 `RetrievalClient`（调 Agentic RAG）与 `DelegationClient`（诊断 / 草稿）。
+4. 实现 `RetrievalClient`（调 `agent-service` 检索端点）与 `DelegationClient`（诊断 / 草稿）。
 5. 实现 `AgentAnswer` 统一收敛与 Mapper。
 6. 验证 `traceparent` 透传与超时降级。
 
@@ -384,17 +384,17 @@ agent_gateway_service/
 9. 兜底链路全测（UNKNOWN / 下游不可达 / 低置信度 / 超时 / 权限不足）。
 10. 灰度试点，收集"路由是否准、答案是否对"反馈。
 
-> **前提**：网关必须在 Agentic RAG 与诊断 / 草稿能力成型后启动，否则无能力可分派。
+> **前提**：网关必须在 `agent-service` 的编排层（含追溯工具）与文档知识工具成型后启动，否则无能力可分派。
 
 ---
 
 ## 13. 面试防守 Q&A
 
-**Q：意图路由为什么不放在 Agentic RAG 里？**
-A：Agentic RAG 的定位是"检索内编排"——什么时候再查一次、查什么、什么时候停止（[RAG服务引入路线 §3](../RAG服务/RAG服务引入路线.md)）。入口分诊要判断"该找检索、诊断还是草稿"，这是跨能力职责，放进检索模块会让 rag-service 变成入口层，既违背定位，也会让检索模块反向依赖 agent-service。
+**Q：意图路由为什么不放在检索侧（原 Agentic RAG）里？**
+A：检索侧的定位是“给定问题与锚点，一次召回拿对证据”，多步编排已上移到 `agent-service`（[ADR-13](../架构设计v2/00-架构决策记录ADR.md)）。入口分诊要判断“该找检索、诊断还是草稿”，这是跨能力职责，放进文档服务会让它变成入口层，既违背定位，也会让文档服务反向依赖 agent-service。
 
 **Q：为什么不放进 agent-service？**
-A：会成环。入口要调 rag-service 检索，而网关又要委托 agent-service 诊断/草稿，两个服务互相依赖。另外入口是"人在问"的同步低 QPS 流量，agent-service 还有事件驱动的主动触发，两种流量混在一起，限流、扩容、发布全都耦合。
+A：会成环。入口要调 agent-service（诊断/草稿/编排），而 agent-service 又要回调文档工具与追溯工具，两个服务互相依赖。另外入口是"人在问"的同步低 QPS 流量，agent-service 还有事件驱动的主动触发，两种流量混在一起，限流、扩容、发布全都耦合。
 
 **Q：网关用不用 LLM？**
 A：只在兜底分类用一次小模型。规则命中时 0 次 LLM；分派本身是确定性 HTTP 调用，不跑 ReAct。路由是策略不是能力，越薄越可控。
@@ -402,11 +402,11 @@ A：只在兜底分类用一次小模型。规则命中时 0 次 LLM；分派本
 **Q：路由错了怎么办？**
 A：三重兜底——路由准确率监控 + 评测集回归；被委托能力有超时与置信度阈值，低置信度回传后转人工；`UNKNOWN` 与失败一律转人工不硬答。`AnswerAudit` 记录每次分派，可回溯调规则。
 
-**Q：网关和 Agentic RAG 的接口为什么不传消息历史？**
+**Q：网关和编排层的接口为什么不传消息历史？**
 A：只传问题、种子、版本锚点与会话 ID。被调方按 `evidence_set_id` / `session_id` 自行回查上下文，避免网关成为隐式的会话中枢，也避免跨能力上下文污染。
 
 ---
 
 ## 14. 一句话定位
 
-"统一入口与意图路由归独立的 `agent-gateway-service`：规则优先 + LLM 兜底把问题分成检索 / 诊断 / 草稿三类能力，确定性分派 + 跨能力显式委托 + 统一答案收敛。网关不推理、不选检索工具、不做多步组合——检索内部怎么查归 Agentic RAG，深度诊断归诊断能力，草稿归草稿能力。"
+"统一入口与意图路由归独立的 `agent-gateway-service`：规则优先 + LLM 兜底把问题分成检索 / 诊断 / 草稿三类能力，确定性分派 + 跨能力显式委托 + 统一答案收敛。网关不推理、不选检索工具、不做多步组合——检索内部怎么查归 `agent-service` 编排层，深度诊断归诊断能力，草稿归草稿能力。"

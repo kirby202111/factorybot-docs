@@ -114,7 +114,7 @@ structured = self._lc.with_structured_output(schema, **kwargs)
 
 ### 4.2 工具调用（诊断能力 ReAct）
 
-ReAct 用工具绑定（`tool_choice` 默认 `auto`，模型自主决定是否调工具；目标形态为 AgentScope `Agent` 内置 ReAct + `Toolkit` 的工具选择），思考模型支持。**设计目标（尚未在 2.0 底座复现）**：诊断多步 ReAct 走 `query_traceability`（关系型追溯，证据回查一律 `evidence_set_id` + `fetch_evidence_set`）-> `query_pass_records` -> 输出报告。
+ReAct 用工具绑定（`tool_choice` 默认 `auto`，模型自主决定是否调工具；目标形态为 AgentScope `Agent` 内置 ReAct + `Toolkit` 的工具选择），思考模型支持。**设计目标（尚未在 2.0 底座复现）**：诊断多步 ReAct 走 `trace_lookup`（关系型追溯，证据回查一律 `evidence_set_id` + `fetch_evidence_set`）-> `query_pass_records` -> 输出报告。
 
 ---
 

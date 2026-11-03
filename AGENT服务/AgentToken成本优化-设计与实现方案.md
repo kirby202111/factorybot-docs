@@ -146,7 +146,7 @@
 - **收益**：大量"查一下某工单状态""这条 SOP 怎么写"的简单问题，本不需要 ReAct 多步推理。Router 把它们直送 RAG 单次回答，省掉"系统提示+工具定义"的 N 次重发。
 - **Router 用便宜的**：分类器用小模型（如 Haiku / DeepSeek / 本地小模型）甚至规则 + embedding 相似度，单次成本远低于跑一遍 ReAct。
 - **MES 约束**：Router 不做写动作、不进过点；它只是个只读分发器。误路由最坏是"简单问题走了 Agent 多绕几步"或"复杂问题直答不够深"--前者浪费钱，后者降体验，都不碰红线。
-- **口径澄清**：这个 Router 是**本仓库自建的普通分发函数/分类器**（框架侧只有 `classifier` + 模型路由这一用途的入口），**AgentScope 2.0 从未提供 `Handoffs` / `Routing` 移交原语**。真实落地形态：入口分诊 = 网关的**规则 + LLM 兜底分类器**（不是 ReAct）；检索内工具选择 = Agentic RAG 的单 Agent ReAct + `Toolkit`；跨能力委托 = **显式服务调用**，传 `evidence_set_id` / `session_id` / `traceparent`，不是框架级 agent 移交。
+- **口径澄清**：这个 Router 是**本仓库自建的普通分发函数/分类器**（框架侧只有 `classifier` + 模型路由这一用途的入口），**AgentScope 2.0 从未提供 `Handoffs` / `Routing` 移交原语**。真实落地形态：入口分诊 = 网关的**规则 + LLM 兜底分类器**（不是 ReAct）；检索内工具选择 = `agent-service` 编排层的单 Agent ReAct + `Toolkit`；跨能力委托 = **显式服务调用**，传 `evidence_set_id` / `session_id` / `traceparent`，不是框架级 agent 移交。
 
 ### 4.3 离线预处理：能预计算的不放实时路径
 

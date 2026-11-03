@@ -35,7 +35,7 @@
 ### 1.3 覆盖范围与不覆盖范围
 
 - **覆盖**：`agent-service`（Python）内部全链路——会话、Agent 推理步（`Agent.reply` / `reply_stream` 的事件流）、工具调用、ACL、LLM 调用、置信度、评测、漂移、成本。
-- **不覆盖**：下游 Java 服务的内部观测（复用其既有 Spring APM / OTel agent），只通过 `traceparent` 把链路接起来。RAG 服务的观测归 [RAG服务](../RAG服务/) 各路线，本篇只定义 Agent 调 RAG 时的 span 衔接约定。
+- **不覆盖**：下游 Java 服务的内部观测（复用其既有 Spring APM / OTel agent），只通过 `traceparent` 把链路接起来。文档知识工具的观测归 [rag-service-整体设计.md](../RAG服务/rag-service-整体设计.md) §13；追溯工具的观测归追溯能力本体（归属待定）。本篇只定义 Agent 调这些工具时的 span 衔接约定。
 - **不覆盖**：MES 核心业务表的观测（工单/WIP/过点自身指标），那是 MES 主体的事，Agent 只读它们、不替它们埋点。
 
 ### 1.4 与 Java 侧 APM 的关系

@@ -88,13 +88,13 @@
 | 服务 | 职责 | 写权限 |
 |------|------|--------|
 | `agent-service` | 诊断（只读推理）→ 草拟（产草稿）→ 编排（受限写 + 人确认） | **仅**草稿表、会话、审计。业务写一律经 MES 应用服务 |
-| `rag-service` | 文档检索 + **关系型**制造追溯 + Agentic 补查 | 仅自有向量索引、追溯读模型、审计。**不读不写 MES 业务表** |
+| `rag-service` | **文档知识工具**（召回 + 引用 + 文档版本治理） | 仅自有向量索引、文档治理表、审计。**不读不写 MES 业务表** |
 | `mes-eval` | 金标准集、三层判定、标定/漂移、CI 门禁 | 只读评测 |
 | MES 主体（Java） | 14 个限界上下文与全部业务写路径 | 唯一业务写权限，聚合根不变式 + Outbox |
 
 **解耦**：只经 **REST 只读** + **Kafka 只读事件**，出站封装为 `Toolkit` Tool `[已核实]`。Agent 不碰 MES 原始表。
 
-**追溯坚决不用图检索**：MySQL 关系型读模型 + 固定关联查询计划 + MES 只读补数；不引入 Neo4j / Cypher / 图投影。这是 RAG 侧既有红线，本文继承并把旧文档残留的"按子图回查图节点"口径统一改为**按 `evidence_set_id` 回查关系型证据子集**。
+**制造追溯已从 RAG 侧迁出**（ADR-13）：形态固定为“只读工具 + 只读数据面”，且坚决不用图检索——MySQL 关系型读模型 + 固定关联查询计划 + MES 只读补数，不引入 Neo4j / Cypher / 图投影；旧文档“按子图回查图节点”的口径统一改为**按 `evidence_set_id` 回查关系型证据子集**。追溯的归属（并入 `agent-service` / 独立只读服务）仍待定，见 `制造追溯-需求与实现效果.md` §6。
 
 ---
 
@@ -222,6 +222,37 @@
 
 ---
 
+## ADR-13 能力归属：制造追溯迁出 rag-service，编排权唯一归 agent-service
+
+**背景**：旧设计让 `rag-service` 同时承担文档检索、关系型制造追溯与 Agentic 检索编排。落地推演后发现三个结构性问题：
+
+1. **双编排套娃**：`agent-service` 已有多步编排，`rag-service` 内部又有一层 ReAct 循环，两者叠加导致延迟与 token 双倍、trace 嵌套、预算口径各算一套；
+2. **版本口径有分叉风险**：追溯解析出“当时版本”，文档检索又可能在另一处解析，两套逻辑给出两个锚点，最终表现为“用新 SOP 解释旧单件”；
+3. **两类负载互相牵制**：向量库与追溯读模型的数据源、故障模式、扩缩容特征完全不同，混在一个服务里，向量库挂掉会连带追溯不可用，追溯同步积压也会拖慢文档检索。
+
+**决策**：
+
+1. `rag-service` 收敛为**文档知识服务**，只提供 `search_docs` 与 `fetch_doc_answer`，以 AgentScope `Tool` over HTTP 接入 `agent-service`；**`AUTO` 多步编排下线**，只保留 `RETRIEVAL_ONLY` 与工具端点。
+2. 制造追溯迁出，形态固定为**只读工具 + 只读数据面**（MySQL 读模型 + 固定查询计划 + 三段版本解析 + MES 只读补数）；**归属待定**：候选 A 并入 `agent-service` 进程、候选 B 独立 `trace-query-service`，判据见 `制造追溯-需求与实现效果.md` §6。
+3. **编排权唯一**：同一请求只允许一层 ReAct；`version_resolve → trace_lookup → search_docs` 这类链路写成确定性 flow，ReAct 只决定“是否补查、换哪个种子”。
+4. **锚点单向流动**：三段 `VersionAnchor` 由追溯侧产出、`agent-service` 透传、文档检索消费；取不到锚点即拒答，回退“当前生效版”判为缺陷（ADR-06 不变）。
+5. **证据集单一签发方**：统一 `evidence_set_id` 由 `agent-service` 的 EvidenceRegistry 签发，rag 只回查文档侧引用，避免两套证据集并存。
+
+**后果**：
+
+- 正面：单层编排、单处版本解析、两类负载故障域分离；文档检索可以独立交付与扩缩容；追溯工具可被诊断、草稿、报表、评测复用。
+- 负面：多了一个工具契约面（`context_id`、超时、滞后语义、缺口）需要维护；若追溯选 A（并入 `agent-service`），agent 进程会背上 Alembic 迁移与 Kafka 消费组，故障域变大。
+- 缓解：追溯若选 A，至少把 consumer 与 api 拆成独立进程角色、使用独立数据库 schema、保留读模型重建工具；工具契约保持与选 B 一致，后续可按 Port 抽出独立服务而不改契约。
+
+**不选**：
+
+- 追溯继续留在 `rag-service`：混负载的代价大于多一个部署单元，且会持续诱导“rag 内部再编排”。
+- 追溯使用图数据库：关联深度实测 2-3 跳，关系型 JOIN + 白名单查询计划足够；图库带来建模与运维成本，且查询易退化为全图扇出（ADR-03 红线不变）。
+
+**回滚与触发条件**：若选 A 后出现“agent 部署单元过重 / 读模型重建频繁 / 追溯与推理互相干扰”，按既有 Port 抽出 `trace-query-service`，Tool 契约不变；若出现“无 agent 运时、仅需问答 UI 直连”的场景，文档侧可恢复单步检索 + 生成，但**不得恢复多步循环**。
+
+---
+
 ## §13 与现有文档的差异（需要显式推翻的结论）
 
 | # | 现有文档写法 | 本文结论 |
@@ -233,7 +264,7 @@
 | 4b | `AGUIProtocolMiddleware`、`ToolOffloadMiddleware`、`Offloader`、`AgentState`、`BackgroundTaskManager`、`SchedulerManager`、`TracingMiddleware`、`Toolkit`、4 个 `Task*` 工具 | ✅ **已核实真实存在**（源码路径见 ADR-01 表）。旧文档这部分没编 |
 | 4c | `SessionManager` | ⚠️ 2.0.5 起**改名 `SessionService`**，按旧名写不可导入 |
 | 4d | "Plan 模块" | ⚠️ 无 `agentscope.plan`；官方"Plan"= 4 个 Task 工具 + `agent.state.tasks_context` |
-| 4e | Handoffs / Routing 承载统一入口路由（早期把它当第四项能力 E） | ❌ **无此原语**。入口路由必须自建，且归属**独立入口网关** `agent-gateway-service`（普通分发函数 / 规则 + LLM 兜底分类器；`ModelRouterMiddleware` 做的是模型路由，不是能力移交），不归 Agentic RAG |
+| 4e | Handoffs / Routing 承载统一入口路由（早期把它当第四项能力 E） | ❌ **无此原语**。入口路由必须自建，且归属**独立入口网关** `agent-gateway-service`（普通分发函数 / 规则 + LLM 兜底分类器；`ModelRouterMiddleware` 做的是模型路由，不是能力移交），不归 `rag-service` |
 | 4f | 智能体评测 + OpenJudge = "框架内生评测栈"，Studio 做研发期观测 | ❌ `agentscope.evaluate` 在 2.0 已删未回归；Studio 已归档；OpenJudge 是独立包 `py-openjudge`，框架内无引用 |
 | 4g | ChromaDB "经 AgentScope RAG 模块接入" | ❌ RAG 模块只有 Qdrant / MilvusLite / Elasticsearch / MongoDB，**无 Chroma 适配器**；且该模块 2.0.0 曾被整体删除、2.0.5 才回归 |
 | 4h | "AgentScope Java 2.0 同构 API，可平滑跨语言扩展" | ⚠️ Java 2.0 真实但独立仓库/独立排期/自有抽象，FAQ 原文"each with its own repository and release schedule"，**非 1:1 同构** |
@@ -241,7 +272,8 @@
 | 5 | Python 3.12+（本轮刚统一） | 与框架要求 **3.11+** 兼容，可保留 3.12（代码仓 `requires-python` 已是 >=3.12），无冲突 |
 | 6 | 受益场景只有两类 | **两类不变，但加两条闸门**：可拆性（基线 >45% 不拆）、扇出必须有中心校验（否则 17.2× 放大） |
 | 7 | 版本锚定靠"RAG 返回版本 + 下游校验" | **加强**。embedding 无法区分失效事实（AUROC 0.59），必须模型外确定性过滤 + 取不到锚点即拒答 |
-| 8 | 置信度由规则算（旧文档已如此写） | 保留，并补"LLM 事后归因准确率 <10%，归因必须靠契约与 trace 拓扑" |
+| 8 | 置信度由规则算（旧文档已如此写） | 保留，并补“LLM 事后归因准确率 <10%，归因必须靠契约与 trace 拓扑” |
+| 9 | `rag-service` 同时承载文档检索 + 关系型追溯 + Agentic 编排 | **拆分**。rag 收敛为文档知识工具；追溯迁出为独立只读工具（归属待定）；编排权唯一归 `agent-service`（ADR-13） |
 
 ---
 
@@ -261,7 +293,7 @@
 
 ## §15 一句话
 
-**默认单 Agent；确定性留在代码；跨天编排归工作流引擎；安全边界建在工具网关而不是框架 Permission；版本锚定做成模型外的确定性过滤；评测用 pass^k 与每成功任务成本、发布走影子；框架只用已核实原语，未核实名字不进代码。**
+**默认单 Agent；确定性留在代码；跨天编排归工作流引擎；安全边界建在工具网关而不是框架 Permission；版本锚定做成模型外的确定性过滤；编排权唯一归 agent-service，制造追溯是独立只读工具，rag 只做文档知识；评测用 pass^k 与每成功任务成本、发布走影子；框架只用已核实原语，未核实名字不进代码。**
 
 ---
 

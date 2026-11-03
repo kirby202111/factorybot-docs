@@ -77,7 +77,7 @@
 │      -> 各上下文正常应用服务（聚合根不变式 + 事务发件箱）                            │
 └─────────────────────────┬────────────────────────────────────────────────────────┘
                           ▼
-     生产执行服务(Java) / 制造资源服务(Java) / 设备管理服务(Java) / RAG 服务
+     生产执行服务(Java) / 制造资源服务(Java) / 设备管理服务(Java) / 追溯读模型(MySQL) / rag-service(文档工具)
                           ▲
                           │ aiokafka：equipment.fault / process.route.activated / defect_rate.spike
                           │ -> 路由到对应能力（编排 / 草稿 / 诊断）

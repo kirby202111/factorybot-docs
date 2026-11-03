@@ -2,7 +2,7 @@
 
 > 本文是 MES Agent 服务（`agent-service`）的总纲：**一个 Agent，三项能力**——诊断、草稿编写、流程编排。
 > 面向场景：面试中被问"你这套 Agent 怎么设计 / 为什么不是多个 Agent 分级"时，输出**能力矩阵 + 统一运行时 + 写边界 + 渐进启用**。
-> **与 RAG 的关系**：Agent 是 [RAG服务引入路线.md](../../RAG服务/RAG服务引入路线.md) §3「Agentic 的正确定位」所述 **Agentic 能力**的展开。RAG 解决"问得到"，Agent 解决"做得完"——多步规划、主动触发、可控写回。
+> **与 RAG 的关系**：Agent 是**唯一编排方**（[ADR-13](../../架构设计v2/00-架构决策记录ADR.md)）。RAG 解决"问得到"，以 `search_docs` Tool 接入（[rag-service-整体设计.md](../../RAG服务/rag-service-整体设计.md)）；制造追溯是 agent 的只读取证工具（归属待定，见 [制造追溯-需求与实现效果.md](../../制造追溯-需求与实现效果.md)）；Agent 解决"做得完"——多步规划、主动触发、可控写回。RAG 侧不再有多步编排，因此不存在两层 ReAct 叠加。
 > **口径纪律**：说"规划 / 设计取舍"，不说"已上线 Agent"；不编业务效果数字。MES 对误写零容忍（错发一张返工单可能批量报废），写动作的闸门始终在人手里。
 > **配套**：[诊断能力](FactoryAgent-诊断能力.md)、[草稿编写能力](FactoryAgent-草稿编写能力.md)、[流程编排能力](FactoryAgent-流程编排能力.md)、[统一架构与流程](FactoryAgent-统一架构与流程图.md)、[能力边界与选型决策卡](FactoryAgent-能力边界与选型决策卡.md)、[现场痛点与能力嵌入点](FactoryAgent-现场痛点与能力嵌入点.md)。
 > **底座口径**：Agent 底座为 **AgentScope 2.0**（详见 `../../基于AgentScope2.0的架构设计.md` 与 `../../架构设计v2/00-架构决策记录ADR.md`）。本文所有编排形状都是**应用层 Python 代码**（顺序 `await` + `asyncio.gather`），框架不提供、本文也不写任何 pipeline / 图 DSL 原语。
@@ -82,7 +82,7 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 | 任务规划 | `TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate` 工具 + `Task` / `TaskContext` + `AgentState` | ⚠️ **不存在独立"Plan 模块"**（无 `agentscope.plan`）：官方"Plan"就是这 4 个工具写 `agent.state.tasks_context`；长链路的持久规划与重规划仍属应用层 / 工作流引擎职责 |
 | LLM 抽象 | AgentScope **Model** 抽象（如 `DashScopeChatModel` + `Credential`） | 模型可插拔（Claude / 通义千问 / DeepSeek / 本地化模型）；结构化输出走 Content Block（Pydantic `Msg`，含 `usage` 与 block `id`）强约束 |
 | 数据校验 | **Pydantic v2** | 工具入参 / 报告 / 草稿 / 动作卡的 schema 即类型，自动生成 JSON Schema 给模型 tool-calling |
-| HTTP 客户端 | **httpx**（异步） | 调各上下文只读 REST、调 RAG 服务、调上下文应用服务写接口 |
+| HTTP 客户端 | **httpx**（异步） | 调各上下文只读 REST、调文档知识工具（`search_docs`）、调上下文应用服务写接口 |
 | 消息 | **aiokafka** | 订阅领域事件（`ProcessRouteActivated`、`equipment.fault` 等）做主动触发；动作卡离线兜底 topic |
 | 实时推送 | AgentScope **事件流**（`reply_stream`）+ `AGUIProtocolMiddleware`；SSE / WebSocket 作传输，Kafka 作离线兜底 | 编排的动作卡实时推给责任人在线 UI，HITL 确认与推送同源 |
 | 持久化 | **SQLAlchemy 2.0 (async) + asyncmy** | 会话、步骤记录、报告、草稿存档、gate 决策、工具调用 trace；**run 先落库再执行**（ADR-07） |
@@ -138,8 +138,8 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 │        │  ToolPolicyGate：只读断言 / 无写 client / 写需确认 / 无放行工具      │    │
 │        └──────┬──────────┬──────────┬──────────┬──────────┬────────────────┘    │
 │               ▼          ▼          ▼          ▼          ▼                      │
-│          ACL 过点    ACL 工艺    ACL 物料    ACL 设备    RAG 服务                  │
-│          （只读）    （只读+版本）（只读）  （只读）    （只读检索/证据回查）       │
+│          ACL 过点    ACL 工艺    ACL 物料    ACL 设备    追溯读模型 + 文档工具      │
+│          （只读）    （只读+版本）（只读）  （只读）    （只读查询/证据回查）       │
 │               │          │          │          │          │                      │
 │               └──────────┴────┬─────┴──────────┴──────────┘                      │
 │                               ▼                                                  │
@@ -147,7 +147,7 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 │           -> 各上下文正常应用服务（聚合根不变式 + 事务发件箱）                        │
 └───────────────────────────────┬──────────────────────────────────────────────────┘
                                 ▼
-        生产执行服务(Java) / 制造资源服务(Java) / 设备管理服务(Java) / RAG 服务
+        生产执行服务(Java) / 制造资源服务(Java) / 设备管理服务(Java) / 追溯读模型(MySQL) / rag-service(文档工具)
                                 ▲
                                 │ 领域事件订阅（主动触发：异常巡检 / SOP 升版草拟 / 故障复产）
                           aiokafka
@@ -242,7 +242,9 @@ agent_step_record
 | 设备数据接入 | `query_device_params` / `query_equipment_telemetry` | 无 |
 | 设备工装台账 | `query_asset_status` / `query_stencil_lending` / `query_stencil_master_history` | `draft_isolation_card`（草拟隔离集，人确认后下达） |
 | 返修 / 返工 | `query_repair_history` / `query_rework_orders` | `draft_rework_order`（草拟返工单） |
-| RAG 服务 | `query_traceability`（关系型固定查询计划） / `fetch_evidence_set`（回查关系型证据子集） / `search_docs` | 无 |
+| 制造追溯（只读，归属待定） | `trace_lookup`（关系型固定查询计划） / `record_expand` / `version_resolve` | 无 |
+| 文档知识工具（`rag-service`） | `search_docs`（Tool over HTTP） / `fetch_doc_answer` | 无 |
+| 证据集 | `fetch_evidence_set`（agent 侧 EvidenceRegistry 签发，`GET /agent/evidence-sets/{id}`） | 无 |
 
 ### 5.2 工具元数据
 

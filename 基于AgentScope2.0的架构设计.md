@@ -42,34 +42,40 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │              前端 / 工位 UI / 责任人卡片（AGUI 事件流实时渲染）        │
-└──────────┬──────────────────────┬──────────────────────────────────┘
-           │ R1 统一 RAG 查询      │ 事件流（reply_stream / AGUIProtocolMiddleware）
-           ▼                      ▼
-┌────────────────────┐   ┌──────────────────────────────────────────┐
-│   rag-service      │   │        agent-service (Python, AgentScope 2.0)│
-│  (AgentScope 2.0)  │◄──┤  统一 Agent 类：诊断 / 草稿 / 流程编排 │
-│ 文档检索+追溯+编排 │   │  asyncio 并发 + Permission 闸门 + Workspace │
-└─────────┬──────────┘   └──────────────┬───────────────────────────┘
-          │ Kafka 事件同步读模型          │ Tool（httpx）只读 REST + 受限写
-          │ + MES 只读 REST              │ + Kafka 事件订阅 -> 事件系统
-          ▼                              ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│            MES 主体服务 (Java/Spring，已有，不替换)                    │
-│   生产执行服务 │ 制造资源服务 │ 设备管理服务 (14 个限界上下文)         │
-└─────────────────────────────────────────────────────────────────────┘
-          ▲                              ▲
-          │      共享底座（跨服务）        │
-          └── OpenJudge 评测 + TracingMiddleware(OTel) ──┘
+└──────────┬──────────────────────────────────────┬──────────────────┘
+           │ 统一入口（意图分诊）                  │ 事件流（reply_stream / AGUI）
+           ▼                                      ▼
+┌────────────────────────┐      ┌───────────────────────────────────────────┐
+│ agent-gateway-service  │─────▶│        agent-service (Python, AgentScope 2.0) │
+│ 意图路由（唯一分诊点）  │      │  统一 Agent 类：诊断 / 草稿 / 流程编排      │
+└────────────────────────┘      │  Toolkit：trace_lookup / search_docs / ...  │
+           │                    │  asyncio 并发 + Permission 闸门 + Workspace │
+           │                    └──────┬─────────────────────────┬────────────┘
+           │      Tool over HTTP       │                         │
+           │    ┌──────────────────────┘                         │
+           ▼    ▼                                                ▼
+┌──────────────────────────┐              ┌──────────────────────────────────┐
+│  rag-service（文档知识）  │              │ MES 主体服务 (Java/Spring，不替换) │
+│  ChromaDB + bge-m3       │              │ 生产执行 │ 制造资源 │ 设备管理     │
+│  search_docs（只读工具）  │              │ (14 个限界上下文，唯一业务写权限) │
+└──────────────────────────┘              └──────────────────────────────────┘
+        │ Kafka 只读事件（文档重索引）                ▲ Kafka 只读事件 + REST 只读
+        └─────────────────────────────────────────┘
+
+制造追溯（trace_lookup / record_expand / version_resolve）是 agent 侧的
+只读取证工具：MySQL 读模型 + 固定查询计划 + MES 只读补数，**归属待定**
+（并入 agent-service 或独立 trace-query-service），见 制造追溯-需求与实现效果.md。
 ```
 
-### 1.2 三大服务边界（职责不变，实现底座切换为 AgentScope 2.0）
+### 1.2 服务边界（职责不变，实现底座切换为 AgentScope 2.0）
 
 | 服务 | 语言/框架 | 职责定位 | 写权限 |
 |------|----------|---------|--------|
-| **agent-service** | Python + AgentScope 2.0 | 把"查 -> 诊断 -> 草拟处置 -> 推动作"串成自动链；写闸门由 **Permission 系统**承载 | 诊断能力全程只读；草稿能力仅产草稿不落库；编排能力受限写 + Permission gate |
-| **rag-service** | Python + AgentScope 2.0（RAG 模块 / Toolkit） | 一个统一 RAG，组合文档检索、非图制造追溯与 Agentic 检索编排 | 全程只读 MES；仅写 RAG 自有索引、读模型与审计 |
+| **agent-service** | Python + AgentScope 2.0 | 把"查 -> 诊断 -> 草拟处置 -> 推动作"串成自动链；**唯一编排方**；持有只读取证工具（含制造追溯，归属待定）；写闸门由 **Permission 系统**承载 | 诊断能力全程只读；草稿能力仅产草稿不落库；编排能力受限写 + Permission gate |
+| **rag-service** | Python + AgentScope 2.0（Embedding / Model） | **文档知识工具**：文档召回 + 引用 + 文档版本治理，以 `Tool` over HTTP 接入 agent-service；不做追溯、不做编排 | 全程只读 MES；仅写文档索引、文档治理表与审计 |
+| **agent-gateway-service** | Python（轻量） | 意图路由：检索 / 诊断 / 草稿（唯一分诊点，规则 + LLM 兜底分类器） | 无写权限 |
 | **MES 主体服务** | Java/Spring | 14 个限界上下文核心业务与写路径 | 唯一业务写权限，聚合根不变式 + 事务发件箱 |
-| **mes-eval** | Python + `py-openjudge` + 自研 `EvalRunner` | 统一 RAG 的检索/追溯/编排/端到端评测 + Agent 三层级评测、标定、漂移、CI 门禁 | 只读评测 |
+| **mes-eval** | Python + `py-openjudge` + 自研 `EvalRunner` | 文档知识工具 / 制造追溯工具 / 编排层 / 端到端评测 + Agent 三层级评测、标定、漂移、CI 门禁 | 只读评测 |
 
 ### 1.3 跨语言协作模型（Python Agent ↔ Java MES）
 
@@ -114,7 +120,7 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 | 通义千问（DashScope） | 多 provider 之一 + AgentScope 原生适配，观测一致性验证 |
 | DeepSeek / Haiku / 本地小模型 | Router 分类、cascading 降级、便宜分类器候选 |
 | Claude Opus 级 | OpenJudge LLM-as-judge 裁判（与被测不同族） |
-| Embedding 模型 | 统一 RAG 的文档向量化（经 AgentScope **Embedding** 模块接入） |
+| Embedding 模型 | 文档知识工具的向量化（经 AgentScope **Embedding** 模块接入） |
 
 > 通过 AgentScope **Model** 抽象统一切换 provider（DashScope/Ollama/OpenAI 兼容等）；任何模型降级仍须过评测门禁。
 
@@ -140,9 +146,9 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 | 组件 | 用途 | 替换/说明 |
 |------|------|----------|
 | **Redis** | **Redis-backed storage**（`SessionService` 会话状态 / 多租户资源）；ConfirmationStore 语义并入 Permission；工具结果缓存、限流 | 会话持久化从 MySQL checkpoint 三表迁移到 AgentScope Session store |
-| **MySQL** | ① 业务可观测表；② 评测表族（`mes_eval` schema）；③ `AgentState` 归档/审计（可选）；④ RAG 文档元数据、关系型追溯读模型、事件位点与答案审计 | 不再需要 LangGraph SqlSaver 三表；新增统一 RAG 的读模型与审计用途 |
-| **ChromaDB** | 统一 RAG 的文档向量检索，经 AgentScope **RAG/Embedding** 模块接入，chunk 不可变并执行版本/权限过滤 | 检索接入层由 AgentScope RAG 模块承载 |
-| **SQLAlchemy 2.0 (async) + asyncmy** | MySQL ORM（业务表/评测表/RAG 读模型），追溯采用参数化固定查询计划 | 不使用图数据库或图查询驱动 |
+| **MySQL** | ① 业务可观测表；② 评测表族（`mes_eval` schema）；③ `AgentState` 归档/审计（可选）；④ 文档元数据与答案审计（rag-service）；⑤ 制造追溯读模型与事件位点（agent 侧或独立只读服务，归属待定） | 不再需要 LangGraph SqlSaver 三表；文档治理与追溯读模型**分库分 schema** |
+| **ChromaDB** | 文档知识工具的向量检索，**自持 client** 接入，chunk 不可变并执行版本/权限过滤 | ⚠️ 框架 RAG 模块无 Chroma 适配器，不押注其抽象 |
+| **SQLAlchemy 2.0 (async) + asyncmy** | MySQL ORM（业务表/评测表/文档治理表/追溯读模型），追溯采用参数化固定查询计划 | 不使用图数据库或图查询驱动 |
 
 ### 2.7 消息 / 事件
 
@@ -150,7 +156,7 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 |------|------|----------|
 | **AgentScope 事件系统** | 统一事件总线：服务前端 agent 应用 + human-in-the-loop 协作；`reply_stream` 产出 agent events | **替换自研 WebSocket/SSE 推送编排** |
 | **`AGUIProtocolMiddleware`** | 流式传输到前端（动作卡实时渲染） | 前端实时推送内生化 |
-| **Kafka (`aiokafka`)** | ① 领域事件订阅（`ProcessRouteActivated`/`equipment.fault` 主动触发）-> 桥接进事件系统；② 动作卡持久推送 topic（离线兜底）；③ RAG 幂等更新文档索引与关系型追溯读模型 | 保留 Kafka 作为跨服务事件总线；进程内协同改用 AgentScope 事件系统 |
+| **Kafka (`aiokafka`)** | ① 领域事件订阅（`ProcessRouteActivated`/`equipment.fault` 主动触发）-> 桥接进事件系统；② 动作卡持久推送 topic（离线兜底）；③ 文档重索引事件（rag-service）与制造追溯读模型同步（agent 侧角色，归属待定） | 保留 Kafka 作为跨服务事件总线；进程内协同改用 AgentScope 事件系统 |
 
 ### 2.8 可观测
 
@@ -255,17 +261,17 @@ agent_service/app/
 | `POST /agent/orchestration/{session_id}/confirm` | 编排能力 | Permission gate 确认，由事件系统触发续跑（替换 `Command(resume=token)`） |
 | `GET /agent/orchestration/{session_id}/events` | 编排能力 | 事件流订阅（AGUI），动作卡实时推送 |
 
-### 3.2 `rag-service` 模块结构（统一 RAG，接入 AgentScope RAG/Toolkit）
+### 3.2 `rag-service` 模块结构（文档知识工具，Tool over HTTP 接入 agent-service）
 
-rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查接口。内部共享 `RagQuery`、`RagAnswer`、`Evidence`、`VersionAnchor` 和 `TenantContext`，不设置路线级模块或开关。
+rag-service 只做一件事：**给定问题与版本锚点，召回文档片段并给出带定位引用的证据**。它不再承担制造追溯、不再承担多步编排；`AUTO` 编排已下线，只保留 `RETRIEVAL_ONLY` 与工具端点。与 agent 的关系见 [ADR-13](架构设计v2/00-架构决策记录ADR.md)，设计细节见 [rag-service-整体设计.md](RAG服务/rag-service-整体设计.md)。
 
 | 内部能力 | 职责 | 技术形态（AgentScope 2.0 版） |
 |----------|------|------------------------------|
-| 文档检索 | SOP/手册/标准/8D 检索与精确引用 | AgentScope **RAG 模块 + Embedding** + ChromaDB + 版本/权限过滤 |
-| 制造追溯 | 单件、批次、工单及 5M1E 证据串联 | MySQL 关系型读模型 + 固定关联查询 + MES 只读 REST，封装为 **Tool** |
-| Agentic | 根据证据缺口追加检索并组合多源证据 | **统一 Agent 类 + Toolkit**，限制工具、步数、时长与记录数 |
+| 文档摄入与版本治理 | 解析、切块、发布状态机、绑定关系、事件驱动重索引 | FastAPI + MySQL 治理表 + Kafka 只读消费 |
+| 检索与引用 | 锚点 / 租户 / 状态**前置过滤**召回 + 精排 + `locator` 引用 | AgentScope **Embedding** + ChromaDB **自持 client** |
+| 工具端点 | `search_docs`、`fetch_doc_answer`、证据回查、解释接口 | FastAPI 只读端点 + `Tool` schema（agent 侧注册） |
 
-简单请求由应用服务直接调用检索 Port；只有需要多源组合或补查时才进入 Agentic。追溯不使用图检索，不引入 Neo4j、Cypher、图投影或 `subgraph_ref`。交付按统一底座与文档检索 -> 关系型追溯 -> Agentic -> 生产治理增量推进。
+制造追溯已迁出本服务，形态为 **agent 侧只读工具**（MySQL 读模型 + 固定查询计划 + MES 只读补数），**归属待定**，见 [制造追溯-需求与实现效果.md](制造追溯-需求与实现效果.md)；追溯不使用图检索，不引入 Neo4j、Cypher 或图投影。
 
 ### 3.3 `mes-eval` 评测库模块结构（对接 OpenJudge）
 
@@ -277,18 +283,18 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | **CalibrationService / DriftDetector** | 置信度标定（ECE/Platt/isotonic）/ 漂移（PSI） | 统计层，OpenJudge 之上 |
 | **SafetyChecker / VersionAnchorChecker** | 安全红线硬断言 / 版本锚点比对 | 保留（MES 专用硬门禁） |
 | **CIGate** | CI 门禁（hard/soft gate） | 保留 |
-| **EvalTarget 适配器** | 统一 RAG 一个端到端适配器，按用例评检索、追溯与编排；Agent 三层级各自适配 | 适配到 AgentScope Agent/Tool 接口 |
+| **EvalTarget 适配器** | 文档知识工具 / 制造追溯工具 / 编排层各自适配；Agent 三层级各自适配 | 适配到 AgentScope Agent/Tool 接口 |
 
 ### 3.4 模块间集成点与接口契约
 
 | 集成点 | 接口/契约 | 方向 | 说明 |
 |--------|----------|------|------|
-| 诊断能力检索证据 | `query_rag` Tool 封装 `POST /rag/query`，使用 `RETRIEVAL_ONLY` | Agent -> RAG | 一次调用按需获得文档与追溯证据 |
-| 诊断能力只读补数 | 各上下文只读 REST Tool | Agent -> MES | 仅用于 RAG 未覆盖且已列入白名单的只读查询 |
-| 草稿能力回查证据 | 证据集回查 Tool / `GET /rag/answers/{answer_id}/evidence` | Agent -> RAG | 复用诊断证据与版本锚点，必要时通过统一 RAG 补查 |
-| 草稿能力检索文档 | `query_rag(query, version_anchor, RETRIEVAL_ONLY)` Tool | Agent -> RAG | 8D/SOP 草拟检索适用版本的历史文档 |
+| 诊断能力检索证据 | `search_docs` Tool 封装 `POST /rag/docs/search`，使用 `RETRIEVAL_ONLY` | Agent -> RAG | 一次调用获得文档证据；制造事实由 `trace_lookup` 单独取证 |
+| 诊断能力只读补数 | 各上下文只读 REST Tool | Agent -> MES | 仅用于追溯工具未覆盖且已列入白名单的只读查询 |
+| 草稿能力回查证据 | 证据集回查 Tool / `GET /agent/evidence-sets/{id}` + `GET /rag/answers/{answer_id}/evidence` | Agent -> RAG | 统一证据集由 agent 侧签发，rag 只回查文档侧引用 |
+| 草稿能力检索文档 | `search_docs(query, version_anchor \| evidence_set_id)` Tool | Agent -> RAG | 8D/SOP 草拟检索适用版本的历史文档 |
 | 编排能力受限写 | ACL 写 Tool -> 应用服务 REST（header `X-Confirmation-Token` + `X-Confirmed-By`） | Agent -> MES | **由 Permission gate 放行后**才可调用，走聚合根不变式 + 事务发件箱 |
-| RAG 读模型同步 | Kafka 领域事件流 | MES -> RAG | 幂等更新文档索引和 MySQL 关系型追溯读模型 |
+| RAG 读模型同步 | Kafka 领域事件流 | MES -> RAG | 幂等更新**文档索引**；制造追溯读模型同步归追溯工具（agent 侧，归属待定） |
 | 主动触发 | `ProcessRouteActivated`/`equipment.fault` -> 事件系统 | MES -> Agent | 触发草稿能力异步草拟 / 编排能力故障复产 |
 | 动作卡推送 | 事件系统 + `AGUIProtocolMiddleware` + Kafka 兜底 | Agent -> 前端 | 实时 + 离线双通道 |
 | 评测接入 | EvalTarget 适配器 | mes-eval -> Agent/RAG | 统一跑集判定 |
@@ -296,7 +302,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 
 **版本一致性传递链**（核心安全契约，不变）：
 ```
-制造记录/文档的 VersionAnchor -> RAG Evidence.version_anchor -> 诊断能力 evidence.version_anchor -> 草稿能力 Draft.version_anchor -> MES 应用服务校验 ACTIVE
+制造事实（追溯工具）-> 版本锚点三段 `VersionAnchor` -> 文档证据（rag-service）Evidence.version_anchor -> 诊断能力 evidence.version_anchor -> 草稿能力 Draft.version_anchor -> MES 应用服务校验 ACTIVE
 ```
 
 ---
@@ -311,7 +317,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | **草稿能力** | 固定链 + 策略分派 | `Agent` + 策略化 draft agents，产草稿不落库 | `nowrite_policy`，`requires_confirmation` 恒 True |
 | **编排能力** | Pipeline 代码图 | **`flows/` 应用层编排（顺序 `await` + `asyncio.gather` 并发独立 Agent）+ 确定性节点 + 能力节点** | `gated_write_policy` + HITL |
 
-> 统一入口路由归独立的 `agent-gateway-service`（入口网关，负责意图分诊 + 跨能力委托），不是第四项能力；rag-service 的 Agentic 只做检索内编排（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)）。
+> 统一入口路由归独立的 `agent-gateway-service`（入口网关，负责意图分诊 + 跨能力委托），不是第四项能力；检索内编排归 `agent-service` 编排层，rag-service 只提供文档知识工具 `search_docs`（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)；[ADR-13](架构设计v2/00-架构决策记录ADR.md)）。
 
 ### 4.2 能力间数据流
 
@@ -363,7 +369,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | 7 | **执行隔离用 Workspace（Local/Docker/E2B）+ WorkspaceManager** | 受限写/代码执行沙箱化；多租户 agent-level isolation 内生 |
 | 8 | **前端推送用事件系统 + AGUIProtocolMiddleware 替代自研 WS/SSE 编排** | 动作卡实时渲染 + HITL 确认同源，Kafka 仍作离线兜底 |
 | 9 | **评测栈自建：`py-openjudge` 作 judge + 自研 `EvalRunner`/CI 门禁** | ⚠️ `agentscope.evaluate` 2.0 已删且未回归，**不存在内生评测**；Ragas/DeepEval 作为检索指标的可选实现保留 |
-| 10 | **检索内工具选择由 Agentic RAG 的单 Agent ReAct + `Toolkit` 承担；入口意图分诊归独立网关** | ⚠️ AgentScope 无 Handoffs/Routing 原语；网关分派是确定性 HTTP 调用 + 兜底分类，跨能力委托是显式服务调用 + `evidence_set_id` 传递，不是框架移交机制 |
+| 10 | **检索内工具选择由 `agent-service` 编排层的单 Agent ReAct + `Toolkit` 承担；入口意图分诊归独立网关** | ⚠️ AgentScope 无 Handoffs/Routing 原语；网关分派是确定性 HTTP 调用 + 兜底分类，跨能力委托是显式服务调用 + `evidence_set_id` 传递，不是框架移交机制 |
 | 11 | **消息/内容用 Content Block（Pydantic）+ Msg（usage/时间戳/block id）** | 天然可校验/序列化/计费/溯源，替代零散结构化输出 |
 | 12 | **跨语言仍 Python Agent + Java MES；预留 AgentScope Java 2.0 同构扩展** | 物理边界安全不变；未来跨语言扩展无需换框架心智 |
 | 13 | **安全红线不变、承载升级**（诊断能力只读/草稿能力不持写/编排能力 gated write） | "能不能写"的语义不变；"如何强制"= 网关一次性令牌（主闸）+ Permission/HITL（叠加层），自研断言并入这两层 |
@@ -410,7 +416,7 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 | **第 3 步** | 横切能力替换 | obs->TracingMiddleware、cost->Offloader/`ToolOffloadMiddleware`、longtask->`SessionService`/Permission |
 | **试点** | 编排能力换线编排 | `flows/changeover.py` 顺序 `await` + 网关令牌（主闸）+ Permission gate + 事件系统 HITL，confirmation 做扎实 |
 | **扩展** | 编排能力其余场景 | `asyncio.gather` 并发独立 Agent 承载故障复产；客诉 8D / 工艺变更为顺序调用（跨天部分待工作流引擎） |
-| **收口** | 独立入口网关 `agent-gateway-service` | 意图分诊用规则 + LLM 兜底分类器（不是 Agent ReAct），跨能力委托为显式调用 + `evidence_set_id` 传递；检索内工具选择归 Agentic RAG（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)） |
+| **收口** | 独立入口网关 `agent-gateway-service` | 意图分诊用规则 + LLM 兜底分类器（不是 Agent ReAct），跨能力委托为显式调用 + `evidence_set_id` 传递；检索内工具选择归 `agent-service` 编排层（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)） |
 
 > 迁移策略：**端点契约不变**（`/agent/diagnose` 等），每层迁移后用 mes-eval（自研 runner + `py-openjudge`）对齐旧基线，通过评测门禁才切流量，保证平滑替换、可回滚。
 > **两条前置**：① 单 Agent 基线先跑通并测出准确率——基线 >45% 后加 Agent 是负回报（《复核》数据），不要用"上了多 Agent"当作里程碑；② 版本 pin 与 API 漂移检查列入 CI，`agentscope` 2.0.x 已出现过模块删除与改名（`pipeline`/`MsgHub` 删、`SessionManager`→`SessionService`）。
@@ -450,10 +456,11 @@ rag-service 只建设一个 RAG，统一暴露 `POST /rag/query` 与证据回查
 ## 9. 附录：源文档索引
 
 - `整体技术选型与模块划分.md` — 全仓总览（已对齐本文 AgentScope 2.0 口径）
-- `架构设计v2/00-架构决策记录ADR.md` — **本文每条选型背后的判定依据、证据分级与被证伪项**（ADR-01…ADR-12）
+- `架构设计v2/00-架构决策记录ADR.md` — **本文每条选型背后的判定依据、证据分级与被证伪项**（ADR-01…ADR-13）
 - `AGENT服务/` — 三项能力分层与三大横切能力设计
-- `RAG服务/` — 统一 RAG 的文档检索、关系型制造追溯与 Agentic 检索编排
-- `RAG与Agent评测/` — 检索/追溯/编排/端到端与 Agent 分层评测
+- `RAG服务/` — 文档知识工具（rag-service 设计 + 实现）
+- `制造追溯-需求与实现效果.md` — 制造追溯的需求、实现机制与效果口径（归属待定）
+- `RAG与Agent评测/` — 文档知识 / 制造追溯 / 编排 / 端到端与 Agent 分层评测
 - `领域模型/`、`实现说明/` — MES 主体（Java）14 个限界上下文与基础设施
 
 > 说明：本文为**技术选型重设计稿**。文中组件名已按 **AgentScope 2.0.11 源码树逐 tag 核对**（核对过程与证据见 `架构设计v2/00-架构决策记录ADR.md` ADR-01），不再写"以官方文档为准"式的模糊表述：**已删除/不存在的原语已从生产路径剔除并列在附录速查表下方**。落地前仍需把 `agentscope` pin 到具体小版本，并在 CI 加 API 漂移检查——2.0.x 系列内已发生过模块删除（`pipeline`/`MsgHub`）与改名（`SessionManager`→`SessionService`）。

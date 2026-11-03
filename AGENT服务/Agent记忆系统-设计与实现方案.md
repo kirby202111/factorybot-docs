@@ -304,7 +304,7 @@ FIELD_WHITELIST: dict[str, list[str]] = {
     "query_pass_records": ["sn", "work_order_id", "station_id", "equipment_id",
                            "route_version", "decision", "blocking_reason"],
     "query_test_results": ["test_id", "station_id", "test_type", "raw_verdict"],
-    "query_traceability": ["serial_no", "evidence_set_id", "version", "version_kind", "version_ref_id"],
+    "trace_lookup": ["serial_no", "evidence_set_id", "version", "version_kind", "version_ref_id"],
 }
 LIST_TRUNCATE = 5  # 列表最多保留前 5 项
 

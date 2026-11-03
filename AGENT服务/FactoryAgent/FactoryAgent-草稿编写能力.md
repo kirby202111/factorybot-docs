@@ -14,7 +14,7 @@
 诊断给出"这批 SN 焊接不良，根因大概率是锡膏批次 B-77 回温不足"之后，工程师还要做四件事：翻追溯链确认受影响范围、找历史同类 8D 参考、查返工路线、把单子字段一项项填进界面。草稿编写能力把这四步合成一条链：
 
 1. 按诊断传来的 `evidence_set_id` 回查关系型证据子集，提取 `source_work_order_id`、`affected_sn_list`、`reentry_point`
-2. 调文档型 RAG 检索历史同类 8D / 现有 SOP / 模板
+2. 调文档知识工具（`search_docs`）检索历史同类 8D / 现有 SOP / 模板
 3. LLM 综合成结构化草稿（`intent + payload + evidence_refs`）
 4. 工程师在正式界面审核确认 → 走对应上下文的**正常应用服务**落库
 
@@ -53,7 +53,7 @@ Draft（返回给前端，等人在正式界面确认）
 | **不旁路应用服务写** | 落库走返工 / 工单 / 质量 / 工艺上下文的正常应用服务 | confirmation gate 的"下达"由前端调 MES 正式 API，草稿服务完全不参与写路径 |
 | **不进过点主事务** | 草拟异步，与过点判定解耦 | 草拟秒级；过点 P99 ≤200ms 不受影响 |
 | **版本一致性** | 草稿锁定的版本透传自诊断证据，不自行指定 | `Draft.version/kind/ref_id` 来自 `DiagnosisReport`；返工路线 `ReworkRoute` 走独立版本规则（待工艺上下文明确） |
-| **不开放补查** | 只按 `evidence_set_id` 回查关系型证据子集 | `fetch_evidence_set(evidence_set_id)`，不调 `query_traceability`（开放补查归诊断） |
+| **不开放补查** | 只按 `evidence_set_id` 回查证据集 | `fetch_evidence_set(evidence_set_id)`，不调 `trace_lookup`（开放补查归诊断） |
 | **权限隔离** | 租户上下文透传全程 | `DraftRequest.tenant` 透传到证据集回查 / 文档检索 |
 
 ### 1.4 与其它能力的关系
@@ -70,7 +70,7 @@ Draft（返回给前端，等人在正式界面确认）
 |---------|-------------|-----------|---------|---------|
 | 返工单 | `REWORK_ORDER` | 返工上下文（`brework.*`） | `source_work_order_id`、`affected_sn_list`、`reentry_point`、`rework_route_ref` | 关系型证据子集 `evidence_set_id`（`WipUnit` / `WorkOrder` / `RouteStep` 行） |
 | 8D 报告 | `EIGHT_D` | 质量上下文 | 问题描述 / 根因 / containment / 纠正措施 / 验证 | 证据子集内的 5M1E 证据 + 历史 8D + 诊断假设排序 |
-| SOP | `SOP` | 工艺管理上下文 | 工序步骤 / 参数 / 版本 | `ProcessRouteActivated` 新版本 + 文档型 RAG 现有 SOP |
+| SOP | `SOP` | 工艺管理上下文 | 工序步骤 / 参数 / 版本 | `ProcessRouteActivated` 新版本 + 文档知识工具现有 SOP |
 | 处置卡 | `DISPOSITION_CARD` | 对应上下文应用服务（钢网归还 / 领用 / 台账修正…） | `root_cause_hypothesis`、`suggested_actions`、`route_to` | 诊断根因 + 钢网借还 / 工艺审计 / 收线记录 |
 | 隔离集卡 | `ISOLATION_CARD` | 返工 / 返修上下文 | `batch_set`、每批隔离理由、`release_set`（不受影响） | 设备遥测窗口 + FMEA + 产品敏感度 + 在库品查询 |
 
@@ -170,15 +170,15 @@ class DraftService:
 ### 4.3 只读 ACL（回查证据集 + 检索文档）
 
 ```python
-# app/infrastructure/acl/rag.py
-class RagAclClient:
-    """追溯读模型只读 ACL：按 evidence_set_id 回查关系型证据子集，不开放补查。"""
+# app/infrastructure/acl/evidence.py
+class EvidenceSetClient:
+    """统一证据集回查：由 agent-service 的 EvidenceRegistry 签发与提供，不开放补查。"""
 
     async def fetch_evidence_set(
         self, evidence_set_id: str, tenant: TenantContext
     ) -> list[EvidenceSetView]:
         resp = await self._http.get(
-            f"/rag/trace/evidence-set/{evidence_set_id}",
+            f"/agent/evidence-sets/{evidence_set_id}",
             headers=tenant.headers(),
             timeout=2.0,
         )
@@ -189,7 +189,7 @@ class RagAclClient:
 ```python
 # app/infrastructure/acl/doc_rag.py
 class DocRagAclClient:
-    """文档型 RAG 只读 ACL：历史 8D / 现有 SOP / 模板检索，带版本过滤。"""
+    """文档知识工具只读 ACL：历史 8D / 现有 SOP / 模板检索，带版本过滤。"""
 
     async def search_docs(
         self, query: str, tenant: TenantContext,
@@ -251,7 +251,7 @@ await runtime.invoke(
 ## 6. 实现步骤
 
 1. 落 `DraftService` + `DraftBuilder` 策略基类 + 返工单 builder，打通"诊断 → 返工单草稿"闭环。
-2. 接 `fetch_evidence_set`（rag-service 需提供只读证据子集回查端点）与 `search_docs`。
+2. 接 `fetch_evidence_set`（agent 侧 EvidenceRegistry 提供统一证据集回查）与 `search_docs`。
 3. 实现 8D builder（历史 8D 检索 + 5M1E 证据聚类）与 SOP builder（工艺 diff + 现有 SOP）。
 4. 实现处置卡 / 隔离集卡 builder，供编排的非确定能力节点统一产出。
 5. 落草稿存档表 + 工程师 UI（草稿 + 证据链 + 确认/驳回）。
@@ -265,7 +265,7 @@ await runtime.invoke(
 - [ ] `CapabilitySpec(writes_allowed=False)`；草稿能力**不持有任何写 HTTP client**，启动断言扫描方法名通过。
 - [ ] `Draft.requires_confirmation` 恒 `True`；草稿只落 `agent_draft` 存档表。
 - [ ] 下达动作由前端调 MES 正式 API，草稿能力不参与写路径；落库过聚合根不变式 + 事务发件箱。
-- [ ] 不调 `query_traceability`（开放补查归诊断能力），只按 `evidence_set_id` 回查关系型证据子集。
+- [ ] 不调 `trace_lookup`（开放补查归诊断能力），只按 `evidence_set_id` 回查证据集。
 - [ ] `Draft.version/kind/ref_id` 透传自 `DiagnosisReport`，不自行指定。
 - [ ] 返工单字段对齐 `BatchReworkOrder`：`source_work_order_id` / `affected_sn_list` / `reentry_point` / `rework_route_ref`。
 - [ ] `tenant` 透传到证据集回查 / 文档检索全程。
@@ -281,9 +281,9 @@ await runtime.invoke(
 1. **返工路线 `ReworkRoute` 的版本规则**：返工走独立路线（非正常工艺版本），是否有版本生命周期？草拟时如何选 `rework_route_ref`？需工艺管理上下文明确。
 2. **8D 模板归属**：字段模板由质量上下文定义还是自由生成？影响 `EightDDraftBuilder` 的 prompt 结构。
 3. **审批人角色矩阵**：返工单 / 8D / SOP / 处置卡 / 隔离集卡各自确认人是谁（线长 / 工艺 / 质量 / 生产主管）？需与权限模型对齐。
-4. **`evidence_set_id` 跨服务生命周期**：落在 rag-service 的关系型读模型，草稿能力回查——保留多久？是否随工单归档？
+4. **`evidence_set_id` 跨服务生命周期**：由 agent-service 的 EvidenceRegistry 签发并落库（含追溯与文档两类证据），草稿能力回查——保留多久？是否随工单归档？
 5. **草稿落库的应用服务契约**：各上下文"人工决策生成"的 REST 端点 / 命令名需逐个对齐，`payload` 要能映射到应用服务入参。
-6. **只读证据子集回查端点**：`/rag/trace/evidence-set/{evidence_set_id}` 需 rag-service 侧补齐。
+6. **统一证据集回查端点**：`GET /agent/evidence-sets/{id}` 需 agent-service 侧补齐（文档侧引用另走 `GET /rag/answers/{answer_id}/evidence`）。
 
 ---
 
