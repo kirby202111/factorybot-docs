@@ -37,7 +37,7 @@
 | 原判据 | 复核裁定 | 它真正指向的解法 |
 |--------|---------|----------------|
 | C2 对抗校验（"自我审核推翻率极低，必须由独立审核 Agent"） | ❌ 因果倒置（P0-1） | **被 C8 取代**：审核的价值来自引入生成方不具备的**外部信息 / 工具**，与"是不是另一个 Agent"无关。没有新信息 → 不拆，改为单 Agent + 外部工具验证 |
-| C4 长程 / 大上下文 | ❌ 因果错误（P0-4） | 归入**外部化状态与分段短跑**：上下文压缩 + 每步重建上下文 + 跨确认闸门由工单待办回调重新发起一次短调用（会话内上下文用 `AgentState` + `SessionService`，Redis-backed；本项目**不用它做挂起/续跑**，理由见 [ADR-05](../架构设计v2/00-架构决策记录ADR.md)）。单 Agent 完全能达到同样效果；Multi-Agent 只是可选实现之一，不是必要条件 |
+| C4 长程 / 大上下文 | ❌ 因果错误（P0-4） | 归入**外部化状态与分段短跑**：上下文压缩 + 每步重建上下文 + 跨确认闸门由工单待办回调重新发起一次短调用（会话内上下文用 `AgentState` + `SessionService`，storage 选 `AsyncSQLAlchemyStorage` 落 MySQL；本项目**不用它做挂起/续跑**，理由见 [ADR-05](../架构设计v2/00-架构决策记录ADR.md)）。单 Agent 完全能达到同样效果；Multi-Agent 只是可选实现之一，不是必要条件 |
 | C5 权限与安全等级隔离 | ❌ 方向说反（P0-5） | 归入**工具执行层安全**：真正的边界在工具网关（服务端鉴权、参数校验、白名单、幂等键）与 Permission 闸门，不在"把工具挂给哪个 Agent"。同一进程内的"Agent 级物理隔离"只是 prompt 层的工具可见性；Agent 间通信通道要记为**新增攻击面（成本项）** |
 | C6 异构求解器 | ❌ 概念混淆（P0-2） | 归入**求解服务**：CP-SAT / 遗传算法 / 时序算法是确定性服务，不是 LLM 驱动的决策实体。C6 证明的是"需要工具化与编排"，不是"需要多个 LLM Agent" |
 | C7 多角色审批链 | ❌ 归错层（P0-3） | 归入**工作流引擎**：多审批人 + 先后/并行责任链是 BPMN / 审批流 / 状态机的原生职责。用 Multi-Agent 承载审批链，会得到比 BPMN 更难调试、更难审计、更难改的劣化实现 |
@@ -64,7 +64,7 @@
 | **状态机 Orchestrator + 无状态子 Agent** | 编排者只持状态机，每步新建短命子 Agent | **主体是工作流引擎，不是 Multi-Agent**：步骤 / 等待 / 升级 / 审批归工作流 + 外部化状态；每步挂一个**独立的单 Agent 建议器**或只读取证器。"任务长"本身不构成拆分理由（P0-4） | 换线编排（工作流引擎 + 每步单 Agent 建议器）、8D 闭环 |
 | **Blackboard（黑板）** | 多 Agent 读写共享证据板，异步贡献 | **适用面最窄**：共享写板同时踩两个坑——Agent 间通信通道是新增攻击面（P0-5），共享状态属强耦合（各自局部合理、合起来全局不自洽）；且**框架 2.0 不提供共享消息上下文原语**，要"黑板"就得自建中转（成本项，见下文底座口径）。MES 里应退化为**只读证据集存储 + 单线程汇总**，而不是让多 Agent 各写各的 | 跨周的 8D 措施跟踪（证据只读、写入单线程） |
 
-**拓扑的承载方式（底座口径）**：以 [架构设计v2/00-架构决策记录ADR.md](../架构设计v2/00-架构决策记录ADR.md) 的 ADR-01 裁定表 / ADR-02 四道闸，与 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §2.2 编排表、§6.1（诚实边界版）、§8 附录速查表为准——单 Agent 的推理循环用统一 `Agent` 类（`reply` / `reply_stream`，内置 ReAct）；**顺序流转**在应用层用 `await` 串联（上游产物以 Content Block 显式传入下游输入），**Fan-out/Fan-in** 用 `asyncio.gather` 并发多个**各自独立**的 `Agent.reply()`、结论在应用层显式合并，编排代码在本仓库落在 `flows/` 目录；会话内上下文与多轮记忆用 `AgentState` + `SessionService`（Redis-backed；2.0.5 起 `SessionManager` 已改名，旧名不可导入。⚠️ 不承担 gate 挂起/续跑，跨确认闸门靠分段重查事实，见 [ADR-05](../架构设计v2/00-架构决策记录ADR.md)）；写动作闸门与人在回路确认由 Permission 系统 + 事件系统（`RequireUserConfirmEvent`，作用域限于单次调用内）承载。
+**拓扑的承载方式（底座口径）**：以 [架构设计v2/00-架构决策记录ADR.md](../架构设计v2/00-架构决策记录ADR.md) 的 ADR-01 裁定表 / ADR-02 四道闸，与 [基于AgentScope2.0的架构设计.md](../基于AgentScope2.0的架构设计.md) §2.2 编排表、§6.1（诚实边界版）、§8 附录速查表为准——单 Agent 的推理循环用统一 `Agent` 类（`reply` / `reply_stream`，内置 ReAct）；**顺序流转**在应用层用 `await` 串联（上游产物以 Content Block 显式传入下游输入），**Fan-out/Fan-in** 用 `asyncio.gather` 并发多个**各自独立**的 `Agent.reply()`、结论在应用层显式合并，编排代码在本仓库落在 `flows/` 目录；会话内上下文与多轮记忆用 `AgentState` + `SessionService`（storage 选 `AsyncSQLAlchemyStorage` 落 MySQL；2.0.5 起 `SessionManager` 已改名，旧名不可导入。⚠️ 不承担 gate 挂起/续跑，跨确认闸门靠分段重查事实，见 [ADR-05](../架构设计v2/00-架构决策记录ADR.md)）；写动作闸门与人在回路确认由 Permission 系统 + 事件系统（`RequireUserConfirmEvent`，作用域限于单次调用内）承载。
 
 ⚠️ **框架不提供下列原语，需自建**（旧口径曾把它们写成"框架支持"，现已按源码核对撤回）：`MsgHub` / `sequential_pipeline` / `fanout_pipeline` 是 **1.x API**，2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 模块已删除；`Handoffs` / `Routing` **从未提供**——分诊是**单 Agent 的 ReAct + `Toolkit` 工具选择**，跨能力委托是**显式服务调用**（上下文只传 `evidence_set_id` / `session_id` / `traceparent`，不传消息历史）；"多 Agent 共享消息上下文"在 2.0 **无原语**，硬做要自建消息中转。`GoalPipeline` / `TeamPipeline` 虽仍存在但官方标注 **experimental**，且 `TeamPipeline` 明确"成员间不互相说话"——**观察，不进生产，不能作为"框架支持协同"的论据**。
 

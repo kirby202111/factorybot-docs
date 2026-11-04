@@ -284,7 +284,7 @@ class GatewayService:
         return answer
 ```
 
-> 会话状态不放在网关：网关是无状态分派器；跨轮会话由各能力自己的 `AgentState` + `SessionService`（Redis-backed）承载。
+> 会话状态不放在网关：网关是无状态分派器；跨轮会话由各能力自己的 `AgentState` + `SessionService`（storage 选 `AsyncSQLAlchemyStorage` 落 MySQL）承载。
 
 ---
 

@@ -284,7 +284,7 @@ A：OTel span context 的 trace_id 是 128 位整数，格式化成 32 位十六
 **Q：步数与工具调用预算上限怎么定？和 token 成本什么关系？**
 A：它限制单会话最多迭代几轮、最多调几次工具（AgentScope 没有 `recursion_limit` 这个参数名，是能力配置不是同名参数），命中就中止。它直接等价于"单会话最多调几轮 LLM"= 单会话 token 上限的硬天花板。我会在 root span 记一次 `agent.step_budget_hit` 事件并标 `agent.status=TIMEOUT`，同时 `agent_step_budget_hit_total{capability}` +1，转人工。阈值要平衡：太小会误杀真复杂问题，太大会烧钱 + 死循环。配套看工具调用模式漂移（§11.1）--如果某会话反复查同一上下文，是死循环信号不是真复杂。🔴 阈值需线上调参。
 
-**Q：`SessionService`（`AgentState`，Redis-backed；2.0.5 起由旧名改名而来）和 trace 怎么协同？中断恢复的会话 trace 怎么续？**
+**Q：`SessionService`（`AgentState`，框架 `Storage` 后端，本项目选 `AsyncSQLAlchemyStorage` 落 MySQL；`SessionService` 为 2.0.5 起由旧名改名而来）和 trace 怎么协同？分段推进的会话 trace 怎么续？**
 A：会话状态由 `SessionService` 按 `session_id` 持久化，使中断恢复的会话与原 trace 同属一棵树--恢复时按 `session_id` 取回原 `trace_id` 续 root span，不是新建一棵。这样工程师看一个会话的完整证据链不会因为中途中断/恢复而断成两段。obs_ctx（含 trace_id/session_id/tenant/level/prompt_version）是不可变值对象，随会话流动注入每个步骤，保证恢复后属性一致。
 
 **Q：Redactor 为什么是纯函数？怎么按租户配置不同策略？**

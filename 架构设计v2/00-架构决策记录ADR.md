@@ -35,9 +35,9 @@
 | 权限 | ✅ `permission/` → `PermissionEngine` / `Rule` / `Mode` / `Behavior` / `Context` / `Decision`；模式 `DEFAULT` / `ACCEPT_EDITS` / `EXPLORE` / `BYPASS` / `DONT_ASK`。旧文档那三行"Gate tool execution / HITL confirmation / Agent autonomy control"**逐字来自官方 changelog**，不是编造 | 【B】源码 + docs |
 | 工作区/沙箱 | ✅ `workspace/` → Local / Docker / E2B / K8s / Daytona / OpenSandbox / AppleContainer / Bubblewrap，`Offloader` 亦在此模块；`app/workspace_manager/` → `Local/Docker/E2BWorkspaceManager` + `IsolationPolicy` | 【B】源码 |
 | 中间件 | ✅ `middleware/` 存在，`middleware/_tracing/_trace.py` 确实 import `opentelemetry`（Tracing 从 Agent 类移出为中间件，与旧文档一致）；`app/middleware/` → `AGUIProtocolMiddleware`、`ToolOffloadMiddleware`、`StateChangeMiddleware`、`InboxMiddleware`、`TeamMemberLoopMiddleware` | 【B】源码 |
-| 状态与会话 | ⚠️ `state/` → `AgentState` / `Task` / `TaskContext` ✅；但会话服务 **2.0.5 起 `SessionManager` 已改名 `SessionService`**（`app/_service/_session.py`）。按旧名写设计不可导入 | 【B】源码 |
+| 状态与会话 | ⚠️ `state/` → `AgentState` / `Task` / `TaskContext` ✅；但会话服务 **2.0.5 起 `SessionManager` 已改名 `SessionService`**（`app/_service/_session.py`）。按旧名写设计不可导入。⚠️ **`SessionService` 不是 Redis 专属类**：官方定义它是「组合 storage 与 message bus，处理会话创建/更新/删除、探测统一的 `SessionStatus`、派发中断」的门面——后端换什么它都在，**不要把存储选型写成它的属性** | 【B】源码 + docs `deploy/agent-service` |
 | 后台任务/调度 | ✅ `app/_manager/` → `BackgroundTaskManager` / `SchedulerManager`（同列 `CancelDispatcher` / `WakeupDispatcher` / `ChatRunRegistry`） | 【B】源码 |
-| 存储 | ✅ Redis 后端真实（`app/storage/_redis_storage.py`、`app/message_bus/_redis_message_bus.py`），FAQ 另列 PostgreSQL / MySQL / SQLite | 【B】源码 + FAQ |
+| 存储 | ✅ `StorageBase` 是抽象契约（Pydantic 模型 + JSON 序列化），**内置两种实现**：`RedisStorage`（**默认**，官方全部示例都在用）与 **`AsyncSQLAlchemyStorage`**（任意 SQLAlchemy async URL：SQLite / PostgreSQL / **MySQL**）。契约覆盖 agent / session / credential / **message** / schedule / team / knowledge base 记录 → **会话与消息历史的持久化归 Storage，不需要自建表**。`AsyncSQLAlchemyStorage` 位于可选 extra `agentscope[sql]`，**该 extra 只引 SQLAlchemy + Alembic、不含驱动**（需自装 `aiosqlite` / `asyncpg` / `asyncmy`），且懒加载：不引用该类就不触发 SQLAlchemy 导入。<br>⚠️ **`message_bus` 必填且只有 Redis 实现**（会话锁 / 回放日志 / 收件箱队列 / 唤醒信号，官方称其为支撑多进程部署的关键）→ **即便 Storage 换成 MySQL，Redis 仍然省不掉**。<br>⚠️ **证据基线为 docs 2.0.8**，本项目 pin 2.0.11；`AsyncSQLAlchemyStorage` 是否已在 2.0.11 树内**需按 2.0.11 复确认**（见 §14-7） | 【B】docs `deploy/agent-service`（2.0.8）+ 源码路径 `app/storage/` |
 | 服务化 | ✅ 官方名是 **`agentscope.app.create_app`**（FastAPI Agent Service，"Agent as Service"） | 【B】源码 + docs `deploy/agent-service.md` |
 | 事件系统 | ✅ `event/` → `RequireUserConfirmEvent` 等；changelog 明确"Deprecate the print interface…pure producer"。HITL 走 `RequireUserConfirmEvent` | 【B】源码 |
 | **多 Agent 协同** | ❌ **`MsgHub` / `sequential_pipeline` / `fanout_pipeline` 是 1.x API，2.0.0 起 `pipeline` 该模块内容不存在**。`v2.0.11` 仅剩 `PipelineProtocol` / `GoalPipeline` / `TeamPipeline` / `TeamMember`，且官方标注 **experimental，接口可能变**。**`TeamPipeline` 文档明写 "No member-to-member talk"** | 【B】源码树对比 |
@@ -154,7 +154,16 @@
 
 ## ADR-07 状态外置：run 先落库再执行，会话态**不承担跨调用续跑**
 
-**决策**：Agent run **先落库再执行**（与 Agno v3.0 等生产实践同向 【C】），状态用已核实的 `AgentState`（`state/`，含 `Task` / `TaskContext`），会话服务用 **`SessionService`**（`app/_service/_session.py`，**2.0.5 起由 `SessionManager` 改名而来，旧名不可导入**），Redis 后端真实存在（`app/storage/_redis_storage.py`）。⚠️ **用途限定**：`AgentState` + `SessionService` 只承载**会话内上下文与多轮对话记忆**（按 `session_id` 隔离，因此单次调用在哪台副本上跑都行）；**不用它做 gate 挂起 / 断点续跑 / 载回快照**（理由见 ADR-05）。跨 gate 的正确语义是：本段落库后 return，确认后回调 `/advance` **重新发起下一段并重查当下现场事实**；Pod OOM / 滚动更新不需特殊处理，每段幂等可重入。
+**决策**：Agent run **先落库再执行**（与 Agno v3.0 等生产实践同向 【C】），状态用已核实的 `AgentState`（`state/`，含 `Task` / `TaskContext`），会话服务用 **`SessionService`**（`app/_service/_session.py`，**2.0.5 起由 `SessionManager` 改名而来，旧名不可导入**；它是组合 storage 与 message bus 的门面，**不绑定具体后端**）。⚠️ **用途限定**：`AgentState` + `SessionService` 只承载**会话内上下文与多轮对话记忆**（按 `session_id` 隔离，因此单次调用在哪台副本上跑都行）；**不用它做 gate 挂起 / 断点续跑 / 载回快照**（理由见 ADR-05）。跨 gate 的正确语义是：本段落库后 return，确认后回调 `/advance` **重新发起下一段并重查当下现场事实**；Pod OOM / 滚动更新不需特殊处理，每段幂等可重入。
+
+**存储选型（本轮按官方 docs 复核后新增）**：
+
+- **`storage` 选 `AsyncSQLAlchemyStorage` 落既有 MySQL**：会话与消息记录归 `StorageBase` 契约管，落关系库后即天然具备“关页面后若干周仍可接着问”、审计可查、指标可 SQL 直取三个收益，且项目已有 `mysql:8.0`，**零新增基础设施**。需额外装 `agentscope[sql]` + `asyncmy` 驱动。
+- **`message_bus` 保留 `RedisMessageBus`**：框架必填且只有 Redis 实现，换后端也省不掉。Redis 职责因此**收敛**为「消息总线 + 租户并发限流信号量 + 工具结果短期缓存」，**不再兼作会话历史层**。
+- **两条易混项必须分开讲**：① 已取消的 `SqlSaver`（自研断点续跑快照表）≠ 现选的 `AsyncSQLAlchemyStorage`（框架会话/消息持久化）——前者是“恢复执行态”，后者只是“记得聊过什么”；选了后者**不等于**绕回前者。② 框架自有 session / message 表由框架 Alembic 管，本项目的 `agent_session` 只做**业务投影**（状态机、场景、闸门、`waiting_reason`），**不重复存消息**。
+- **纪律同步升级**：会话一旦长期留存，“把查过的业务事实留在会话里”就从隐患变成历史包袱。因此钉死：**消息、指代锚点、已确认意图可持久；现场事实每轮重查**（与 §3.5 / §3.6 同一条线）。
+
+**代价**：多一个可选 extra 与一个 async 驱动；**表结构与迁移跟着框架 Alembic 走**，升级 AgentScope 版本时需跟迁移——这条要列入 ADR-12 的季度复测与升级评审清单。
 
 **与 ADR-05 的分工**：会话状态 ≠ 流程状态。流程推进与等待归审批流/工作流引擎，会话/消息历史归框架 session。两者以 `session_id` + `workflow_id`（或工单 id）双键关联。
 
@@ -291,6 +300,9 @@
 4. **数据就绪度实测结果**（ADR-12）。
 5. **"错误工艺版本"历史事故的真实成因分布**【设，未验证】——决定 ADR-06 的优先级是"版本锚定"还是"数据完整性"。
 6. **框架版本策略**：2.0.0（2026-05-25）→ 2.0.11（2026-10-27）五个月内 11 个补丁版，期间发生 `SessionManager` 改名、`evaluate` 未回归、`pipeline` 收缩。需要定死 pin 策略与升级评审门槛。
+7. **两条需读源码或实测才能收口的存储问题**（本轮只核实到 docs 2.0.8，未跑过代码）：
+   - **`AsyncSQLAlchemyStorage` 是否已在 2.0.11 树内**，以及它的 Alembic 迁移由谁执行（启动自动升级 vs 手工 `alembic upgrade`）、表名是否与本项目业务表重名。选型已写为 MySQL（ADR-07），**但这是基于 2.0.8 文档的决策，升级到 2.0.11 需复确认**。
+   - **`SessionStatus` 的 `parked` 与 HITL 暂停的作用域**。docs 2.0.8 出现两个我们旧核实结论里没见过的东西：会话状态探测为 `running / parked / idle / gone`，且 `POST /sessions/{id}/interrupt` 可中断“正在运行或**处于 HITL 暂停**的 chat run”。`parked` 看上去就是一个“停下等人”的态。它**不等于**已判定不存在的跨进程/跨重启 durable resume（`Command(resume=…)` / `durable_*` 仍无），但**动摇了“框架完全没有 gate 语义”这个写法**。需实测：重启后 `parked` 会话能否续跑、续跑时业务事实是否会被框架自动载回。**收口前 ADR-05 的口径不变**（依旧自建 `/advance` + 工单待办），但引用它时得说“框架自带 HITL 暂停态，只是我们不用它做跨天等确认”，不能再说“框架没有 gate 语义”。
 
 ---
 
@@ -313,7 +325,11 @@ from agentscope.workspace import LocalWorkspace
 from agentscope.middleware import TracingMiddleware
 from agentscope.permission import PermissionEngine, PermissionRule, PermissionMode
 from agentscope.app import create_app                      # FastAPI Agent Service
-# 会话服务：SessionService（2.0.5 起，旧名 SessionManager 已失效）
+# 存储后端（两者都必填；message_bus 只有 Redis 实现，换成 SQL 存储也省不掉 Redis）：
+#   from agentscope.app.storage import RedisStorage            # 默认实现
+#   from agentscope.app.storage import AsyncSQLAlchemyStorage  # 可选 extra `agentscope[sql]`；驱动需自装；docs 2.0.8 已证，2.0.11 待复确认
+#   from agentscope.app.message_bus import RedisMessageBus
+# 会话服务：SessionService（2.0.5 起，旧名 SessionManager 已失效；组合 storage 与 bus，不绑定后端）
 # HITL：agentscope.event.RequireUserConfirmEvent
 # 节点内并发：asyncio.gather 多个独立 Agent.reply()，不用 fanout_pipeline（已移除）
 

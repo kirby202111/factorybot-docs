@@ -58,7 +58,7 @@
 | `Toolkit` | 按 `capability + tenant` 双维下发工具切片 | 切片是权限，不是便利 |
 | `Permission` | 启动四类断言：只读 / 无写 client / 写需确认 / 无放行工具 | 失败即进程起不来 |
 | `SessionService` | 建会话、写步骤、收口状态 | 每行必带 `capability` |
-| `AgentState` | 显式状态 + `SessionService`（Redis-backed）持久化，**仅会话内上下文与多轮记忆**（不做跨闸门续跑） | `session_id` 唯一，跨能力不共用会话 |
+| `AgentState` | 显式状态 + 框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage` 落 **MySQL**；`SessionService` 是其上门面）持久化，**仅会话内上下文与多轮记忆**（不做跨闸门续跑） | `session_id` 唯一，跨能力不共用会话 |
 | ACL 客户端池 | 过点/工艺/物料/设备/工装/遥测 + 写 client | 写 client 只下发给有写权限的能力 |
 | `Model` 抽象 | provider 可插拔、结构化输出（`Content Block`）强约束 | 按能力限并发，避免一个能力打满 |
 | middleware | 脱敏、结果压缩、trace 注入 | 配置按能力可覆盖，不用全局常量 |

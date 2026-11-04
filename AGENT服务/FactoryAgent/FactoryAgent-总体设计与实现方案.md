@@ -86,7 +86,7 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 | 消息 | **aiokafka** | 订阅领域事件（`ProcessRouteActivated`、`equipment.fault` 等）做主动触发；动作卡离线兜底 topic |
 | 实时推送 | AgentScope **事件流**（`reply_stream`）+ `AGUIProtocolMiddleware`；SSE / WebSocket 作传输，Kafka 作离线兜底 | 编排的动作卡实时推给责任人在线 UI，HITL 确认与推送同源 |
 | 持久化 | **SQLAlchemy 2.0 (async) + asyncmy** | 会话、步骤记录、报告、草稿存档、gate 决策、工具调用 trace；**run 先落库再执行**（ADR-07） |
-| 缓存 / 会话状态 | **redis-py (async)** + AgentScope `SessionService`（Redis-backed）+ `AgentState` | 工具结果短期缓存、限流、**网关一次性动作令牌**存储；会话上下文按 `session_id` 任意副本接续 |
+| 缓存 / 会话状态 | **redis-py (async)** + AgentScope 框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage` 落 MySQL）+ `AgentState`；`MessageBus` 走 Redis | 工具结果短期缓存、限流、**网关一次性动作令牌**存储、运行时协调；会话上下文与消息历史按 `session_id` 落 MySQL，任意副本接续 |
 | 可观测 | **`TracingMiddleware`（OTel 内生入口）** + `prometheus-client` | trace 串联、指标告警；⚠️ Studio 已归档，研发期调试走 OTel + Tempo/Jaeger + `reply_stream` 事件回放 |
 | 配置 | pydantic-settings | 环境变量 / 配置文件统一管理 |
 | 部署 | 独立微服务 `agent-service`（uvicorn + gunicorn worker） | 与三大 MES 服务同网格，K8s 部署 |
@@ -158,7 +158,7 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 - **一个 runtime，三种编排形态**：能力差异体现在"flow 长什么样、拿哪些工具、有没有写权限"，而不是"起几个服务、各建一套底座"。
 - **能力切片而非层级继承**：`ToolRegistry.tools_for(capability, tenant)` 按能力 + 租户双维下发，诊断拿不到写工具，编排拿不到放行工具。**边界靠注册表 + 启动断言，不靠调用方自觉**。工具切片下发挂在 AgentScope `Toolkit` 上，循环内的档位拦截挂 `PermissionEngine`（叠加层）；**主闸在工具网关的一次性动作令牌**（ADR-04）。
 - **ACL 防腐层**：每个上下文一个 ACL 客户端 + Mapper，外部 DTO 不进 Agent 核心，只暴露内部视图（`PassRecordView`、`ProcessRouteView`、`EvidenceSetView`）。外部 schema 变化不污染能力实现。
-- **状态外置（仅审计与可重入，不是挂起态）**：会话标识、步骤记录、gate 决策全部落 MySQL（run **先落库再执行**），会话内上下文与多轮记忆用 `AgentState` + `SessionService`（Redis-backed）承载，因此一次调用在哪台副本上跑都行（按 `session_id` 取）；不依赖模型侧会话，也不自建 checkpoint 三表。⚠️ **不存"可供恢复的流程快照"**：确认回来是重新发起下一段并**重查当下现场事实**（MES 数据时变，快照重放比重查危）；跨调用的确认等待与跨天推进归 MES 工单/审批流与工作流引擎（ADR-05）。
+- **状态外置（仅审计与可重入，不是挂起态）**：会话标识、步骤记录、gate 决策全部落 MySQL（run **先落库再执行**），会话内上下文与多轮记忆用 `AgentState` + 框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage` 落 MySQL）承载，因此一次调用在哪台副本上跑都行（按 `session_id` 取）；不依赖模型侧会话，也不自建 checkpoint 三表。⚠️ **不存"可供恢复的流程快照"**：确认回来是重新发起下一段并**重查当下现场事实**（MES 数据时变，快照重放比重查危）；跨调用的确认等待与跨天推进归 MES 工单/审批流与工作流引擎（ADR-05）。
 - **同一条 trace 贯穿**：一次请求一个 `trace_id`，工具调用、LLM 调用、gate 决策、写路径全部挂同一 trace，`traceparent` 透传下游 Java 服务。
 
 ---
@@ -397,7 +397,7 @@ agent_service/
       rag/                         # RagSearchClient / EvidenceSetClient（fetch_evidence_set）
       kafka/                       # 事件订阅 + 动作卡 producer
       persistence/                 # SQLAlchemy 模型 + Repository + 会话/状态归档
-      session/                     # SessionService + AgentState（Redis-backed）适配
+      session/                     # SessionService 门面 + AgentState（storage 选 AsyncSQLAlchemyStorage 落 MySQL）适配
       workspace/                   # Workspace（Local/Docker/E2B）+ Offloader 配置
       redis_/                      # 工具缓存 / 限流 / confirmation_store
       obs/                         # TracingMiddleware（OTel）接线 + prometheus 指标
@@ -480,7 +480,7 @@ async def lifespan(app: FastAPI):
         specs=specs,
         registry=registry,
         flows=build_all_flows(registry, app.state.deps),  # 三种编排形态一次装配
-        sessions=app.state.session_service,               # SessionService（Redis-backed）
+        sessions=app.state.session_service,               # SessionService（storage 落 MySQL，bus 走 Redis）
         metrics=app.state.metrics,
     )
     yield

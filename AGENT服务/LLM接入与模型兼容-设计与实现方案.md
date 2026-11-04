@@ -109,7 +109,7 @@ if isinstance(self._lc, ChatOpenAI):
 structured = self._lc.with_structured_output(schema, **kwargs)
 ```
 
-- `GateManager`（本项目封装）兼容确认令牌的 dict 形态（`isinstance(confirmation, dict)` 分支），dict 便于写入 `AgentState` 后经 `SessionService` 序列化落 Redis。
+- `GateManager`（本项目封装）兼容确认令牌的 dict 形态（`isinstance(confirmation, dict)` 分支），dict 便于写入 `AgentState` 后经 `SessionService` 序列化落存储后端（本项目选 `AsyncSQLAlchemyStorage` 落 MySQL）。
 - 仅 ChatOpenAI 系（openai/deepseek）走 json_mode；Anthropic 等保留默认 method。
 
 ### 4.2 工具调用（诊断能力 ReAct）
@@ -170,7 +170,7 @@ for step, card in pending:
         session_id, step, approved, user_id,
         action=card.writes_via_action(),         # 各 gate 各自匹配，互不覆盖
     )
-    state.confirmations[step] = asdict(tok)      # dict 形态，便于 AgentState 经 SessionService 落 Redis
+    state.confirmations[step] = asdict(tok)      # dict 形态，便于 AgentState 经 SessionService 落存储后端（MySQL）
     await tickets.create(card, session_id=session_id, step=step)   # 待办落成 MES 已有工单实体
 # 本段 flow 在此 return：不阻塞等事件、不保存待恢复快照；
 # 每个 gate 的确认各自回调 /advance，按 (session_id, step) 起对应的下一段

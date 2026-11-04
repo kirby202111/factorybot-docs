@@ -378,7 +378,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 **实施重难点与技术挑战**
 
 1. **触发去重与风暴控制**：同一事件可能因 Kafka 重投多次到达，或短时间内多个相关事件同时触发同一场景。Agent 触发须幂等（按 `event_id` + scenario 去重），且并发触发需限流（按 tenant 信号量），避免突发把 LLM 调用打爆。
-2. **事件触发洪峰与 Agent 处理速率的背压**：流程编排是**无状态分段短跑**——一次调用跑到确认闸门即产待办并 return，不跨等待存活（会话上下文用 AgentScope `AgentState` + `SessionService`（Redis-backed，2.0.5 起由 `SessionManager` 改名，旧名不可导入）；跨调用的流程推进与等待归 MES 工单/审批实体，见 [ADR-05](../架构设计v2/00-架构决策记录ADR.md)）。正因为不常驻，这里的难点不是"长任务占着消费者不放"，而是**事件消费速率可能远超 Agent 单段处理能力**（LLM 并发度与 token 预算是真瓶颈）：需消费端 pause 背压 + 触发入队（按 tenant 信号量限流），不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
+2. **事件触发洪峰与 Agent 处理速率的背压**：流程编排是**无状态分段短跑**——一次调用跑到确认闸门即产待办并 return，不跨等待存活（会话上下文用 AgentScope `AgentState` + `SessionService`（storage 选 `AsyncSQLAlchemyStorage` 落 MySQL，2.0.5 起由 `SessionManager` 改名，旧名不可导入）；跨调用的流程推进与等待归 MES 工单/审批实体，见 [ADR-05](../架构设计v2/00-架构决策记录ADR.md)）。正因为不常驻，这里的难点不是"长任务占着消费者不放"，而是**事件消费速率可能远超 Agent 单段处理能力**（LLM 并发度与 token 预算是真瓶颈）：需消费端 pause 背压 + 触发入队（按 tenant 信号量限流），不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
 3. **跨语言事件消费幂等**：Python 侧 `event_id` 幂等表 + 手动 ack，与 Java 侧同构但独立实现。两套幂等表 schema 须对齐。
 4. **触发条件配置化**：哪些事件触发哪个 Agent 场景、触发阈值（如不良率突增的"突增"定义）应配置化，不硬编码在监听器里。🔴 触发规则归属（Agent 侧配置 vs MES 侧事件契约）待定。
 

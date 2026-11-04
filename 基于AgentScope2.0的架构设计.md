@@ -146,10 +146,10 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 
 | 组件 | 用途 | 替换/说明 |
 |------|------|----------|
-| **Redis** | **Redis-backed storage**（`SessionService` 会话状态 / 多租户资源）；ConfirmationStore 语义并入 Permission；工具结果缓存、限流 | 会话持久化从 MySQL checkpoint 三表迁移到 AgentScope Session store |
-| **MySQL** | ① 业务可观测表；② 评测表族（`mes_eval` schema）；③ `AgentState` 归档/审计（可选）；④ 文档元数据与答案审计（rag-service）；⑤ 制造追溯读模型与事件位点（agent 侧或独立只读服务，归属待定） | 不再需要 LangGraph SqlSaver 三表；文档治理与追溯读模型**分库分 schema** |
+| **Redis** | **`MessageBus`**（框架必填且只有 Redis 实现：会话锁 / 回放日志 / 收件箱队列 / 唤醒信号）；ConfirmationStore 语义并入 Permission；工具结果缓存、限流 | ⚠️ 会话与消息持久化**不再落在 Redis**，改由框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage`）落 MySQL——自研的 MySQL checkpoint 三表已取消，两者不是一回事（ADR-07）|
+| **MySQL** | ① 业务可观测表；② 评测表族（`mes_eval` schema）；③ **AgentScope 框架的会话与消息持久化**（`AsyncSQLAlchemyStorage`，表结构与 Alembic 迁移归框架管）+ `AgentState` 演进序列归档（`agent_state_archive`，可选）；④ 文档元数据与答案审计（rag-service）；⑤ 制造追溯读模型与事件位点（agent 侧或独立只读服务，归属待定） | 不再需要 LangGraph SqlSaver 三表；⚠️ ③ 与已取消的自研快照表不是一回事（ADR-07）；文档治理与追溯读模型**分库分 schema** |
 | **ChromaDB** | 文档知识工具的向量检索，**自持 client** 接入，chunk 不可变并执行版本/权限过滤 | ⚠️ 框架 RAG 模块无 Chroma 适配器，不押注其抽象 |
-| **SQLAlchemy 2.0 (async) + asyncmy** | MySQL ORM（业务表/评测表/文档治理表/追溯读模型），追溯采用参数化固定查询计划 | 不使用图数据库或图查询驱动 |
+| **SQLAlchemy 2.0 (async) + asyncmy** | MySQL ORM（业务表/评测表/文档治理表/追溯读模型），追溯采用参数化固定查询计划 | 不使用图数据库或图查询驱动。✅ **它同时就是 AgentScope `AsyncSQLAlchemyStorage` 需要的技术栈**（驱动已就位，会话持久化改落 MySQL 不引入新的 ORM 依赖，只多一个 `agentscope[sql]` extra） |
 
 ### 2.7 消息 / 事件
 
@@ -241,7 +241,7 @@ agent_service/app/
 │
 ├── infrastructure/
 │   ├── model/                    # AgentScope Model 抽象（provider 可插拔）
-│   ├── session/                  # `SessionService` + Redis-backed storage 适配
+│   ├── session/                  # `SessionService` 门面 + `Storage`（AsyncSQLAlchemyStorage 落 MySQL）/ `MessageBus`（Redis）接线
 │   ├── workspace/                # WorkspaceManager（Local/Docker/E2B）配置
 │   ├── kafka/                    # aiokafka ↔ 事件系统桥接
 │   ├── persistence/             # SQLAlchemy：业务可观测表 + 评测/审计
@@ -394,7 +394,7 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 
 ### 6.2 分布式支持
 
-- **无状态水平扩展**：`AgentState` 显式化 + `SessionService`（Redis-backed）持久**会话内上下文**，多轮对话按 `session_id` 取回。**不再有"Pod 重启续跑挂起任务"这回事**：一次调用只跑一段，跑完即结束；进程中途死亡时下一段照常幂等重跑（不依赖任何副本恢复能力）。
+- **无状态水平扩展**：`AgentState` 显式化 + 框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage` 落 MySQL）持久**会话内上下文与消息历史**，多轮对话按 `session_id` 取回，因此单次调用在哪台副本上跑都行。**不再有"Pod 重启续跑挂起任务"这回事**：一次调用只跑一段，跑完即结束；进程中途死亡时下一段照常幂等重跑（不依赖任何副本恢复能力）。
 - **BackgroundTaskManager + SchedulerManager**：单次调用的短后台任务（HTTP 立即返回、十几秒级取证跑完即结束）与定时巡检由框架托管，替代自研 asyncio 点火与 Celery。**不用于 gate 计时与催办**（那是审批流的职责，ADR-05）。
 - **Workspace 分布式形态**：同一份业务代码按需切换 Local->Docker->E2B，执行环境可独立扩缩容。
 
@@ -434,7 +434,7 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 | Permission 系统（`PermissionEngine`/`Rule`/`Mode`/`Decision`） | 写动作三层防线的**叠加层**（主闸是网关一次性令牌） |
 | Middleware（`TracingMiddleware`/`AGUIProtocolMiddleware`/`ToolOffloadMiddleware` + 自定义） | 可观测/前端流/成本/脱敏/审计 |
 | `Offloader` + `LocalWorkspace` 等 8 种后端 | 超大结果卸载 + 执行隔离 + 多租户 |
-| `AgentState` + `SessionService`（Redis-backed） | 会话内上下文与多轮对话记忆（**不承担**跨闸门续跑） |
+| `AgentState` + 框架 `Storage`（本项目落 MySQL） | 会话内上下文与多轮对话记忆（**不承担**跨闸门续跑）；`SessionService` 是其上门面，不绑定后端 |
 | `BackgroundTaskManager` / `SchedulerManager` | 短后台任务 / 定时巡检（**不承担** gate 计时与催办） |
 | `Toolkit` + MCP + Skills | ACL 工具 / 外部服务 / 领域技能 |
 | `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate` + `Task`/`TaskContext` | 任务清单与进度跟踪（无独立 Plan 模块） |

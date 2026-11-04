@@ -6,7 +6,7 @@
 > `Agent可观测性-设计与实现方案.md`（证据链落库）里的记忆相关内容，
 > 按"存给谁看 / 活多久"两个维度重新组织，补齐它们各自没讲全的层间关系。
 >
-> **底座口径**：AgentScope 2.0（Python `>=3.12`）。`AgentState` / `SessionService`（Redis-backed；2.0.5 起由旧名改名而来，旧名已不可导入）/ `Permission` / `Toolkit` / `Offloader` / `ToolOffloadMiddleware` 为框架已核实能力名；文中 `self._xxx(...)` 一类方法签名是本项目的内部封装命名，不代表框架 API。**框架不提供 `Pipeline` / `MsgHub` / `sequential_pipeline` / `fanout_pipeline`**（1.x API，2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 模块内容已删除），也没有 Handoffs/Routing 式的移交原语与独立"Plan 模块"：本文所有顺序/并发形状一律指本项目 `flows/` 目录里的应用层 Python 代码（顺序 `await` 串联、`asyncio.gather` 并发多个各自独立的 `Agent.reply()`、应用层显式合并），与框架无关。
+> **底座口径**：AgentScope 2.0（Python `>=3.12`）。`AgentState` / `SessionService`（组合 storage 与 message bus 的门面，**不绑定具体后端**；2.0.5 起由旧名改名而来，旧名已不可导入）/ `Permission` / `Toolkit` / `Offloader` / `ToolOffloadMiddleware` 为框架已核实能力名；本项目 Storage 选型为 `AsyncSQLAlchemyStorage` 落 MySQL（见 §3.2 与 ADR-07）。文中 `self._xxx(...)` 一类方法签名是本项目的内部封装命名，不代表框架 API。**框架不提供 `Pipeline` / `MsgHub` / `sequential_pipeline` / `fanout_pipeline`**（1.x API，2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 模块内容已删除），也没有 Handoffs/Routing 式的移交原语与独立"Plan 模块"：本文所有顺序/并发形状一律指本项目 `flows/` 目录里的应用层 Python 代码（顺序 `await` 串联、`asyncio.gather` 并发多个各自独立的 `Agent.reply()`、应用层显式合并），与框架无关。
 >
 > **落地状态声明（重要）**：本文是**设计方案**，不是现状说明书。当前代码仓 `E:\factorybot` 的 `src/` 下只有 `agents/tool_test.py`、`api/{health,index,tool_test}.py`、`schemas/tool_test.py`、`tools/get_current_time.py`、`factory.py` 这套脚手架，**编排与记忆系统完全未落地**。因此文中出现的 `app/...` 一类路径（如 `app/infrastructure/persistence/repos.py`）一律是**设计目标路径（文件当前不存在）**，"已实现/已落地/跑通"等表述已统一改述为"设计目标，尚未落地"；组件名（`ToolCallTraceRepo`、`NodeTraceRepo`、`ToolResultCache` 等）是本文拟定的设计命名，不是既有代码。
 
@@ -58,14 +58,14 @@
 
 | 层 | 名称 | 核心组件 | 存储介质 | 存什么 | 寿命 | 服务对象 | 落地状态 |
 |---|---|---|---|---|---|---|---|
-| M1 | 工作记忆 | `SessionService` + `OrchestrationState`（`AgentState`） | Redis-backed Session store | 会话内上下文字段值（类型化） | 会话级（`session_id` 隔离） | 多轮对话与会话隔离；**不服务跨闸门续跑**：编排到 gate 就产待办并 return，下一段重查当下事实 | 📐 设计目标，尚未落地 |
+| M1 | 工作记忆 | `SessionService` + `OrchestrationState`（`AgentState`） | 框架 `Storage` 后端（本项目选 `AsyncSQLAlchemyStorage` 落 **MySQL**；框架默认实现为 `RedisStorage`） | 会话内上下文字段值（类型化）+ **消息历史** | 永久（历史长期留存，支撑关掉页面后隔天接着问） | 多轮对话与会话隔离；**不服务跨闸门续跑**：编排到 gate 就产待办并 return，下一段重查当下事实 | 📐 设计目标，尚未落地 |
 | M2 | 上下文窗口记忆 | `Offloader` / `ToolOffloadMiddleware` / 缓存标记与早停 Middleware | 内存（请求级） | 喂模型的消息压缩、prompt 缓存标记 | 单次 LLM 调用 ~ 5min/1h | LLM | 📐 设计目标，尚未落地 |
 | M3 | 证据链长期记忆 | `ToolCallTraceRepo` / `NodeTraceRepo` / `OrchestrationStep` | MySQL 平铺表 | 工具调用全文、节点执行记录 | 永久 | 工程师 UI / 审计 | 📐 设计目标，尚未落地 |
 | 自治 | 跨会话缓存 | `ToolResultCache` | Redis | 稳定工具结果的版本化缓存 | 按 tool 策略 TTL | 降本（命中省一次 ACL+回灌） | 📐 设计目标，尚未落地（语义缓存默认关闭） |
 | L5 | 会话元数据 & 确认记录 | `Repo`（会话台账）/ Permission 确认记录存储 | MySQL + Redis | 会话生命周期、失败计数、gate 确认令牌 | 会话级 ~ 30min | 编排器 / 写动作闸门 | 📐 设计目标，尚未落地 |
 
 > 落地状态图例：📐 设计目标，尚未落地（本文全部条目均为此状态；代码仓现状见文首"落地状态声明"）。
-> **命名提醒**：M1 的 `SessionService` 是 AgentScope 2.0 的会话存储能力（框架侧，Redis-backed，`app/_service/_session.py`；**2.0.5 起由旧名改名而来，按旧名写不可导入**），用途限于**会话内上下文与多轮对话记忆**；L5 里的会话台账是本项目 MySQL 业务表（`agent_session` / 失败计数），两者职责不同不可混称。本项目**不自研**会话封装类，也不在其上实现挂起/恢复语义。
+> **命名提醒**：M1 的 `SessionService` 是 AgentScope 2.0 的会话能力（框架侧，`app/_service/_session.py`；**2.0.5 起由旧名改名而来，按旧名写不可导入**）。注意它是「组合 storage 与 message bus，处理会话创建/更新/删除、探测 `SessionStatus`、派发中断」的**门面，不绑定具体存储后端**——不要把选型写成它的属性。用途限于**会话内上下文与多轮对话记忆**；L5 里的会话台账是本项目 MySQL 业务表（`agent_session` / 失败计数），两者职责不同不可混称。本项目**不自研**会话封装类，也不在其上实现挂起/恢复语义。
 
 ### 2.2 分层架构图
 
@@ -92,8 +92,8 @@
    └──────────────────────────────────────────────────────────────────┘
 
    ┌──────────────────────────────────────────────────────────────────┐
-   │  M1 工作记忆（会话级）                                               │
-   │  AgentScope SessionService（Redis-backed）会话键 = session_id        │
+   │  M1 工作记忆（会话内上下文 · 永久留存，可跨页面续聊）              │
+   │  AgentScope Storage（AsyncSQLAlchemy → MySQL）会话键 = session_id   │
    │  存：AgentState 会话内上下文与多轮记忆（类型化字段值）               │
    │  gate 产待办即本段终点——不挂起、不载回快照续跑                     │
    └──────────────────────────────────────────────────────────────────┘
@@ -158,10 +158,11 @@ class OrchestrationState(BaseModel):      # AgentState 的业务投影（显式�
     status: str = "PLANNING"
     current_step: str = ""
 
-    # 各步骤结果 + gate 决策
-    first_article_result: dict | None = None
-    gate_first_article: str | None = None
-    action_card: dict | None = None
+    # 各步骤结果 + gate 决策——⚠️ 字段有两种身份，必须逐字段标清（判据见 §3.6 与 §3.9）
+    first_article_result: dict | None = None       # 业务事实取值：只作本段留痕，跨段/跨轮不作输入
+    first_article_observed_at: str | None = None   # 取值时刻；没有它这个字段就是个危险的过期事实
+    gate_first_article: str | None = None          # 人做的决策，非事实 → 可持久复用
+    action_card: dict | None = None                # 产物（不是对外部世界的断言）→ 可持久复用
     ...
 
     # agent 通信
@@ -177,24 +178,32 @@ class OrchestrationState(BaseModel):      # AgentState 的业务投影（显式�
 
 ### 3.2 持久化：会话键 = session_id
 
-会话状态的持久化由 AgentScope 2.0 的 `SessionService` 承载（随 FastAPI Agent Service（`create_app`）的 lifespan 装配），存储后端由配置决定：
+会话与消息的持久化由 AgentScope 2.0 的 `Storage` 后端承载（随 FastAPI Agent Service（`create_app`）的 lifespan 装配），`storage` 与 `message_bus` **两者都是必填参数**，框架不提供隐式兜底：
 
 ```python
-# app/infrastructure/session/  （本项目接线层，示意；构造签名以目标版本官方 API 为准）
-# 会话服务：agentscope 的 SessionService（app/_service/_session.py，Redis-backed storage）
-# 业务侧只见 session_id，不感知存储后端；会话内上下文的读写不由本项目自己封装
-session_service = build_session_service(settings)   # 存储后端由配置决定，业务侧只见 session_id
+# 构造形态按官方 docs 2.0.8 写；本项目基线 2.0.11，升级到该版本需复确认（见 ADR-01 存储行 / §14-7）
+from agentscope.app import create_app
+from agentscope.app.storage import AsyncSQLAlchemyStorage      # 可选 extra `agentscope[sql]`，驱动需自装 asyncmy
+from agentscope.app.message_bus import RedisMessageBus
+
+storage = AsyncSQLAlchemyStorage("mysql+asyncmy://...")   # 本项目选型：落到已有的 MySQL
+message_bus = RedisMessageBus(host="...", port=6379)       # 只有 Redis 实现，换成 SQL 存储也省不掉
+
+app = create_app(storage=storage, message_bus=message_bus, ...)
 ```
+
+**选型理由（本轮改判，原口径为 Redis-backed）**：`StorageBase` 契约覆盖 agent / session / credential / **message** / schedule / team / knowledge base 记录，因此**消息历史归框架 Storage 管，不需要自建表**，框架也自带 `GET /sessions/{id}/messages`（`offset` / `limit` 分页）供前端拉历史会话。落 MySQL 后即得到三个收益：**关掉页面若干天后仍能接着问**、审计可查、指标可 SQL 直取；而 Redis 做长期留存要靠 TTL 与 `maxmemory` 淘汰，天然不是"隔几周翻回来"的位置。项目已有 `mysql:8.0`，**零新增基础设施**。
 
 **关键映射**：会话键 = `session_id`（本项目在编排服务装配处建立该映射，设计目标）。
 `SessionService` 按 `session_id` 隔离 `AgentState`；同一会话的状态更新串行落盘（单写者），不同会话互不影响。
 
-> 落地状态：**设计目标，尚未落地**——代码仓尚无会话层实现，Redis-backed storage 接线属于真实部署阶段的待建工作。
+> 落地状态：**设计目标，尚未落地**——代码仓尚无会话层实现，`storage` / `message_bus` 的接线属于真实部署阶段的待建工作。
 > 设计约束：`SessionService` + `AgentState` 的用途限定为**会话内上下文与多轮对话记忆**；本项目**不在其上实现 gate 挂起/续跑**（见 §3.6）。下一段为何要重查事实而不是取回会话里的旧字段，理由也在 §3.6。
+> ⚠️ **选型改判带来的新风险**：会话从"会话级 TTL"变成长期留存后，"把查过的业务事实留在会话里"会从隐患变成历史包袱。因此必须同时执行 §3.9 的字段可持久性判据：哪些字段可以存着复用，哪些只能留痕、每轮重查。
 
-### 3.3 MySQL 侧不再承担会话状态表
+### 3.3 MySQL 侧：不建自研会话状态表，但框架的会话/消息记录就落在这个库
 
-原方案在 MySQL 建三张会话状态表；本架构下 **MySQL 不再有会话状态/快照表**，只留业务可观测表：
+原方案在 MySQL 自建三张会话状态/快照表；本架构下 **仍然不建自研会话状态表**，只留业务可观测表：
 
 | 表 | 主键 | 存什么 |
 |---|---|---|
@@ -202,7 +211,12 @@ session_service = build_session_service(settings)   # 存储后端由配置决�
 | `agent_step_record` / `node_trace` | `(session_id, step)` | 每步执行记录（CODE/AGENT 性质、gate 决策、trace 引用） |
 | `tool_call_trace` | `trace_id` | 工具调用全文（证据链） |
 
-会话内上下文本身在 Redis-backed Session store；如需长期留痕，可把 `AgentState` **可选归档**到 MySQL 审计表（只读，仅供复盘，**不作为恢复源**）。
+**两条必须分清的易混项**（否则读者会以为选型绕回了原点）：
+
+1. **已取消的 `SqlSaver` ≠ 现选的 `AsyncSQLAlchemyStorage`**。前者是本项目自研的**断点续跑快照表**（作恢复执行态用，该语义已整体取消，见 ADR-05）；后者是**框架自己的会话/消息持久化后端**，只回答"这段对话聊过什么"，不回答"从哪一步继续跑"。选了后者**不等于**恢复前者。
+2. **框架表归框架，业务表归业务**。框架的 session / message 表由框架的 Alembic 迁移管（本项目不写它们的 DDL）；`agent_session` 只做**业务投影**（状态机、场景、闸门、`waiting_reason`），**不重复存消息**。
+
+另：字段**演进序列**（每个历史值都留一份，见 §3.4）框架不提供——框架存的是当前值。如需这条序列，才把 `AgentState` **可选归档**到 MySQL 审计表（只读，仅供复盘，**不作为恢复源**）。
 
 ### 3.4 字段演进序列与"存了什么"
 
@@ -248,7 +262,7 @@ await self._flows.run_next_segment(ctx, facts, token)        # 新的一次短�
 
 ### 3.6 为什么不做跨进程恢复（原"工作记忆价值"论证不再成立）
 
-曾经的设计是：副本 A 跑到 gate 挂起 -> `AgentState` 落 Redis -> 进程死 -> 副本 B 收到确认后按 `session_id` 载回 state 从断点继续。**这套机制本项目不实现，也不找框架等价物替换**（框架级 `interrupt` / `Command(resume=…)` / checkpoint 表本身也不存在），理由三条：
+曾经的设计是：副本 A 跑到 gate 挂起 -> `AgentState` 落 Redis（旧方案的存储后端；现选型见 §3.2）-> 进程死 -> 副本 B 收到确认后按 `session_id` 载回 state 从断点继续。**这套机制本项目不实现，也不找框架等价物替换**（框架级 `interrupt` / `Command(resume=…)` / checkpoint 表本身也不存在），理由三条：
 
 1. **没有需要保住的计算态**：gate 之间几乎全是确定性代码步骤（换线快路径 LLM 调用为 0），"挂起期"只是在等人，不持有必须原样恢复的中间结果。
 2. **重查比重放更正确**：MES 现场事实**时变**（首件状态、路线版本、钢网在借、齐套数量都会变），把 T+3s 的快照载回 T+10min 的进程继续跑，等于用过期事实做当下的决策。与 §1.1 时变性红线（语义缓存默认关闭）是同一条理由。
@@ -270,12 +284,41 @@ result = await agent.reply(
 `{session_id}:{capability}` 使主编排状态与能力节点的推理状态在 Session store 分开存放，互不覆盖。
 这是"多 session 并发 + 能力节点独立"的隔离手段（调用时机由本项目 `flows/` 里的应用层代码决定——顺序 `await` 串联、`asyncio.gather` 并发多个各自独立的 `Agent.reply()`；框架无移交原语，隔离一律靠会话键）。
 
-### 3.8 诊断能力为何不接会话存储
+### 3.8 分层记忆的正确启用方式：按**用途**接，不按能力开关整套
 
-诊断能力是短链路 ReAct（步数与工具调用预算 = 20），一次 `reply` 跑完即出报告，**不需要中途暂停**，所以不注册 Session、不做工作记忆持久化。
+本节旧写法是"诊断能力不接会话存储"。本轮复核判定**该结论与其论证均不成立**，已改写；权威源是 `FactoryAgent/FactoryAgent-诊断能力.md` 的存储职责表与装配骨架，它写的是诊断**接** `AgentState` + `SessionService`，用途为多轮追问与会话隔离。
 
-> **记忆按场景需要才上，不是无脑全配。** 诊断能力无 Session 持久化 / 无 Offloader 接线；
-> 编排能力接 `SessionService` 用于**会话隔离与多轮上下文**（不承担跨闸门续跑；分段之间靠 `session_id` + 重查事实衔接）。这是分层记忆的"按需启用"原则。
+错误出在论证的一步跳跃上：`SessionService` 的用途至少有**两件独立的事**——① 多轮追问与会话隔离，② gate 挂起与断点续跑。旧文把它窄化成"会话存储就是为了中途暂停"，于是"短链路不需要中途暂停"顺手推出了"不需要会话存储"。取消挂起层（ADR-05）撤掉的是 ②，与 ① 无关。
+
+当前口径：
+
+| 能力 | 接 M1 的哪个用途 | 明确不接什么 |
+|---|---|---|
+| 诊断 | **多轮追问与会话隔离**。现场典型问法是"这批焊接不良什么原因" -> "上一班次呢" -> "它和钢网有没有关系"，追问依赖上一轮的指代与结论，不接会话就做不出这种连贯 | gate 挂起/续跑语义——短链路一次 `reply` 跑完即出，本来就没有中途暂停 |
+| 草稿编写 | 会话隔离 + 产物留存 | 同上 |
+| 流程编排 | 会话隔离与多轮上下文 | 分段之间**不靠**会话快照恢复，靠 `session_id` + 重查事实衔接 |
+
+> **记忆按需启用的正确粒度是"用途"，不是"能力"。** 旧写法"某能力整套不接记忆"看着简洁，实际会连带砍掉该能力最需要的多轮上下文。
+> 顺带修正一处连带结论：`Offloader` 属 M2 上下文压缩，与 Session 是两层。旧文"诊断无 Offloader 接线"的理由不能挂在 Session 上。准确表述是：诊断目前**按设计目标不接线** M2（步数预算 20、历史较短，先走"模型直接看全文"的简化路径），这是**尚未接线的分阶段策略**，不是"按需所以不需要"的裁定——诊断若拉到设备参数曲线这类超大结果，M2 仍须接线（见 §4.2）。
+
+### 3.9 字段可持久性判据：哪些能存着复用，哪些只能留痕
+
+会话长期留存后，第一个要回答的问题变成：**这个字段下次取出来用，对不对？** 判据只有一条：
+
+> **这条数据换个时刻重算，结果会不会不同？** 会不同 -> 只能留痕，不能当下一轮 / 下一段的输入；不会不同 -> 可持久化并复用。
+
+| 可持久并复用（左列） | 只能留痕、每轮重查（右列） |
+|---|---|
+| 用户原话与模型回复（消息历史）、指代锚点（"它" = SN-001）、已确认的 gate 决策与 `confirmation_id`、产物文本（草稿正文、动作卡内容）、`evidence_set_id` 引用、版本锚点 `route_version`（锚点本身是意图的一部分） | 首件状态、齐套数量、钢网在借、路线 / BOM 的**当下生效值**、过点记录、设备实时参数 |
+
+"要求查最新数据"与"会话持久化"约束的是**两列不同的东西**，作用域不重叠，因此**不矛盾**——只有把右列的取值结果当会话状态存下来、下次直接复用，两者才真正打架。
+
+同一份现场事实有两种**身份**：作为 trace 存下来（"当时 agent 看到齐套数 = 3"）永久合法，工程师回看、审计、评测复现都要它；把 `3` 这个值取来当下一段的判断依据则非法。前者是对历史事实的陈述，后者是对当前事实的断言。这也是 §3.6 要求"重查而不是载回快照"的根据，与 §8.3 语义缓存默认关闭、§3.8 的用途切分是同一条时变性红线在三个层的投影。
+
+落地约束两条：
+
+1. 右列字段进 `OrchestrationState` 必须配套 `*_observed_at`（见 §3.1），且下一段**禁止读取**，只允许写入与归档进 trace。
+2. 跨页面续聊（恢复会话继续问）与跨闸门推进（确认后起下一段）**都要走重查**，区别只在重查范围：前者查回答里引用的事实，后者查决策依据的事实。
 
 ## 4. M2 上下文窗口记忆：喂模型的瞬时记忆
 
@@ -463,7 +506,7 @@ class ToolResultCache:
 - **失败计数** `failure_count: dict[str,int]`，按 `(session_id, capability)` 追踪 agent 连续失败，≥2 次本段置 `WAITING` 并转人工待办（agent 故障隔离，不自动重试）
 - `waiting_reason`（转人工待办的缘由）、gate 决策记录、步骤记录
 
-会话内上下文的存储由框架 `SessionService`（Redis-backed）承担；本项目**不自研**会话封装类，业务侧只保留"按 `session_id` 取回台账"这一层；**不做续跑语义**，下一段由确认回调重新发起并重查事实。
+会话内上下文与消息历史的存储由框架 `Storage` 后端承担（本项目选 `AsyncSQLAlchemyStorage` 落 MySQL，见 §3.2），对外经 `SessionService` 访问；本项目**不自研**会话封装类，业务侧只保留"按 `session_id` 取回台账"这一层；**不做续跑语义**，下一段由确认回调重新发起并重查事实。
 
 ### 7.2 失败计数与 agent 故障隔离
 
@@ -514,16 +557,17 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 **权衡**：零成本答案复用 vs 数据漂移正确性风险。语义缓存默认关，因为 MES 答案随数据漂移。
 这是**领域特性倒逼技术选型**，不是通用 Agent 的做法。通用 Agent 鼓励语义缓存降本，MES 反其道行之。
 
-### 8.4 记忆按场景需要才上
+### 8.4 记忆按需启用的粒度是"用途"，不是"能力"
 
-诊断能力不接会话存储（短链路跑完即出）、不接 `Offloader`；编排能力接 `SessionService` 用于**会话隔离与多轮上下文**（gate 分段之间靠重查事实衔接，不靠会话快照恢复）。
-**不无脑全配**--记忆组件都有成本（存储 I/O / 缓存失效复杂度 / 接线维护），按场景痛点启用。
+诊断与编排**都接** M1 的"多轮对话与会话隔离"用途；**都不接**它的"gate 挂起 / 断点续跑"用途（逐条理由见 §3.8；旧写法"诊断整套不接会话存储"已推翻）。分段之间靠重查事实衔接，不靠会话快照恢复。
+**不无脑全配** -- 记忆组件都有成本（存储 I/O / 缓存失效复杂度 / 接线维护），但裁剪要按**用途**切：同一层内该用的用途用、不该用的用途关掉，而不是按能力整层开关。
 
 > 顺带把口径钉清楚：本项目真正需要的是**外部化状态（审计与可重入）+ 上下文压缩**这两件事，**不需要跨进程挂起/恢复**；多 Agent 也只是可选的实现方式之一，不是必要条件。本项目的分层记忆就是围绕这两件事建的。
 
 ### 8.5 状态外置换的是审计与可重入，不是挂起恢复
 
-**权衡**：每次步骤执行一次状态写入（Redis-backed Session store + MySQL 台账）的延迟 vs 可审计、可重入。选前者换后者。
+**权衡**：每次步骤执行一次状态写入（框架 Storage 落 MySQL + 业务台账同库）的延迟 vs 可审计、可重入。选前者换后者。
+⚠️ 本轮把 Storage 从 Redis 改成 MySQL 后，**这条权衡的代价变了**：per-step 状态写从内存型后端换成关系库，多一次连接占用与页写——粒度仍是 per-step（非 per-tool-call）且框架在调用结束才整体写回，但**具体延迟量级待压测**（与过点 200ms 红线分属不同链路，不得拿红线数据代替实测）。
 ⚠️ 注意这一条**不是**"为了进程死后能接着跑"：本项目不载回快照续跑（理由见 §3.6），而是保证每步的输入输出与 gate 决策可回溯、且每段幂等可重入--进程死了本段重跑或下一段照常发起，不需要"同一个在途调用被唤醒"。
 状态记录粒度是 per-step（非 per-tool-call），开销有界。
 
@@ -542,8 +586,9 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 
 | 存储 | 技术 | 存什么 | key | TTL | 用途 | 落地 |
 |---|---|---|---|---|---|---|
-| 会话内上下文（AgentState） | Redis-backed Session store（`SessionService`） | 会话内字段值 + 多轮对话记忆 | `session_id`（能力子会话 `{session_id}:{capability}`） | 会话级 + TTL 策略 | M1 工作记忆；**不作为 gate 续跑的快照源**（分段靠重查事实衔接） | 📐 设计目标 |
-| `agent_state_archive` | MySQL（**可选**） | 字段演进序列归档留痕 | session_id + 快照序号 | 永久 | 审计复盘，**不作为恢复源** | 📐 设计目标 |
+| 会话内上下文（AgentState） | 框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage` 落 **MySQL**；默认实现为 `RedisStorage`） | 会话内字段值 + 多轮对话记忆 | `session_id`（能力子会话 `{session_id}:{capability}`） | 永久（业务可配清理策略） | M1 工作记忆；**不作为 gate 续跑的快照源**（分段靠重查事实衔接）；字段能不能存着复用按 §3.9 判 | 📐 设计目标 |
+| 消息历史（框架 message 记录） | 同上 `Storage` | 会话内消息（含 tool_call / tool_result 块） | `session_id` + `offset` 分页 | 永久 | 跨页面续聊与前端拉历史（框架自带 `GET /sessions/{id}/messages`）；**不需自建表** | 📐 设计目标 |
+| `agent_state_archive` | MySQL（**可选**） | 字段**演进序列**归档（框架只存当前值，序列需自归档） | session_id + 快照序号 | 永久 | 审计复盘，**不作为恢复源** | 📐 设计目标 |
 | `tool_call_trace` | MySQL (app) | 工具调用全文 | trace_id | 永久 | M3 证据链 | 📐 设计目标 |
 | `node_trace`（flow 步骤记录）/ `agent_step` | MySQL (app) | flow 步骤 / 委托执行记录 | record_id | 永久 | 编排能力审计 | 📐 设计目标 |
 | `agent_session` | MySQL (app) | 会话元数据 | session_id | 永久 | L5 生命周期 | 📐 设计目标 |
@@ -561,7 +606,7 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 
 | 组件 | 设计状态 | 落地待办 |
 |---|---|---|
-| `SessionService` + `AgentState`（M1 工作记忆） | 📐 设计目标 | 随 `create_app` 的 lifespan 装配 Redis-backed storage；仅用于会话内上下文与多轮记忆，不自研会话封装类，**不实现挂起/续跑** |
+| `SessionService` + `AgentState`（M1 工作记忆） | 📐 设计目标 | 随 `create_app` 的 lifespan 装配：`storage` 选 `AsyncSQLAlchemyStorage`（落 MySQL，存会话与消息），`message_bus` 选 `RedisMessageBus`（框架必填且只有 Redis 实现）；仅用于会话内上下文与多轮记忆，不自研会话封装类，**不实现挂起/续跑** |
 | MySQL 状态归档（可选） | 📐 设计目标 | 落 `agent_state_archive` 归档表，仅供审计复盘，不作为恢复源 |
 | `ToolCallTraceRepo` | 📐 设计目标 | Toolkit 工具执行回调处每次落一行（SQLAlchemy） |
 | `Repo`（会话台账） | 📐 设计目标 | `agent_session` / `failure_count` 落 MySQL |

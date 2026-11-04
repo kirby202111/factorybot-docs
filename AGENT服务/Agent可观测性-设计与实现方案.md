@@ -194,7 +194,7 @@
 ### 4.4 与 AgentScope 运行时的集成
 
 - 通用的推理步 / 模型调用 / 工具调用 span 由框架 `TracingMiddleware` 产出；本项目只在 Middleware 链上补 MES 维度属性（tenant、capability、prompt_version、span_kind），不再自建 flow 步骤级 span 包裹以外的重复埋点。
-- 会话内上下文：`SessionService`（Redis-backed，**2.0.5 起由旧名改名而来，旧名不可导入**）以 `session_id` 为唯一键，承载会话内上下文与多轮对话记忆，因此单次调用落在哪台副本都行。⚠️ **本项目不做 gate 挂起/续跑**（理由见 ADR-05）：跨确认闸门是**两次互相独立的调用**，各自有自己的 root span，二者在同一条 trace 上的可读性靠**显式回挂**取得——下一段发起时从 `agent_session` 台账取回原 `trace_id` 续上 parent，并把 `confirmation_id` 写进 span 属性，使「产待办 → 审批回调 → 下一段」在 trace 上串得起来。等待人确认的那段时间**不在 agent 侧**，它是 MES 工单实体上的 SLA，归属审批流侧观测。
+- 会话内上下文：`SessionService`（框架 `Storage` 之上的门面，本项目 storage 选 `AsyncSQLAlchemyStorage` 落 MySQL；**2.0.5 起由旧名改名而来，旧名不可导入**）以 `session_id` 为唯一键，承载会话内上下文与多轮对话记忆，因此单次调用落在哪台副本都行。⚠️ **本项目不做 gate 挂起/续跑**（理由见 ADR-05）：跨确认闸门是**两次互相独立的调用**，各自有自己的 root span，二者在同一条 trace 上的可读性靠**显式回挂**取得——下一段发起时从 `agent_session` 台账取回原 `trace_id` 续上 parent，并把 `confirmation_id` 写进 span 属性，使「产待办 → 审批回调 → 下一段」在 trace 上串得起来。等待人确认的那段时间**不在 agent 侧**，它是 MES 工单实体上的 SLA，归属审批流侧观测。
 - 步数与工具调用预算命中上限时（由本项目的预算拦截 Middleware 抛出，指标口径见 §5.2 的 `agent_step_budget_hit_total`、SLO 见 §5.4），在 root span 记 `agent.step_budget_hit` 事件并标 `agent.status=TIMEOUT`。
 - **研发期调试可视化不依赖任何框架自带 UI**（`AgentScope Studio` 已归档、不作选型）：单次会话看 OTel trace 瀑布（Tempo/Jaeger）+ `reply_stream` 事件流回放（把事件落 JSONL 后按 `session_id` 本地重放），跨会话聚合看 Grafana 指标看板。三者互补，均由本项目的观测旁路自采。
 

@@ -1,7 +1,7 @@
 # FactoryAgent —— 统一架构与流程图
 
 > 本文集中呈现 FactoryAgent 的 **AgentScope 2.0 架构形态**：一个运行时承载**三种能力形态**（开放式 ReAct / 顺序 `await` 固定链 / `flows/` 代码编排），以及各自的流程图与关键约束。
-> **核心口径**：诊断、草稿编写、流程编排不是三个 Agent，而是**同一个运行时装配出的三种能力形态**；它们共用 `Toolkit`、`Permission` 策略、`AgentState` + `SessionService`（Redis-backed；2.0.5 起旧名 `SessionManager` 已失效，不可导入）、`TracingMiddleware` 注入点。
+> **核心口径**：诊断、草稿编写、流程编排不是三个 Agent，而是**同一个运行时装配出的三种能力形态**；它们共用 `Toolkit`、`Permission` 策略、`AgentState` + 框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage` 落 MySQL；经 `SessionService` 访问，旧名 `SessionManager` 已失效不可导入）、`TracingMiddleware` 注入点。
 > 配套说明见 [总体设计与实现方案](FactoryAgent-总体设计与实现方案.md) §3/§4、[诊断能力](FactoryAgent-诊断能力.md) §2、[草稿编写能力](FactoryAgent-草稿编写能力.md) §1.2、[流程编排能力](FactoryAgent-流程编排能力.md) §2。
 
 ---
@@ -118,7 +118,7 @@
 | 单工具超时 | ≤2s | httpx timeout |
 | 整会话超时 | ≤60s | `asyncio.wait_for` |
 | 收口条件 | 模型无 tool call | `DiagnosisReport` Pydantic 校验 |
-| 会话内上下文 | `AgentState` + `SessionService`（Redis-backed；旧名 `SessionManager` 已失效） | 多轮对话记忆与会话隔离（按 `session_id`）；**不承担跨闸门续跑**（框架也无 `interrupt` / `Command(resume=…)` 原语，且不自建同语义机制） |
+| 会话内上下文 | `AgentState` + 框架 `Storage`（本项目落 MySQL；`SessionService` 是其上门面，旧名 `SessionManager` 已失效） | 多轮对话记忆与会话隔离（按 `session_id`）；**不承担跨闸门续跑**（框架也无 `interrupt` / `Command(resume=…)` 原语，且不自建同语义机制） |
 | 兜底 | 超预算 / 超时 / 连续 3 次工具失败 | 返回 `partial` 报告"已转人工"，不硬答；`failure_count >= 2` 本段置 `WAITING` 并推异常卡 |
 
 > 设计目标骨架，尚未落地（当前代码仓 `src/` 无相应实现）。下列参数名为本仓库装配层的写法，非逐字核实过的框架关键字；已核实的框架入参只有 `name` / `model` / `toolkit` / `offloader`，事件流走 `reply_stream`（`print` 接口已 deprecated）。
@@ -131,7 +131,7 @@ def build_diagnosis_agent(model, toolkit, deps) -> Agent:
         name="diagnosis",
         model=model,                       # AgentScope Model 抽象，可插拔 provider
         toolkit=toolkit.tools_for("diagnosis", deps.tenant),  # 只读工具切片
-        sessions=deps.session_service,     # SessionService（2.0.5 起）+ AgentState，Redis-backed
+        sessions=deps.session_service,     # SessionService（2.0.5 起）+ AgentState，storage 落 MySQL
         permission=deps.readonly_policy,   # 叠加层：每次 tool 执行前过 Permission 拦截
         max_steps=20,                      # 步数与工具调用预算上限
         tracing=deps.tracing_middleware,   # TracingMiddleware 注入 trace
@@ -278,7 +278,7 @@ flow 驱动        能力节点/确定性步骤    gate 步骤          UI/责�
 
 要点：
 
-- **本段与下一段是两次独立调用**，中间不在 agent 侧保存任何可恢复的流程快照：本段推卡并把待办落成 MES 已有工单实体后即 `return`，审批完成回调 `/advance` 后重新发起下一段并按 `evidence_set_id` **重查当下现场事实**（MES 数据时变，不恢复快照）。`AgentState` 经 `SessionService`（Redis-backed；旧名 `SessionManager` 已失效）只承载**会话内上下文与多轮记忆**；责任人分派、催办、超时升级、跨天全在工单实体生命周期内（ADR-05）；`BackgroundTaskManager` 只托管单次调用的短后台任务，**不做 gate 计时与催办**。
+- **本段与下一段是两次独立调用**，中间不在 agent 侧保存任何可恢复的流程快照：本段推卡并把待办落成 MES 已有工单实体后即 `return`，审批完成回调 `/advance` 后重新发起下一段并按 `evidence_set_id` **重查当下现场事实**（MES 数据时变，不恢复快照）。`AgentState` 经框架 `Storage`（本项目落 MySQL）只承载**会话内上下文与多轮记忆**；责任人分派、催办、超时升级、跨天全在工单实体生命周期内（ADR-05）；`BackgroundTaskManager` 只托管单次调用的短后台任务，**不做 gate 计时与催办**。
 - token 由**工具网关**签发并校验（主闸），绑定 `action:target`（如 `isolation.issue:tenant_001`、`process_route.activate:RR-100:v4`）+ 过期，用后即废、过期 fail closed，防篡改防重放；无效则 `REJECT`。`Permission` 是叠加层，内层失效不得导致外层放行。
 - 写落库发生在**最右侧应用服务**，不是 Agent 进程——与正常写路径完全一致。
 - gate 决策（谁 / 何时 / 基于哪张卡 / 假设 / token）落 `agent_step_record`，全可审计。

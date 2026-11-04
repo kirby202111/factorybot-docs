@@ -95,7 +95,7 @@
 | 最大步数 | 步数与工具调用预算上限 `=20` | 一次 model+tool 算 2 步，最多 10 次工具调用；超预算即终止并兜底 |
 | 单工具超时 | ≤2s | httpx timeout |
 | 整会话超时 | ≤60s | `asyncio.wait_for` 包住 Agent 驱动 |
-| 会话内上下文 | `AgentState` + `SessionService`（Redis-backed） | 多轮追问与会话隔离（按 `session_id`）；**不承担跨闸门断点续跑**（诊断是一次性出报告的短调用）；同一调用内的 HITL 确认用 `event.RequireUserConfirmEvent` |
+| 会话内上下文 | `AgentState` + 框架 `Storage`（本项目选 `AsyncSQLAlchemyStorage` 落 **MySQL**；`SessionService` 是其上的门面） | 多轮追问与会话隔离（按 `session_id`）；⚠️ **只存消息、指代锚点与已确认意图，现场业务事实每轮重查**（字段可持久性判据见 [Agent记忆系统](../Agent记忆系统-设计与实现方案.md) §3.9）；**不承担跨闸门断点续跑**（诊断是一次性出报告的短调用）；同一调用内的 HITL 确认用 `event.RequireUserConfirmEvent` |
 | 收口条件 | 模型无 tool call | 输出 `DiagnosisReport`（Pydantic 校验） |
 
 ---
@@ -280,7 +280,7 @@ def build_diagnosis_agent(model, toolkit, deps) -> Agent:
         name="diagnosis",
         model=model,                                   # AgentScope Model 抽象，可插拔 provider
         toolkit=toolkit.tools_for("diagnosis", deps.tenant),  # 只读工具切片
-        session_service=deps.session_service,          # AgentState + SessionService（Redis-backed）
+        session_service=deps.session_service,          # AgentState + SessionService（storage 选 AsyncSQLAlchemyStorage 落 MySQL）
         permission=deps.permission,                    # 每次工具执行前过 Permission 拦截
         max_steps=20,                                  # 步数与工具调用预算上限
         tracing=deps.tracing_middleware,               # TracingMiddleware 注入 trace
