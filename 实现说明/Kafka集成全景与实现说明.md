@@ -378,7 +378,7 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 **实施重难点与技术挑战**
 
 1. **触发去重与风暴控制**：同一事件可能因 Kafka 重投多次到达，或短时间内多个相关事件同时触发同一场景。Agent 触发须幂等（按 `event_id` + scenario 去重），且并发触发需限流（按 tenant 信号量），避免突发把 LLM 调用打爆。
-2. **Agent 长程任务与事件消费的背压**：流程编排是长程任务（跨天等待人确认 / 续跑，跨进程恢复；会话状态用 AgentScope `AgentState` + `SessionService`（Redis-backed，2.0.5 起由 `SessionManager` 改名，旧名不可导入），流程推进状态归工作流引擎），事件消费速率可能远超 Agent 处理速率。需消费端 pause 背压 + 任务入队，不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
+2. **事件触发洪峰与 Agent 处理速率的背压**：流程编排是**无状态分段短跑**——一次调用跑到确认闸门即产待办并 return，不跨等待存活（会话上下文用 AgentScope `AgentState` + `SessionService`（Redis-backed，2.0.5 起由 `SessionManager` 改名，旧名不可导入）；跨调用的流程推进与等待归 MES 工单/审批实体，见 [ADR-05](../架构设计v2/00-架构决策记录ADR.md)）。正因为不常驻，这里的难点不是"长任务占着消费者不放"，而是**事件消费速率可能远超 Agent 单段处理能力**（LLM 并发度与 token 预算是真瓶颈）：需消费端 pause 背压 + 触发入队（按 tenant 信号量限流），不能让事件积压拖垮 Kafka consumer（触发 rebalance）。
 3. **跨语言事件消费幂等**：Python 侧 `event_id` 幂等表 + 手动 ack，与 Java 侧同构但独立实现。两套幂等表 schema 须对齐。
 4. **触发条件配置化**：哪些事件触发哪个 Agent 场景、触发阈值（如不良率突增的"突增"定义）应配置化，不硬编码在监听器里。🔴 触发规则归属（Agent 侧配置 vs MES 侧事件契约）待定。
 
@@ -400,14 +400,14 @@ Agent 不再等工程师提问，而是**事件驱动主动介入**。Kafka 承�
 **架构闪光点**
 
 1. **双通道互补**：WebSocket 的实时性 + Kafka 的持久性。实时通道失败（责任人未连 WS）不影响持久通道；持久通道消费侧（前端拉取 / 重连补送）兜底。
-2. **Kafka 兜底离线 / 重连补送**：与编排能力长程任务的等待人确认 / 续跑同构——state 在 MySQL 不在进程内存，Pod 重启后同一 `session_id` 续跑（会话经 `AgentState` + `SessionService` 恢复）。动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡。
+2. **Kafka 兜底离线 / 重连补送**：与编排能力的确认待办同构——**都不靠进程内存存活**：待办落成 MES 已有工单/审批实体（维修单/隔离单/首件放行/8D/SOP），动作卡的 Kafka topic 同样跨进程持久，责任人重连后从上次 offset 补送未读卡；Pod 重启不影响两边，审批完成后回调 `POST /agent/orchestration/{session_id}/advance` 重新发起下一段（新的一次短调用）。
 3. **跨语言 Python 生产**：agent-service（Python aiokafka）生产 `agent.action_cards`，是本系统唯一的 Python->Kafka 生产路径（其余 Python 服务都是消费）。partition_key=`session_id` 保证同一编排会话的动作卡有序。
 
 **实施重难点与技术挑战**
 
 1. **双通道消息顺序与去重**：WS 与 Kafka 可能重复送达同一张卡（WS 已推、Kafka 又补）。前端须按 `card_id` 去重，且两通道的卡片版本须一致。
-2. **离线期间动作卡堆积与过期**：责任人长期离线，动作卡在 Kafka 堆积；gate 有 deadline（超时挂起）。需动作卡 TTL + 超时挂起机制，过期卡不再补送而是转超时处理。
-3. **确认 token 与卡片的绑定**：动作卡携带 confirmation token，`POST /confirm` 用 token 续跑。token 与 card 的绑定须严格（`ConfirmationStore` Redis，TTL 30min），防伪造 / 重放。
+2. **离线期间动作卡堆积与过期**：责任人长期离线，动作卡在 Kafka 堆积。需区分两个状态：**卡不可见**（推送层问题，卡 TTL 过期后不再补送、只留痕）与**待办未处理**（业务层事实，工单仍在）。超时语义**不归 agent**：待办在 MES 工单实体上有 SLA，催办与升级在工单侧（ADR-05）；卡过期不会把流程挂住——工单仍可重新推卡，确认后经 `/advance` 照常推进。
+3. **确认 token 与卡片的绑定**：动作卡携带 confirmation token，`POST /agent/orchestration/{session_id}/advance` 交回 token 以发起下一段。token 与 card 的绑定须严格（Redis 确认记录，TTL 30min），防伪造 / 重放；token 同时是下游应用服务的幂等键。
 4. **Kafka 消费方（前端）的拉取模式**：前端不是常驻 Kafka consumer，而是重连时拉取未读动作卡。需"按 `user_id` 过滤 + 从上次 offset 起拉"的查询模式，与常规 Kafka consumer 不同——可能需要独立读模型投影而非直接消费 Kafka。
 
 ---

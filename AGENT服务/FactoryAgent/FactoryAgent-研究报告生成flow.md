@@ -451,7 +451,9 @@ class ReportPolicy(BaseModel):
     parallel_sections: bool = False           # 固定 False，见 §9 硬约束 4
 ```
 
-建议的 `report` spec：`writes_allowed=False`、步数与工具调用预算上限 14、`session_timeout_s=120`、`tool_tags=["read:*"]`（实际下发仍受 `toolboxes` 二次约束）。
+建议的 `report` spec：`writes_allowed=False`、步数与工具调用预算上限 14、`segment_timeout_s=120`、`tool_tags=["read:*"]`（实际下发仍受 `toolboxes` 二次约束）。
+
+> 顺手划清一条线：本 flow 的"长"是**计算型长程**——一次调用内一直在取证、一直在写，120s 是**计算预算**；它不需要也**不使用**挂起 / 续跑（这一层已在四个编排场景里整体取消，见 [ADR-05](../../架构设计v2/00-架构决策记录ADR.md)）。等待型长程（等审批、等备件）既不归本 flow，也不归 agent。
 
 ### 8.2 文件落点（相对 `agent_service/app/`）
 

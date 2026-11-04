@@ -4,7 +4,7 @@
 >
 > **口径纪律（重要）**：本篇是**设计目标，尚未落地**。代码仓 `factorybot` 目前 `src/` 下只有 `agents/tool_test.py`、`api/{health,index,tool_test}.py`、`schemas/tool_test.py`、`tools/get_current_time.py`、`factory.py`，**不存在 `app/infrastructure/ai/` 等目录**，本文出现的类名/文件路径是设计落点或历史草稿实现，不代表已上线代码。目标底座为 **AgentScope 2.0**：provider 可插拔统一走框架 **`Model` 抽象 + `Credential`**（如 `agentscope.model.DashScopeChatModel` + `DashScopeCredential`；2.0 需显式 Credential，1.x 直传 `api_key` 的写法作废），OpenAI 兼容协议（含 DeepSeek）经同一 `Model` 抽象接入。本文中 `ChatModel` Protocol / `_LangChainAdapter` / `langchain-openai` 一系是**历史实现路线与 provider 兼容要点的载体，不是目标架构的框架 API**；思考模型的三条 provider 限制（§4）与 tool_call_id 配对不变量（§5）是 provider 事实，换底座后仍然成立。
 > **核心纪律**：LLM 可插拔，provider 无关；真实模型经观测装饰器（本项目自定义 `ObservableChatModel`，非框架 API）统一埋观测（token/延迟/模型/prompt_version）。mock 模式离线可跑，real 模式按 provider 切换，二者消息协议完全一致。
-> **设计落点（尚未落地）**：LLM 抽象层与工厂（`Model` 适配 + 观测装饰）、配置项、`flows/` 编排的并行 gate 确认续跑（见 §7）。
+> **设计落点（尚未落地）**：LLM 抽象层与工厂（`Model` 适配 + 观测装饰）、配置项、`flows/` 编排的并行 gate 确认与分段（见 §7）。
 
 ---
 
@@ -154,11 +154,11 @@ ModelResponse.tool_calls[i].id  (模型返回)
 
 ---
 
-## 7. 并行 gate 的确认与续跑（设计目标，尚未落地）
+## 7. 并行 gate 的确认与分段（设计目标，尚未落地）
 
 **要解决的问题**：`fault_response` 场景里 `gate_repair ‖ gate_isolation` **并行**，两个 gate 各有一个待确认记录。两 gate 的 `step`（REPAIR/ISOLATION）与 `writes_via` 不同，**单个令牌里的 `action` 无法同时匹配两者**——必须为每个待确认 gate 分别签发与其动作匹配的一次性确认令牌。
 
-> 历史草稿用图框架的"挂起/恢复"（一次调用恢复全部待确认点）实现，并踩过"恢复时必须指明是哪一个待确认点"的报错。该原语属于被替换掉的旧底座，**AgentScope 2.0 不提供图级挂起/恢复**，下面的口径是目标设计。
+> 历史草稿用图框架的"挂起/恢复"（一次调用恢复全部待确认点）实现，并踩过"恢复时必须指明是哪一个待确认点"的报错。该原语属于被替换掉的旧底座，**AgentScope 2.0 不提供图级挂起/恢复**；本项目在此基础上进一步**取消了 agent 侧的挂起/续跑这一层**（理由见 ADR-05），因此下面的口径只剩"单次调用内的令牌签发纪律"，不涉及任何恢复语义。
 
 **目标做法**（`flows/` 请求内协同 + 框架已核实原语）：
 
@@ -171,15 +171,17 @@ for step, card in pending:
         action=card.writes_via_action(),         # 各 gate 各自匹配，互不覆盖
     )
     state.confirmations[step] = asdict(tok)      # dict 形态，便于 AgentState 经 SessionService 落 Redis
-# 每个 gate 由各自的 RequireUserConfirmEvent 确认事件驱动续跑；
-# 会话状态按 session_id 取回，任意副本可接管
+    await tickets.create(card, session_id=session_id, step=step)   # 待办落成 MES 已有工单实体
+# 本段 flow 在此 return：不阻塞等事件、不保存待恢复快照；
+# 每个 gate 的确认各自回调 /advance，按 (session_id, step) 起对应的下一段
 ```
 
 - **逐 gate 签发匹配令牌**：`action=card.writes_via_action()`，确保各 gate 的 `valid_for` 校验独立通过；**令牌用后即废、过期 fail closed**，主闸在工具网关（ADR-04）。
 - **dict 形态**：`asdict(token)` 便于序列化进 `AgentState`，`GateManager`（本项目封装）兼容 dict 解析。
 - **单 gate 路径不变**：只有一个待确认 gate 时保持原语义，不破回归。
-- **不做"一次确认覆盖多个 gate"**：并行 gate 各自独立确认、各自独立续跑——一个 confirm 只放行它绑定的那个动作。若业务上确实要"一键批准整步"，必须显式签发多枚令牌并逐条审计，不能合并成一枚。
-- **跨天/跨进程的持久 gate 不在此列**：等待人工确认超过请求生命周期、需要 deadline 超时 `SUSPENDED` 与补偿的流程推进状态归工作流引擎（ADR-05）；`flows/` 只负责请求内协同，框架侧只提供 `event.RequireUserConfirmEvent` + `SessionService` + `BackgroundTaskManager`/`SchedulerManager` 这一组真实原语。
+- **不做"一次确认覆盖多个 gate"**：并行 gate 各自独立确认、各自独立起下一段——一枚令牌只放行它绑定的那个动作。若业务上确实要"一键批准整步"，必须显式签发多枚令牌并逐条审计，不能合并成一枚。
+- **多个待确认点归同一张卡的场景不在本节**：同一次调用内的多个写动作可由 `event.RequireUserConfirmEvent` 逐项确认（框架只提供这一种人在回路语义，作用域限于本次调用）；超出本次调用的确认全部走工单待办。
+- **跨调用的持久 gate 不在此列**：等待人工确认超过请求生命周期（MES 现场常见：维修等备件、8D 跨部门会签），流程推进与等待状态归 MES 工单实体与工作流引擎（ADR-05）；agent 侧**不做 deadline 计时、不做超时挂起、不做催办**，确认后由 `/advance` 重新发起一段。`flows/` 只负责单次调用内的协同，框架侧可用的真实原语就是 `event.RequireUserConfirmEvent` + `SessionService` + `BackgroundTaskManager`/`SchedulerManager` 这一组。
 
 ---
 
@@ -216,7 +218,7 @@ RUN_MODE=mock                    # ACL/存储/Kafka 走 mock；LLM 由 provider 
 | 4 | 草稿能力 `500: Thinking mode does not support tool_choice` | 思考模型不支持强制 `tool_choice`（function_calling） | json_mode 不涉及 tool_choice |
 | 5 | 草稿能力 `500: Prompt must contain the word 'json'` | `json_object` 模式要求 prompt 含 "json" | 注入含 "JSON" 的 schema 描述 |
 | 6 | 诊断能力多步 ReAct 第二轮 API 400 | `_to_lc` 丢弃 `tool_calls` / `tool_call_id` | id 贯穿全链路（§5） |
-| 7 | 并行 gate 确认时"恢复必须指明是哪一个待确认点" | 单枚令牌无法同时匹配两个 gate 的不同动作 | **目标设计**：逐 gate 签发匹配令牌，各自独立确认与续跑（§7） |
+| 7 | 并行 gate 确认时"恢复必须指明是哪一个待确认点" | 单枚令牌无法同时匹配两个 gate 的不同动作 | **目标设计**：逐 gate 签发匹配令牌，各自独立确认、各自独立起下一段（§7） |
 | 8 | 测试失败 + 烧 token | `.env` 真实 provider 污染测试 | conftest 强制 mock（§8） |
 
 ---

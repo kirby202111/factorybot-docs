@@ -11,10 +11,10 @@
 | 需要的能力 | 落点（AgentScope 2.0 已核实原语 + 应用层） | 对本系统的意义 |
 |-----------|----------------------|---------------|
 | 开放式取证循环 | 统一 `Agent` 类（内置 ReAct，`reply` / `reply_stream`） | 诊断的多步只读取证循环由 Agent 内生，可对每次工具执行加权限拦截、超时、trace |
-| 固定步骤链 | 应用层顺序 `await` + `AgentState` / `SessionService` | 草稿链"取证据 → 检索 → 生成 → 校验"可按状态恢复，与诊断共用底座 |
+| 固定步骤链 | 应用层顺序 `await` + `AgentState` / `SessionService` | 草稿链"取证据 → 检索 → 生成 → 校验"步骤固定，与诊断共用底座；`AgentState` 只承载**会话内上下文与多轮记忆** |
 | 代码/LLM 混排 | `flows/` 里的确定性 flow 步骤 + `Agent` 能力节点 | 编排里确定性步骤不消耗 LLM 调用，能力节点才调 LLM |
 | 并行 + 汇合 | `asyncio.gather` 并发**各自独立**的 `Agent.reply()` + 应用层显式合并 + 确定性 barrier | 钢网程序比对 ‖ 齐套比对并行，放行前 barrier 硬校验；分支间不共享消息流、不看对方中间结论 |
-| 人在回路 | **主闸**：工具网关的一次性动作令牌（绑定 `action:target` + 过期 fail closed）；**叠加层**：`Permission` + `event.RequireUserConfirmEvent` | confirmation gate 不阻塞进程，`AgentState`（`SessionService`，Redis-backed）可跨进程续跑 |
+| 人在回路 | **主闸**：工具网关的一次性动作令牌（绑定 `action:target` + 过期 fail closed）；**叠加层**：`Permission`；跨调用的审批确认落 **MES 工单/待办实体** | confirmation gate 不阻塞也不挂起：本段产出动作卡与待办就返回，审批完成回调 `/advance` **重新发起下一段并重查当下事实**（MES 数据时变，不恢复快照） |
 | 硬上限 | 步数与工具调用预算上限 | 直接对应"最大步数"红线，运行时级兜底而非口头约束 |
 | 能力组合 | 能力可被 flow 直接 `await` 调用（`invoke` 是我们自己的应用层语义） | 编排直接调用诊断 / 草稿，不需要另起服务或复制逻辑 |
 
@@ -32,9 +32,9 @@
 | 是否开放规划 | 是（取证路径由中间结果驱动） | 否（步骤固定） | 否（顺序显式硬编码） |
 | LLM 消耗 | 每步一次模型调用 | 一次结构化生成 | 仅能力节点；纯代码路径为 0 |
 | 步数 / 工具调用预算 | 20（≤10 次工具调用） | 8 | 40 |
-| 会话超时 | 60s | 90s | 3600s（含人确认等待） |
+| 单次调用超时 | 60s | 90s | 300s（**不含等人确认**，等待期在工单侧计时） |
 | 写权限 | 无 | 无 | 有（`requires_confirmation` + `writes_via`） |
-| 典型挂起点 | 无（一次性出报告） | 无（返回草稿等前端确认） | gate flow 步骤 HITL 确认 |
+| 典型分段终点 | 无（一次性出报告） | 无（返回草稿等前端确认） | gate 步骤：产待办后本段结束（**不挂起**） |
 | 并行 | 不涉及 | 不涉及 | `asyncio.gather` 并发各自独立 `Agent.reply()`，应用层显式合并；分支只读同一份 `evidence_set_id`，不看对方中间结论（无交叉验证的扇出互看错误放大 17.2×，中心化 4.4×） |
 
 ---
@@ -118,8 +118,8 @@
 | 单工具超时 | ≤2s | httpx timeout |
 | 整会话超时 | ≤60s | `asyncio.wait_for` |
 | 收口条件 | 模型无 tool call | `DiagnosisReport` Pydantic 校验 |
-| 挂起续跑 | `AgentState` + `SessionService`（Redis-backed；旧名 `SessionManager` 已失效） | 中间状态落 Redis，进程重启从断点续跑；框架无 `interrupt` / `Command(resume=…)` 原语可依赖 |
-| 兜底 | 超预算 / 超时 / 连续 3 次工具失败 | 返回 `partial` 报告"已转人工"，不硬答；`failure_count >= 2 → SUSPENDED` 推异常卡 |
+| 会话内上下文 | `AgentState` + `SessionService`（Redis-backed；旧名 `SessionManager` 已失效） | 多轮对话记忆与会话隔离（按 `session_id`）；**不承担跨闸门续跑**（框架也无 `interrupt` / `Command(resume=…)` 原语，且不自建同语义机制） |
+| 兜底 | 超预算 / 超时 / 连续 3 次工具失败 | 返回 `partial` 报告"已转人工"，不硬答；`failure_count >= 2` 本段置 `WAITING` 并推异常卡 |
 
 > 设计目标骨架，尚未落地（当前代码仓 `src/` 无相应实现）。下列参数名为本仓库装配层的写法，非逐字核实过的框架关键字；已核实的框架入参只有 `name` / `model` / `toolkit` / `offloader`，事件流走 `reply_stream`（`print` 接口已 deprecated）。
 
@@ -170,7 +170,7 @@ def build_diagnosis_agent(model, toolkit, deps) -> Agent:
   │                    ↓
   │                  [gate: DISPOSITION] 人确认 -> 处置落库 -> 回 tooling_check 重检
   │
-  └─ kitting FAIL ─▶ [suspend] 确定性步骤：缺料确定性，直接挂起催料
+  └─ kitting FAIL ─▶ [shortage_ticket] 确定性步骤：缺料确定性，产缺料待办后本段结束
   ↓
 [done]
 ```
@@ -182,40 +182,44 @@ def build_diagnosis_agent(model, toolkit, deps) -> Agent:
 | 并行派发 | `asyncio.gather` 并发 `tooling_check` / `kitting_check` 两个执行体 | 各自独立、独立预算 / 超时 / 权限档位；单场景并行分支数受 `max_fanout ≤ 5` 约束 |
 | barrier 汇合 | 两分支都返回后在应用层显式合并 | 汇合点是确定性裁决步骤（缺交叉验证的扇出会把错误放大 17.2×，中心化 4.4×） |
 | 分支可见性 | 各分支只读同一份 `evidence_set_id`（关系型证据子集） | **不共享消息流、不看对方中间结论**；框架也不提供广播原语（`MsgHub` 等已删除） |
-| gate HITL 确认 | gate 停在工具网关一次性令牌（主闸）+ `Permission`（叠加层）+ `RequireUserConfirmEvent` | state 落 `AgentState`，进程不阻塞；`/confirm` 后由事件系统触发续跑 |
+| gate 分段确认 | gate 停在工具网关一次性令牌（主闸）+ `Permission`（叠加层）；审批确认落 MES 工单/待办实体 | 本段推卡 + 开待办后即返回，**不挂起不占执行槽**；`/advance` 回调重新发起下一段并重查当下事实 |
 | 确定性 flow 步骤不调 LLM | query / compare / barrier / gate / draft_release_card | 直接调 ACL，不进 `Toolkit`；`node_type=CODE` |
 | 能力节点调 LLM | root_cause / fault_impact / traceability / draft_* | `invoke(capability)`（应用层 `await`）；`node_type=AGENT` |
-| 步数 / 时长 | 步数与工具调用预算上限 `=40` / `timeout=3600s` | 超限标 `FAILED` 转人工 |
-| 故障隔离 | 能力节点连续失败 2 次 / 置信度 low | `SUSPENDED` 推异常卡，不自动重试到死 |
+| 本段步数 / 单次调用时长 | 步数与工具调用预算上限 `=40` / `timeout=300s`（**不含等人确认**） | 超限标 `FAILED` 转人工 |
+| 故障隔离 | 能力节点连续失败 2 次 / 置信度 low | 本段置 `WAITING` 推异常卡并转人工待办，不自动重试到死 |
 
-> 设计目标骨架，尚未落地。2.0 没有声明式协同原语（`Pipeline` 的 `sequential` / `fanout` / `MsgHub` 已删除，`GoalPipeline` / `TeamPipeline` 仅 experimental 且明确"成员间不互相说话"），所以编排形状就是普通 Python：顺序 = 依次 `await`，并行 = `asyncio.gather`，分流 = 普通 `if`。步骤名（plan / tooling_check / barrier / gate_release…）是本仓库自命名的 flow 步骤，不是框架概念。跨天 gate、超时 `SUSPENDED`、重试与补偿归工作流引擎（ADR-05），不在 `flows/` 内。
+> 设计目标骨架，尚未落地。2.0 没有声明式协同原语（`Pipeline` 的 `sequential` / `fanout` / `MsgHub` 已删除，`GoalPipeline` / `TeamPipeline` 仅 experimental 且明确"成员间不互相说话"），所以编排形状就是普通 Python：顺序 = 依次 `await`，并行 = `asyncio.gather`，分流 = 普通 `if`。步骤名（plan / tooling_check / barrier / gate_release…）是本仓库自命名的 flow 步骤，不是框架概念。确认等待、超时升级、重试与补偿归 MES 工单/审批流与工作流引擎（ADR-05），不在 `flows/` 内，也不在 agent 侧挂起。
 
 ```python
 # app/ai/flows/changeover.py（节选）
-# 编排 = 一条 flow：确定性 flow 步骤 + 能力节点 + barrier + gate，全部普通 Python
-async def run_changeover(self, ctx) -> FlowResult:
+# 编排 = 分段 flow：每段都是确定性 flow 步骤 + 能力节点 + barrier + gate，全部普通 Python
+# 一次调用跑到 gate 即返回；审批确认后由 /advance 重新发起下一段（重查当下事实，不恢复快照）
+
+async def seg_first_article(self, ctx) -> FlowResult:
     await self.steps.plan(ctx)                                   # 确定性步骤
     await self.steps.query_first_article(ctx)                    # 确定性步骤
-    await self.gates.await_confirm(ctx, "FIRST_ARTICLE")         # gate 挂起/续跑
+    return await self.gates.open_gate(ctx, "FIRST_ARTICLE")      # 产待办 + 推卡 -> 本段结束
+
+async def seg_tooling_kitting(self, ctx) -> FlowResult:
+    ctx.facts = await self.steps.requery_live_facts(ctx)          # ★ 重查当下现场事实（首件/路线/钢网/齐套）
     await self.steps.query_active_route(ctx)                     # 确定性步骤（版本锚点强制）
-    await self.gates.await_confirm(ctx, "PROCESS_SWITCH")
     # 并行：asyncio.gather 并发各自独立的执行体，汇合即返回，不持有流程状态
     tooling, kitting = await asyncio.gather(
         self.steps.query_and_compare_tooling(ctx),
         self.steps.query_and_compare_kitting(ctx),
     )
     route = self.steps.barrier(tooling, kitting)                 # 确定性分流（普通 if）
+    if route == "kitting_fail":
+        return await self.tickets.open_shortage_ticket(ctx)      # 确定性：产缺料待办后本段结束
     if route == "tooling_fail":                                  # 仅此处进能力节点
         await self.nodes.root_cause(ctx)                         # 能力节点：invoke("diagnosis")
         await self.nodes.disposition_card(ctx)                   # 能力节点：invoke("drafting")
-        await self.gates.await_confirm(ctx, "DISPOSITION")       # 网关一次性动作令牌 + 人确认
-        return await self.run_changeover(ctx) if ctx.retry_tooling else self.done(ctx)
-    if route == "kitting_fail":
-        return self.suspend(ctx, reason="缺料")                   # 确定性，直接挂起催料
+        return await self.gates.open_gate(ctx, "DISPOSITION")    # 处置待办 + 网关一次性令牌
     await self.steps.draft_release_card(ctx)
-    await self.gates.await_confirm(ctx, "RELEASE")
-    return self.done(ctx)
+    return await self.gates.open_gate(ctx, "RELEASE")            # 全 PASS 也要人放行
 ```
+
+> 分段拆分本身就是证据：`seg_*` 之间不传递任何内存态，下一段只需要 `session_id` + `scenario` 就能起步——所以没必要挂起。人在屏前的即时确认（同一调用内）仍可直接拿令牌往下走，不开工单。
 
 ---
 
@@ -243,17 +247,17 @@ DraftRequest(report, draft_kind, tenant)   —— 依次 await 四个 flow 步�
 
 ---
 
-## 7. confirmation gate 时序（HITL 确认 / 续跑）
+## 7. confirmation gate 时序（分段确认 / 回调起下一段，**无挂起与续跑**）
 
 ```text
-flow 驱动        能力节点/确定性步骤    gate 步骤          UI/责任人        /confirm        应用服务REST
+flow 驱动        能力节点/确定性步骤    gate 步骤          UI/责任人        /advance        应用服务REST
     │                │                   │                 │                │                │
     │── 执行步骤 ───▶│                   │                 │                │                │
     │                │── card ──────────▶│                 │                │                │
     │                │   (ActionCard +   │                 │                │                │
     │                │    hypothesis)    │                 │                │                │
     │                │                   │── HITL 确认 ────┼────────────────┼───────────────┤
-    │                │                   │  (state 落 AgentState, 进程不阻塞)│                │
+    │                │                   │  (落成 MES 工单/待办实体，本段 return、进程可退出)
     │                │                   │── push 卡片 ───▶│                │                │
     │                │                   │  (事件系统+Kafka)                │                │
     │                │                   │                 │── 看 evidence  │                │
@@ -262,7 +266,7 @@ flow 驱动        能力节点/确定性步骤    gate 步骤          UI/责�
     │                │                   │                 │                │── issue token ─┤
     │                │                   │                 │                │ (action:target │
     │                │                   │                 │                │  + 过期)        │
-    │                │                   │◀──────────────────── 事件触发续跑 ───────────────┤
+    │                │                   │◀─────────── 审批完成回调（新一次调用，重查当下事实）─────┤
     │                │                   │── 校验 token ───┤                │                │
     │                │                   │── 若 PASS ──────┼────────────────┼── 写落库 ─────▶│
     │                │                   │                 │                │  (聚合根不变式 │
@@ -274,7 +278,7 @@ flow 驱动        能力节点/确定性步骤    gate 步骤          UI/责�
 
 要点：
 
-- gate HITL 确认后进程不阻塞，`AgentState` 经 `SessionService`（Redis-backed；旧名 `SessionManager` 已失效）持久化，可承进程重启续跑；挂起由 `event.RequireUserConfirmEvent` 发出，长任务由 `BackgroundTaskManager` 托管。
+- **本段与下一段是两次独立调用**，中间不在 agent 侧保存任何可恢复的流程快照：本段推卡并把待办落成 MES 已有工单实体后即 `return`，审批完成回调 `/advance` 后重新发起下一段并按 `evidence_set_id` **重查当下现场事实**（MES 数据时变，不恢复快照）。`AgentState` 经 `SessionService`（Redis-backed；旧名 `SessionManager` 已失效）只承载**会话内上下文与多轮记忆**；责任人分派、催办、超时升级、跨天全在工单实体生命周期内（ADR-05）；`BackgroundTaskManager` 只托管单次调用的短后台任务，**不做 gate 计时与催办**。
 - token 由**工具网关**签发并校验（主闸），绑定 `action:target`（如 `isolation.issue:tenant_001`、`process_route.activate:RR-100:v4`）+ 过期，用后即废、过期 fail closed，防篡改防重放；无效则 `REJECT`。`Permission` 是叠加层，内层失效不得导致外层放行。
 - 写落库发生在**最右侧应用服务**，不是 Agent 进程——与正常写路径完全一致。
 - gate 决策（谁 / 何时 / 基于哪张卡 / 假设 / token）落 `agent_step_record`，全可审计。
@@ -293,11 +297,11 @@ flow 驱动        能力节点/确定性步骤    gate 步骤          UI/责�
 | 放行 / 拦截类工具不注册 | 前缀断言（`pass_judge` / `force_release` / `release_*` / `block_pass`） |
 | 版本一致性 | ACL 强制版本锚点 + `ACTIVE` 校验；锚点取不到即拒答 |
 | 步数与时长双闸门 | 步数与工具调用预算上限 + `asyncio.wait_for` |
-| 挂起续跑 | `AgentState` + `SessionService`（会话键 = `session_id`；`SessionManager` 为旧名，已失效） |
+| 分段与确认回调 | `session_id` 作为会话键 + MES 工单/待办实体承载确认；`/advance` 起下一段（**不挂起、不续跑、不恢复快照**） |
 | 跨能力同 trace | `parent_session_id` + `traceparent` 透传；排障用 OTel + Tempo/Jaeger（`TracingMiddleware`）+ `reply_stream` 事件回放——`AgentScope Studio` 已归档，不作为工具列 |
 
 ---
 
 ## 9. 一句话定位
 
-"FactoryAgent 用一套 AgentScope 2.0 编程模型承载三种运行时形态：诊断是 `model ↔ tool` 的开放式 ReAct 循环（内置于统一 `Agent` 类，步数与工具调用预算上限 = 20），草稿是固定 4 步的顺序 `await` 直线链（差异由策略分派表达），编排是确定性 flow 步骤 + 能力节点 + barrier + gate 的 `flows/` 普通 Python（并行用 `asyncio.gather` 并发各自独立 `Agent.reply()`、结论在应用层显式合并，换线全 PASS 时零 LLM）。三种形态共用同一个 runtime、同一张 `Toolkit`、同一套 `Permission` 启动断言、同一条 trace，跨能力调用靠 `parent_session_id` 串起来、上下文只传 `evidence_set_id`；工具网关的一次性动作令牌作为主闸、`Permission` 作叠加层，配合 `event.RequireUserConfirmEvent` 让写动作前必须停下来等人确认、由事件系统触发续跑，`AgentState` + `SessionService`（Redis-backed）让长流程跨进程续跑。"
+"FactoryAgent 用一套 AgentScope 2.0 编程模型承载三种运行时形态：诊断是 `model ↔ tool` 的开放式 ReAct 循环（内置于统一 `Agent` 类，步数与工具调用预算上限 = 20），草稿是固定 4 步的顺序 `await` 直线链（差异由策略分派表达），编排是确定性 flow 步骤 + 能力节点 + barrier + gate 的 `flows/` 普通 Python（并行用 `asyncio.gather` 并发各自独立 `Agent.reply()`、结论在应用层显式合并，换线全 PASS 时零 LLM）。三种形态共用同一个 runtime、同一张 `Toolkit`、同一套 `Permission` 启动断言、同一条 trace，跨能力调用靠 `parent_session_id` 串起来、上下文只传 `evidence_set_id`；工具网关的一次性动作令牌作为主闸、`Permission` 作叠加层，写动作前必须停下来等人确认——**Agent 无状态分段执行**：本段产出动作卡并落成 MES 工单/待办实体后就返回，审批回来重新发起下一段并重查当下事实（`AgentState` + `SessionService` 只承载会话内上下文与多轮记忆，不做跨进程续跑）。"

@@ -118,13 +118,16 @@
 
 ---
 
-## ADR-05 长周期编排归工作流引擎，`pipeline` 只做请求内协同
+## ADR-05 长周期编排归工作流引擎与 MES 审批流，`flows/` 只做单次调用内的协同
 
-**背景**：换线、8D、工艺变更这类链路的真实需求是：跨天等待人工确认、超时挂起、严格重试语义、崩溃续跑、可审计补偿。这是**工作流引擎的原生职责**（复核 P0-3 已把审批链移出 Agent 判据）。会话持久化不等于 durable workflow。**本轮核查使这条结论从"建议"变成"被迫"**：旧文档把编排能力整体押在 `Pipeline(sequential/fanout/MsgHub)` 上，而这些 API **在 AgentScope 2.0 中已不存在**（1.x API，2.0.0 起模块内容被移除）。押注一个框架已经不提供的原语，实现时无从下手。
+**背景**：换线、8D、工艺变更这类链路的真实需求是：跨天等待人工确认、超时升级、严格重试语义、可审计补偿。这是**工作流引擎与审批流的原生职责**（复核 P0-3 已把审批链移出 Agent 判据）。会话持久化不等于 durable workflow。**本轮核查使这条结论从"建议"变成"被迫"**：旧文档把编排能力整体押在 `Pipeline(sequential/fanout/MsgHub)` 上，而这些 API **在 AgentScope 2.0 中已不存在**（1.x API，2.0.0 起模块内容被移除）。押注一个框架已经不提供的原语，实现时无从下手。
+
+**同时撤销一个旧设计：agent 侧的挂起 / 断点续跑 / 跨副本恢复。** 逐项对过 4 个编排场景后判定它不是刚需：① gate 之间几乎全是确定性代码节点（换线快路径 LLM 调用为 0），所谓"挂起期"没有任何需要保住的计算态；② MES 现场事实**时变**，把 T+3s 的快照载回 T+10min 的进程继续跑，等于用过期事实做当下决策（与会话语义缓存默认关闭同一条理由）；③ 每个 gate 产出的都是 MES **已有业务对象**（维修单 / 隔离单 / 首件放行 / 8D / SOP），审批本身就有可靠实体；④ 框架也不提供 `interrupt` / `Command(resume=…)` / checkpoint 原语，自建同语义机制就是把工作流引擎的职责搬进最不适合它的地方。
 
 **决策**：**混合，职责切干净**。
 
-- **工作流引擎层**（Temporal 类 `[选型待定，见 §14 未决问题]`）：流程定义、步骤状态机、等待人、gate deadline、超时 `SUSPENDED`、重试与补偿、审计时间线。**跨天 gate 一律在这里**。
+- **审批与待办层**（MES 已有工单实体）：gate 产出的动作卡落成维修单 / 隔离单 / 首件放行 / 8D / SOP，责任人分派、签收、催办、超时升级全部在该实体的生命周期内。
+- **工作流引擎层**（Temporal 类 `[选型待定，见 §14 未决问题]`）：跨调用的流程推进、实体间编排、重试与补偿、审计时间线。**所有"等人"与"等物理世界变绿"的 gate 一律在这里，不在 agent 进程内。**
 - **AgentScope 层**：只在引擎调用的**单个节点内部**跑 `Agent` 推理与工具执行。**节点内的并发不用框架 pipeline 原语**——核查显示 `fanout_pipeline` / `sequential_pipeline` / `MsgHub` 已从 2.0 移除，`v2.0.11` 仅剩 experimental 的 `GoalPipeline` / `TeamPipeline`。因此节点内扇出用 **`asyncio.gather` 并发多个独立 `Agent.reply()` 调用**实现，汇合即返回，不持有流程状态。
 - **共享上下文的旧设计作废**：旧文档"MsgHub 让 A 根因 + B 隔离范围互相看到彼此结论"在 2.0 **无法实现**——`TeamPipeline` 文档明写 **"No member-to-member talk"**。改为**经证据集显式传递**：一个节点的结论落成 `evidence_set_id`，下游按需回查，不做成员间广播。
 - **LLM 节点数封顶**：确定性步骤（阈值判断、齐套校验、barrier 分流、放行决策）写成工作流节点里的普通函数，**不进 Agent**。三问判定保留：输入开放？需推理/生成？分支难穷举？——三问皆否即代码。**注意：三问判定是本设计自有判据，官方文档没有给出任何"何时该拆多 Agent"的量化标准**（FAQ 原文仅一句："Use teams when a task benefits from delegation or separate agent contexts. A single agent is sufficient when one model and toolkit can complete the task."）。
@@ -149,13 +152,13 @@
 
 ---
 
-## ADR-07 状态与续跑：run 先落库再执行，副本无关恢复
+## ADR-07 状态外置：run 先落库再执行，会话态**不承担跨调用续跑**
 
-**决策**：Agent run **先落库再执行**（与 Agno v3.0 等生产实践同向 【C】），状态用已核实的 `AgentState`（`state/`，含 `Task` / `TaskContext`），会话服务用 **`SessionService`**（`app/_service/_session.py`，**2.0.5 起由 `SessionManager` 改名而来，旧名不可导入**），Redis 后端真实存在（`app/storage/_redis_storage.py`）。按 `session_id` 任意副本可接续。Pod OOM / 滚动更新后不从头重跑。
+**决策**：Agent run **先落库再执行**（与 Agno v3.0 等生产实践同向 【C】），状态用已核实的 `AgentState`（`state/`，含 `Task` / `TaskContext`），会话服务用 **`SessionService`**（`app/_service/_session.py`，**2.0.5 起由 `SessionManager` 改名而来，旧名不可导入**），Redis 后端真实存在（`app/storage/_redis_storage.py`）。⚠️ **用途限定**：`AgentState` + `SessionService` 只承载**会话内上下文与多轮对话记忆**（按 `session_id` 隔离，因此单次调用在哪台副本上跑都行）；**不用它做 gate 挂起 / 断点续跑 / 载回快照**（理由见 ADR-05）。跨 gate 的正确语义是：本段落库后 return，确认后回调 `/advance` **重新发起下一段并重查当下现场事实**；Pod OOM / 滚动更新不需特殊处理，每段幂等可重入。
 
-**与 ADR-05 的分工**：会话状态 ≠ 流程状态。流程推进状态归工作流引擎，会话/消息历史归框架 session。两者以 `session_id` + `workflow_id` 双键关联。
+**与 ADR-05 的分工**：会话状态 ≠ 流程状态。流程推进与等待归审批流/工作流引擎，会话/消息历史归框架 session。两者以 `session_id` + `workflow_id`（或工单 id）双键关联。
 
-**子会话隔离**：`{session_id}_{capability}` 维度隔离；`failure_count >= 2 → SUSPENDED` 推异常卡（继承旧文档既有工程约定，不变）。
+**子会话隔离**：`{session_id}:{capability}` 维度隔离；`failure_count >= 2` 则**本段置 `WAITING` 并转人工待办**推异常卡（旧口径的 `SUSPENDED` 不再使用，因它暗含"可恢复"语义）。
 
 ---
 

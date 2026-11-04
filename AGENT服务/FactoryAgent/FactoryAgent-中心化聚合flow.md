@@ -247,7 +247,7 @@ class CapabilitySpec(BaseModel):
     fanout: FanoutPolicy | None = None    # 仅 FANOUT_AGGREGATE 必填（主文档 §7 断言 ⑥）
 ```
 
-建议的 `aggregate` spec：`writes_allowed=False`、步数与工具调用预算上限 12、`session_timeout_s=60`、`tool_tags=["read:*"]`（实际下发仍受 `toolboxes` 二次约束）。
+建议的 `aggregate` spec：`writes_allowed=False`、步数与工具调用预算上限 12、`segment_timeout_s=60`、`tool_tags=["read:*"]`（实际下发仍受 `toolboxes` 二次约束）。
 
 ### 5.2 `Toolkit` 增量：工具边界与任务边界解耦
 
@@ -286,10 +286,10 @@ class Toolkit:
 
 1. **扇出用 `asyncio.gather`，不用框架协同原语**
    - 框架侧的选择已经不存在：`MsgHub` / `sequential_pipeline` / `fanout_pipeline` 在 2.0 已删除，`GoalPipeline` / `TeamPipeline` 是 experimental 且明确"成员间不互相说话"，**观察、不进生产**。
-   - 另有两点让框架原语即便存在也不合用：① 每路要独立 session 落 `agent_session` 时不好控制；② 分支内放 HITL 确认的续跑语义有 task 级限制。
+   - 另有两点让框架原语即便存在也不合用：① 每路要独立 session 落 `agent_session` 时不好控制；② 分支内放 HITL 确认在框架侧有 task 级限制（而本项目本就不做跨调用挂起，确认落工单）。
    - **实现**：`asyncio.gather` 并发**各自独立**的 `Agent.reply()`（独立 session / `AgentState`、独立 `asyncio.wait_for` 超时），子会话内直调工具；失败用 `return_exceptions=True` 收口成 `PARTIAL` pack；合并与裁决在应用层代码显式完成。
 2. **HITL 确认 / gate 一律放在 `fan_in` 之后**
-   - fan-in 归并段本身**不含 gate**；需要人确认的动作在上层（编排 gate 或草稿 confirmation），挂起续跑用 `event.RequireUserConfirmEvent` + `SessionService` + `BackgroundTaskManager`。这条同时满足主文档 §7 断言 ⑤（编排 flow 自身不持工具）的同类精神。
+   - fan-in 归并段本身**不含 gate**；需要人确认的动作在上层（编排 gate 或草稿 confirmation），而 gate 的语义是**本段终点**：产 ActionCard + 落成 MES 工单/待办实体后本调用返回，审批回来由 `/advance` 重新发起下一段（**不挂起、不续跑、不恢复快照**）。这条同时满足主文档 §7 断言 ⑤（编排 flow 自身不持工具）的同类精神。
 
 ### 5.5 `SessionService` 的并发要求（别在这里翻车）
 
@@ -309,7 +309,7 @@ class Toolkit:
 | 单路 `max_items_per_pack` | ≤50 条 + `stats` | 强制就地压缩 |
 | 局部失败 | `status=PARTIAL` + `gaps`，**不重跑全链** | 错误经归并传递会放大，重跑只会放大 |
 | 全部失败 | **不调 judge**，直接 `need_human_review` + 列出缺哪几路 | 宁可"证据不足转人工"，不让 judge 在空证据上下结论 |
-| 父会话总预算 | 步数与工具调用预算上限 12、60s | 与诊断同档；聚合不是长驻流程（长驻是编排的 3600s） |
+| 父会话总预算 | 步数与工具调用预算上限 12、60s | 与诊断同档；聚合是一次调用内跑完的短流程（不在 agent 侧常驻等确认） |
 
 **为什么"部分失败不重跑"**：聚合的价值是可交付的**部分结论**。一路缺数据应该变成一句"设备参数留存期不足，条件链未覆盖"，而不是一次全链重试后再失败——后者只会让用户等更久、拿到同样的结论。
 

@@ -194,7 +194,7 @@
 ### 4.4 与 AgentScope 运行时的集成
 
 - 通用的推理步 / 模型调用 / 工具调用 span 由框架 `TracingMiddleware` 产出；本项目只在 Middleware 链上补 MES 维度属性（tenant、capability、prompt_version、span_kind），不再自建 flow 步骤级 span 包裹以外的重复埋点。
-- 会话恢复：`SessionService`（Redis-backed，**2.0.5 起由旧名改名而来，旧名不可导入**）以 `session_id` 为唯一键，gate 挂起后由确认事件（`event.RequireUserConfirmEvent`）在任意副本续跑；续跑时按 `session_id` 取回原 `trace_id` 并续上 root span，使中断-恢复的会话与原 trace 同属一棵树。
+- 会话内上下文：`SessionService`（Redis-backed，**2.0.5 起由旧名改名而来，旧名不可导入**）以 `session_id` 为唯一键，承载会话内上下文与多轮对话记忆，因此单次调用落在哪台副本都行。⚠️ **本项目不做 gate 挂起/续跑**（理由见 ADR-05）：跨确认闸门是**两次互相独立的调用**，各自有自己的 root span，二者在同一条 trace 上的可读性靠**显式回挂**取得——下一段发起时从 `agent_session` 台账取回原 `trace_id` 续上 parent，并把 `confirmation_id` 写进 span 属性，使「产待办 → 审批回调 → 下一段」在 trace 上串得起来。等待人确认的那段时间**不在 agent 侧**，它是 MES 工单实体上的 SLA，归属审批流侧观测。
 - 步数与工具调用预算命中上限时（由本项目的预算拦截 Middleware 抛出，指标口径见 §5.2 的 `agent_step_budget_hit_total`、SLO 见 §5.4），在 root span 记 `agent.step_budget_hit` 事件并标 `agent.status=TIMEOUT`。
 - **研发期调试可视化不依赖任何框架自带 UI**（`AgentScope Studio` 已归档、不作选型）：单次会话看 OTel trace 瀑布（Tempo/Jaeger）+ `reply_stream` 事件流回放（把事件落 JSONL 后按 `session_id` 本地重放），跨会话聚合看 Grafana 指标看板。三者互补，均由本项目的观测旁路自采。
 
@@ -328,10 +328,12 @@ class ObservabilityContext:
 | `agent_session_total` | Counter | scenario, status | 会话数（换线/首件/异常处置场景） |
 | `agent_step_total` | Counter | capability, step_kind | flow 步骤执行数（step_kind: CODE/AGENT；业务表列名仍为 `node_trace.node_type`） |
 | `agent_llm_invocation_total` | Counter | capability | 真 LLM 调用数（换线全程 PASS 时为 0） |
-| `orchestration_step_latency_seconds` | Histogram | step | 各步耗时（含 gate 等待） |
+| `orchestration_step_latency_seconds` | Histogram | step | 各步耗时（**单次调用内，不含等待人确认的时间**——那部分归工单侧 SLA） |
+| `orchestration_advance_latency_seconds` | Histogram | scenario | 待办签发 → `/advance` 回调的确认等待时长（数据取自 MES 工单实体，agent 侧不计时，只做聚合观测） |
 | `orchestration_gate_decision_total` | Counter | step, decision | gate 决策数（decision: APPROVED/REJECTED/SKIPPED） |
+| `agent_segment_waiting_total` | Counter | scenario, waiting_reason | 本段产待办 / 转人工待办次数（waiting_reason: APPROVAL_PENDING / MATERIAL_SHORTAGE / BARRIER_FAIL / CAPABILITY_FAILED） |
+| `agent_advance_callback_total` | Counter | scenario | `/advance` 确认回调发起下一段次数（decision: APPROVED/REJECTED） |
 | `agent_confidence_total` | Histogram | capability, confidence | agent 置信度分布（high/medium/low） |
-| `orchestration_suspended_total` | Counter | scenario | 故障隔离挂起次数 |
 | `write_tool_total` | Counter | tool, confirmed | 写工具调用数（confirmed: true/false） |
 | `orchestration_write_rejected_total` | Counter | tool | 未带有效 confirmation token 被拒次数 |
 
@@ -736,9 +738,9 @@ class EvalRunner:
 | 证据为空（hypothesis 无 evidence） | schema 校验失败，重试 | `agent_llm_schema_error_total` +1 |
 | `evidence_set_id` 回查为空（草稿能力） | 草稿标 `needs_review`，intent 注明证据不完整，不硬凑 | `draft_low_confidence_total` +1 |
 | 草稿 `requires_confirmation` 恒 True（草稿能力） | 前端无法绕过确认下达；草稿能力不持有写 client | `draft_rejected_total` +1 |
-| gate 等待超 deadline（编排能力） | 自动挂起 `SUSPENDED`，推责任人，不无限阻塞 | `orchestration_suspended_total` +1 |
-| barrier 未 PASS（编排能力） | 禁止推放行卡，分流到 agent 或挂起 | `orchestration_suspended_total` +1 |
-| agent 连续失败 2 次（编排能力） | 标 `SUSPENDED`，推异常卡，不自动重试到死 | `orchestration_suspended_total` +1 |
+| 待办超过工单侧 SLA（编排能力） | agent 侧**不计时、不挂起、不催办**——SLA、升级、催办全在 MES 工单实体生命周期内（ADR-05）；确认后回调 `/advance` 起下一段 | `agent_segment_waiting_total{waiting_reason=APPROVAL_PENDING}` +1（工单侧另有 SLA 告警） |
+| barrier 未 PASS（编排能力） | 禁止推放行卡，分流到 agent 取证，或直接产缺料/处置待办后**本段结束** | `agent_segment_waiting_total{waiting_reason=BARRIER_FAIL/MATERIAL_SHORTAGE}` +1 |
+| agent 连续失败 2 次（编排能力） | 本段置 `WAITING`、推异常卡转人工待办，不自动重试到死（**不保留挂起态，下一段由人工处置后重新发起**） | `agent_segment_waiting_total{waiting_reason=CAPABILITY_FAILED}` +1 |
 
 ### 12.2 兜底动作可观测
 

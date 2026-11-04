@@ -33,7 +33,7 @@
 │ L2 能力①      │      │ L2 能力②      │      │ L2 能力③      │
 │ diagnosis     │      │ drafting      │      │ orchestration │
 │ 只读 / 20 步  │      │ 只产 Draft    │      │ 受限写 / 40 步│
-│ 60s           │      │ 8 步 / 90s    │      │ 3600s         │
+│ 60s           │      │ 8 步 / 90s    │      │ 300s/段       │
 └───────┬───────┘      └───────┬───────┘      └───────┬───────┘
         │                      │                      │
         ▼                      ▼                      ▼
@@ -52,13 +52,13 @@
 
 | 组件 | 职责 | 注意 |
 |---|---|---|
-| FastAPI 入口 | `/agent/diagnose`、`/agent/draft`、`/agent/orchestration/{scenario}/start`、`/agent/orchestration/{session_id}/confirm` | 只做协议，不含业务判断 |
+| FastAPI 入口 | `/agent/diagnose`、`/agent/draft`、`/agent/orchestration/{scenario}/start`、`/agent/orchestration/{session_id}/advance`（审批后的确认回调，起下一段） | 只做协议，不含业务判断 |
 | 事件订阅 | `DomainEventTrigger`：`equipment.fault`→编排/`fault_response`、`process.route.activated`→草稿/`SOP`、`defect_rate.spike`→诊断/`auto` | 只调 `invoke()`，不复用 flow 内部逻辑 |
 | `AgentRuntime` | 能力注册表、flow 装配、会话驱动、能力节点调用、超时与步数兜底 | 唯一能 `await Agent 的 reply` 的地方 |
 | `Toolkit` | 按 `capability + tenant` 双维下发工具切片 | 切片是权限，不是便利 |
 | `Permission` | 启动四类断言：只读 / 无写 client / 写需确认 / 无放行工具 | 失败即进程起不来 |
 | `SessionService` | 建会话、写步骤、收口状态 | 每行必带 `capability` |
-| `AgentState` | 显式状态 + `SessionService`（Redis-backed）持久化，跨进程续跑 | `session_id` 唯一，跨能力不共用会话 |
+| `AgentState` | 显式状态 + `SessionService`（Redis-backed）持久化，**仅会话内上下文与多轮记忆**（不做跨闸门续跑） | `session_id` 唯一，跨能力不共用会话 |
 | ACL 客户端池 | 过点/工艺/物料/设备/工装/遥测 + 写 client | 写 client 只下发给有写权限的能力 |
 | `Model` 抽象 | provider 可插拔、结构化输出（`Content Block`）强约束 | 按能力限并发，避免一个能力打满 |
 | middleware | 脱敏、结果压缩、trace 注入 | 配置按能力可覆盖，不用全局常量 |
@@ -87,7 +87,7 @@ class CapabilitySpec(BaseModel):
     flow_shape: FlowShape            # open_react / fixed_chain / flow_code / fanout_aggregate
     writes_allowed: bool             # 诊断 False / 草稿 False / 编排 True
     step_budget: int                 # 步数与工具调用预算上限：20 / 8 / 40
-    session_timeout_s: float         # 60 / 90 / 3600
+    segment_timeout_s: float         # 单次调用的计算超时：60 / 90 / 300（**不含等人确认**，等确认在工单侧计时）
     tool_tags: list[str]             # ["read:pass", "read:process"] 等
 ```
 
@@ -112,10 +112,10 @@ class CapabilitySpec(BaseModel):
 | 是否开放规划 | 是（取证路径由中间结果驱动） | 否 | 否（步骤顺序显式写在代码里） |
 | 工具权限 | 只读 | 无写 client | 受限写（`writes_via`） |
 | 产物 | `DiagnosisReport`（假设 + 证据引用） | `Draft`（`requires_confirmation` 恒真） | `ActionCard` / `GateDecision` / session 状态 |
-| 步数 / 超时 | 20 / 60s | 8 / 90s | 40 / 3600s（含人等待） |
+| 步数 / 单次调用超时 | 20 / 60s | 8 / 90s | 40 / 300s（**不含等人确认**，等待期在工单侧） |
 | 入口 | `POST /agent/diagnose` | `POST /agent/draft` | `POST /agent/orchestration/{scenario}/start` |
 | 场景枚举 | 自由诊断 / `auto` | `draft_kind` | `changeover` / `fault_response` / `complaint_8d` / `process_change` |
-| 挂起点 | 无 | 无（返回前端确认） | gate 步骤 HITL 确认（`RequireUserConfirmEvent` + `SessionService` 续跑） |
+| 分段终点 | 无 | 无（返回草稿等前端确认） | gate 步骤：产 ActionCard + 落成 MES 工单/待办实体，**本段 return**（不挂起；审批后由 `/advance` 起下一段） |
 | 评测对象 | 诊断能力 | 草稿编写能力 | 流程编排能力 |
 
 > 上表是三项**内置能力**。另有**运行时形态④ `fanout_aggregate`**（中心化只读聚合：代码统筹 + 单点裁决 + 多视角并发取证），落地为独立 capability 条目 `aggregate`（语义上属"诊断族"，因 `flows` 按 capability 装配而单列 key），定义见 [中心化校验的 fan-in 归并（应用层代码）](FactoryAgent-中心化聚合flow.md)。它**不是第四层**：同一套只读工具切片、同一条只读断言、同一种产物（证据 + 假设），只多一段 fan-out/fan-in 归并代码和一份 `EvidencePack` 契约。并发是 `asyncio.gather` 各自独立的 `Agent.reply()`，归并与裁决是应用层代码，不是框架协同原语（2.0 的 `MsgHub` / `sequential_pipeline` / `fanout_pipeline` 已删除）。
@@ -186,9 +186,10 @@ POST /agent/orchestration/complaint_8d/start
        session=S1(capability=ORCHESTRATION, scenario=COMPLAINT_8D, trace=T1)
        ├─ 确定性步骤：拉工单/批次/缺陷码（无 LLM）
        ├─ 确定性步骤：判定隔离范围门 → gate
-       │     gate 停在 HITL 确认（ActionCard）──▶ 事件系统推质量工程师 + Kafka 兜底
-       │     （人确认）POST /confirm → token → 事件系统触发续跑
-       ├─ 能力节点：runtime.invoke("diagnosis", 异常入参, parent_session_id=S1)
+       │     gate 产出 ActionCard 并落成 MES 隔离待办 → 事件系统推质量工程师 + Kafka 兜底
+       │     ★ 本段在此 return：不挂起、不占执行槽（责任人分派/催办/超时在工单侧）
+       │     （工单审批完成）POST /advance → 网关一次性 token → 重新发起下一段（重查当下事实）
+       ├─ 能力节点（下一段，确认后起）：runtime.invoke("diagnosis", 异常入参, parent_session_id=S1)
        │     session=S2(capability=DIAGNOSIS, parent=S1, trace=T1)
        │     └─ ReAct 取证 ≤10 次工具调用 → DiagnosisReport
        ├─ 能力节点：runtime.invoke("drafting", {kind: EIGHT_D, report: ...}, parent=S1)
@@ -197,7 +198,7 @@ POST /agent/orchestration/complaint_8d/start
        └─ 收口：Draft 返回前端，人工编辑后走应用服务落库
 ```
 
-一次请求一条 trace，三个 session 用 `parent_session_id` 串成树——这就是"一个 Agent"在可观测上的直接体现：**能看到编排第 3 步调起的诊断循环的每一次工具调用**。
+一次请求一条 trace，三个 session 用 `parent_session_id` 串成树——这就是"一个 Agent"在可观测上的直接体现：**能看到编排第 3 步调起的诊断循环的每一次工具调用**。gate 之后的段是新一次调用，靠同一个 `session_id` 归回同一棵树（不靠快照）。
 
 ---
 
@@ -220,7 +221,7 @@ POST /agent/orchestration/complaint_8d/start
 
 | 触发条件 | 典型场景 |
 |---|---|
-| 资源画像冲突 | 编排 3600s 常驻等人 vs 诊断秒级突发 |
+| 资源画像冲突 | 编排的分段点火 + `/advance` 回调是突发批量（开工集中在换线窗口），诊断是秒级交互请求，两者扩缩容曲线不同 |
 | 独立发布节奏 | 草稿 Builder/prompt 高频迭代，编排 flow 稳定 |
 | 故障隔离 | 某个模型供应商不可用时不拖垮整条链 |
 | 依赖/语言冲突 | 草稿需要 GPU 侧模型、或 Java 侧 Agent |
@@ -231,7 +232,7 @@ POST /agent/orchestration/complaint_8d/start
 
 **两条已发生过的反面案例**（说明共享可变状态的真实代价）：
 
-- `barrier` 跨场景复用，PROCESS_CHANGE 跌进换线的 kitting 分支，会话被污染为 `SUSPENDED`；
+- `barrier` 跨场景复用，PROCESS_CHANGE 跌进换线的 kitting 分支，会话被污染为 `WAITING`；
 - `retry_tooling` 死代码，gate REJECT 后的重试回路不可达，评测集里的重试用例必然失败且失败原因误导。
 
 两者都不是"耦合太紧"，而是**同进程里的隐式共享**。
@@ -259,7 +260,7 @@ POST /agent/orchestration/complaint_8d/start
 
 | 反模式 | 现象 | 后果 |
 |---|---|---|
-| 万能 Agent | 一个 ReAct + 全部工具 + 一个 prompt | 工具 20+ 选不准、权限收敛不了、60s 被 3600s 拖死 |
+| 万能 Agent | 一个 ReAct + 全部工具 + 一个 prompt | 工具 20+ 选不准、权限收敛不了、60s 的诊断与 300s 的编排段挤在同一预算里 |
 | 伪统一 | 一套 runtime，但能力之间直接 import 内部函数、共享 session.status | 拆分时才发现是分布式单体 |
 | 层级继承 | 编排"调用"草稿"调用"诊断，高层拿低层能力、接不上就重写一份 | 8D 这类横跨三层的需求被迫实现两遍 |
 | 全局常量兜底 | 一个步数与工具调用预算上限、一个超时、一个缓存 key | 最严的拖死最松的；版本锚点串错 |

@@ -39,7 +39,7 @@
 
 三个共享物：
 
-- **同一个运行时** `AgentRuntime`：能力注册表 + flow 装配 + 会话驱动（`SessionService` + `AgentState`）+ 挂起 / 续跑（`event.RequireUserConfirmEvent`）。
+- **同一个运行时** `AgentRuntime`：能力注册表 + flow 装配 + 会话驱动（`SessionService` + `AgentState`）+ **无状态分段**（一次调用跑到 gate 即返回，确认后重新发起下一段）。
 - **同一个工具注册表** `ToolRegistry`：`ToolDescriptor` 带 `capability` 标签，按能力切片下发；不按"层"复制。
 - **同一个策略闸门** `ToolPolicyGate`：只读断言、无写 client 断言、写需确认断言、无放行工具断言，一处实现、启动态校验。
 
@@ -78,7 +78,7 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 |------|------|---------|
 | 语言 | Python 3.12+ | 类型提示 + Pydantic 校验，AI 生态最成熟；与代码仓 `pyproject.toml` 的 `requires-python = ">=3.12"` 一致（框架要求 3.11+，兼容） |
 | Web 框架 | **FastAPI**（经 AgentScope `create_app` 承载） | 异步、原生 OpenAPI、与 Pydantic 无缝，做三能力统一 HTTP 入口 |
-| Agent 底座 | **AgentScope 2.0**（pin 具体小版本） | 统一 `Agent` 类（`reply` / `reply_stream` 事件流）承载 ReAct 循环；`Toolkit` / `Tool` + MCP + Skills 承载工具；`PermissionEngine` / `PermissionRule` / `PermissionMode` / `Behavior` / `Decision` 承载循环内拦截与 HITL；`event.RequireUserConfirmEvent` + `SessionService` + `BackgroundTaskManager` 承载挂起 / 续跑。⚠️ **编排形状不由框架原语承载**：2.0 已删 `MsgHub` / `sequential_pipeline` / `fanout_pipeline`，`GoalPipeline` / `TeamPipeline` 仅 experimental（观察，不进生产）；顺序协同=应用层 `await`，并行=`asyncio.gather` 并发各自独立的 `Agent.reply()` + 应用层显式合并；跨天 gate 归工作流引擎（ADR-05） |
+| Agent 底座 | **AgentScope 2.0**（pin 具体小版本） | 统一 `Agent` 类（`reply` / `reply_stream` 事件流）承载 ReAct 循环；`Toolkit` / `Tool` + MCP + Skills 承载工具；`PermissionEngine` / `PermissionRule` / `PermissionMode` / `Behavior` / `Decision` 承载循环内拦截与 HITL。⚠️ **agent 侧不做挂起 / 续跑**（不依赖 `RequireUserConfirmEvent` + `SessionService` 载回快照；人工确认落 MES 工单/待办实体，确认后重新发起下一段）。⚠️ **编排形状不由框架原语承载**：2.0 已删 `MsgHub` / `sequential_pipeline` / `fanout_pipeline`，`GoalPipeline` / `TeamPipeline` 仅 experimental（观察，不进生产）；顺序协同=应用层 `await`，并行=`asyncio.gather` 并发各自独立的 `Agent.reply()` + 应用层显式合并；跨调用的确认等待与跨天推进归 MES 工单/审批流与工作流引擎（ADR-05） |
 | 任务规划 | `TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate` 工具 + `Task` / `TaskContext` + `AgentState` | ⚠️ **不存在独立"Plan 模块"**（无 `agentscope.plan`）：官方"Plan"就是这 4 个工具写 `agent.state.tasks_context`；长链路的持久规划与重规划仍属应用层 / 工作流引擎职责 |
 | LLM 抽象 | AgentScope **Model** 抽象（如 `DashScopeChatModel` + `Credential`） | 模型可插拔（Claude / 通义千问 / DeepSeek / 本地化模型）；结构化输出走 Content Block（Pydantic `Msg`，含 `usage` 与 block `id`）强约束 |
 | 数据校验 | **Pydantic v2** | 工具入参 / 报告 / 草稿 / 动作卡的 schema 即类型，自动生成 JSON Schema 给模型 tool-calling |
@@ -93,9 +93,9 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 
 ### 2.2 为什么底座统一到 AgentScope 2.0，而编排形状仍写在应用层
 
-- **一种编程模型，三种编排形态**：诊断是 `model ↔ tool` 的 ReAct 循环（统一 `Agent`），草稿是"取证据 → 检索 → 生成"的顺序 `await` 固定链，编排是"确定性步骤 + 能力节点 + barrier + gate"的 `flows/` 代码。三者共用同一套 `AgentState` / `SessionService`、同一套步数与工具调用预算、同一套 `RequireUserConfirmEvent` 挂起 / 续跑、同一个 trace 注入点（`TracingMiddleware`）。少一套机制，就少一套边界与坑。
-- **能力可组合**：诊断能力能被 flow 直接 `await` 复用；草稿链能被 flow 作为能力节点调用。若草稿改用裸 async 函数、且不复用同一套会话与权限底座，跨能力复用时状态契约、挂起恢复、trace 都要各写一份。
-- **⚠️ 诚实边界（换底没有替掉的部分）**：AgentScope 2.0 **不提供**声明式协同原语——`MsgHub` / `sequential_pipeline` / `fanout_pipeline` 是 1.x API，2.0.0 起模块已不存在；`GoalPipeline` / `TeamPipeline` 官方标 experimental，且 `TeamPipeline` 明写"成员间不互相说话"，**只观察、不进生产**。因此编排形状由本仓库普通 Python 代码承担：顺序协同=依次 `await`；并行=`asyncio.gather` 并发**各自独立**的 `Agent.reply()`，结论在应用层显式合并；各分支只读同一份 `evidence_set_id`（关系型证据子集），**彼此不看对方的中间结论**——刻意如此：无中心校验的扇出式互看把错误放大 **17.2×**，中心化 4.4×（ADR-02 中心校验闸门）。跨请求 / 跨天的持久编排（gate deadline、超时 `SUSPENDED`、补偿）不在这个范围内，归工作流引擎（ADR-05）。
+- **一种编程模型，三种编排形态**：诊断是 `model ↔ tool` 的 ReAct 循环（统一 `Agent`），草稿是"取证据 → 检索 → 生成"的顺序 `await` 固定链，编排是"确定性步骤 + 能力节点 + barrier + gate"的 `flows/` 代码。三者共用同一套 `AgentState` / `SessionService`（**会话内上下文与多轮记忆，不承载跨闸门续跑**）、同一套步数与工具调用预算、同一套写闸门确认（`RequireUserConfirmEvent` 仅用于**同一次调用内**的人在确认；跨调用的审批确认走 MES 工单 + `/advance` 回调）、同一个 trace 注入点（`TracingMiddleware`）。少一套机制，就少一套边界与坑。
+- **能力可组合**：诊断能力能被 flow 直接 `await` 复用；草稿链能被 flow 作为能力节点调用。若草稿改用裸 async 函数、且不复用同一套会话与权限底座，跨能力复用时状态契约、确认拦截、trace 都要各写一份。
+- **⚠️ 诚实边界（换底没有替掉的部分）**：AgentScope 2.0 **不提供**声明式协同原语——`MsgHub` / `sequential_pipeline` / `fanout_pipeline` 是 1.x API，2.0.0 起模块已不存在；`GoalPipeline` / `TeamPipeline` 官方标 experimental，且 `TeamPipeline` 明写"成员间不互相说话"，**只观察、不进生产**。因此编排形状由本仓库普通 Python 代码承担：顺序协同=依次 `await`；并行=`asyncio.gather` 并发**各自独立**的 `Agent.reply()`，结论在应用层显式合并；各分支只读同一份 `evidence_set_id`（关系型证据子集），**彼此不看对方的中间结论**——刻意如此：无中心校验的扇出式互看把错误放大 **17.2×**，中心化 4.4×（ADR-02 中心校验闸门）。跨请求 / 跨天的持久编排（确认等待、超时升级、重试与补偿）不在这个范围内，归 MES 工单/审批流与工作流引擎（ADR-05）；agent 侧也**不自建同语义的挂起/续跑机制**（见 §4.3）。
 - **步数与工具调用预算上限即"最大步数"红线**：每能力一个硬上限（诊断 20 / 草稿 8 / 编排 40），超限即标 `FAILED` 转人工，是运行时强制值而不是口头约束。
 - 不选 AutoGen（conversational 模式适合多 agent 对话，不适合严格步骤编排 + 确定性代码步骤）/ CrewAI（抽象偏高，难做细粒度权限拦截与 gate 状态机）。
 
@@ -121,7 +121,7 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 │   POST /agent/diagnose           ┐                                               │
 │   POST /agent/draft              ├──▶ AgentRuntime（能力注册表+flow 装配+会话驱动）│
 │   POST /agent/orchestration/...  ┘         │                                     │
-│   POST /agent/orchestration/{id}/confirm   │                                     │
+│   POST /agent/orchestration/{id}/advance   │                                     │
 │                                            ▼                                     │
 │        ┌───────────────────────────┬───────────────────────────┬──────────────┐ │
 │        │ 形态①开放式 ReAct         │ 形态②固定链 + 策略分派      │ 形态③flow 编排│
@@ -158,7 +158,7 @@ diagnosis (只读 Agent)  ◀──── drafting  取根因假设作为草稿�
 - **一个 runtime，三种编排形态**：能力差异体现在"flow 长什么样、拿哪些工具、有没有写权限"，而不是"起几个服务、各建一套底座"。
 - **能力切片而非层级继承**：`ToolRegistry.tools_for(capability, tenant)` 按能力 + 租户双维下发，诊断拿不到写工具，编排拿不到放行工具。**边界靠注册表 + 启动断言，不靠调用方自觉**。工具切片下发挂在 AgentScope `Toolkit` 上，循环内的档位拦截挂 `PermissionEngine`（叠加层）；**主闸在工具网关的一次性动作令牌**（ADR-04）。
 - **ACL 防腐层**：每个上下文一个 ACL 客户端 + Mapper，外部 DTO 不进 Agent 核心，只暴露内部视图（`PassRecordView`、`ProcessRouteView`、`EvidenceSetView`）。外部 schema 变化不污染能力实现。
-- **状态外置**：会话状态、步骤记录、gate 决策全部落 MySQL（run **先落库再执行**），会话上下文用 `AgentState` + `SessionService`（Redis-backed）承载，进程重启 / 滚动更新后按 `session_id` 任意副本续跑，不依赖模型侧会话，也不再自建 checkpoint 三表。⚠️ 跨天 / 跨请求的**流程推进状态**不在这里，归工作流引擎（ADR-05）。
+- **状态外置（仅审计与可重入，不是挂起态）**：会话标识、步骤记录、gate 决策全部落 MySQL（run **先落库再执行**），会话内上下文与多轮记忆用 `AgentState` + `SessionService`（Redis-backed）承载，因此一次调用在哪台副本上跑都行（按 `session_id` 取）；不依赖模型侧会话，也不自建 checkpoint 三表。⚠️ **不存"可供恢复的流程快照"**：确认回来是重新发起下一段并**重查当下现场事实**（MES 数据时变，快照重放比重查危）；跨调用的确认等待与跨天推进归 MES 工单/审批流与工作流引擎（ADR-05）。
 - **同一条 trace 贯穿**：一次请求一个 `trace_id`，工具调用、LLM 调用、gate 决策、写路径全部挂同一 trace，`traceparent` 透传下游 Java 服务。
 
 ---
@@ -180,7 +180,7 @@ class CapabilitySpec(BaseModel):
     flow_shape: FlowShape
     writes_allowed: bool             # 诊断/草稿 False，编排 True（且仅限声明 writes_via 的工具）
     step_budget: int                 # 步数与工具调用预算上限：诊断 20 / 草稿 8 / 编排 40
-    session_timeout_s: float         # 诊断 60 / 草稿 90 / 编排 3600（含人确认等待）
+    segment_timeout_s: float          # 单次调用的计算超时：诊断 60 / 草稿 90 / 编排 300（**不含等确认**，等确认在工单侧）
     tool_tags: list[str]             # 按标签取工具切片，如 ["read:pass", "read:process"]
 ```
 
@@ -204,7 +204,7 @@ agent_session
   - parent_session_id (FK, 可空)      -- 编排调诊断/草稿时指向父会话
   - business_ref (JSON)               -- work_order_id / batch_id / asset_id / serial_no
   - tenant_context (JSON)
-  - status (RUNNING / SUSPENDED / DONE / TIMEOUT / FAILED)
+  - status (RUNNING / WAITING / DONE / TIMEOUT / FAILED)   -- WAITING = 已产待办、本段已结束（非挂起）
   - current_step
   - created_at / updated_at
 
@@ -353,7 +353,7 @@ agent_service/
     api/
       diagnosis_router.py          # POST /agent/diagnose
       draft_router.py              # POST /agent/draft, GET /agent/draft/{id}/evidence
-      orchestration_router.py      # POST /agent/orchestration/{scenario}/start, /{session_id}/confirm
+      orchestration_router.py      # POST /agent/orchestration/{scenario}/start, /{session_id}/advance
       schemas.py
     application/                   # 能力服务层：一个能力一个 service
       runtime.py                   # AgentRuntime：能力注册表、flow 装配、会话驱动、跨能力调用
@@ -383,7 +383,7 @@ agent_service/
       flows/                       # 形态③：编排 flow（应用层 Python 代码；2.0 无 pipeline 原语可依赖）
         changeover.py              #   换线：顺序 await + Permission gate + 网关令牌
         fault_response.py          #   故障复产：asyncio.gather 并发独立 Agent + 应用层显式合并
-        complaint_8d.py / process_change.py   # 跨天部分归工作流引擎
+        complaint_8d.py / process_change.py   # 本能力只跑分段；跨天审批与推进归工单/工作流引擎
       flow_steps/                  # 确定性 flow 步骤（不调 LLM）
         plan.py / query_compare.py / barrier.py / gate.py / write_via_appservice.py
       capability_nodes/            # 编排中的能力节点（内部 await 诊断/草稿能力）
@@ -453,7 +453,7 @@ class AgentRuntime:
                     budget=spec.step_budget,
                     session_id=session.id,      # AgentState 按 session_id 存取，副本无关
                 ),
-                timeout=spec.session_timeout_s,
+                timeout=spec.segment_timeout_s,
             )
             await self._sessions.finish(session, state)
             return state
@@ -524,7 +524,7 @@ class DomainEventTrigger:
 
 - **指标**：通用 `agent_session_total{capability}` / `agent_tool_call_*` / `agent_llm_invocation_total{capability}` / `agent_step_total{capability,node_type}`；能力特有指标挂同一命名空间，不按层级另起一套。
 - **链路**：一次请求一个 `trace_id`，`agent_step_record` 是给工程师 UI 的平铺证据链，Tempo/Jaeger 给 SRE 看火焰图，同源 `trace_id` 串联。
-- **兜底**：置信度低 → `needs_human_review` 不推操作工；工具连续失败 3 次终止；步数与工具调用预算超限（诊断 20 / 草稿 8 / 编排 40）/ 超时转人工；编排 gate 超 deadline 挂起 `SUSPENDED`。**宁可拦下让人判，不硬答。**
+- **兜底**：置信度低 → `needs_human_review` 不推操作工；工具连续失败 3 次终止；**本段**步数与工具调用预算超限（诊断 20 / 草稿 8 / 编排 40）/ 单次调用超时转人工；编排 gate 等人确认不占执行槽，超时升级由待办实体侧负责。**宁可拦下让人判，不硬答。**
 
 ---
 
@@ -548,7 +548,7 @@ class DomainEventTrigger:
 ### 阶段三：编排能力 —— 先纯代码骨架（3 周）
 
 10. 落 `flows/changeover.py` + 确定性步骤（plan / query_compare / barrier / gate / done），全部普通 Python `await`。
-11. 落 `ActionCard` + `event.RequireUserConfirmEvent`（挂起）/ `SessionService` + `BackgroundTaskManager`（续跑）+ 动作卡双通道推送。
+11. 落 `ActionCard` + 落成 MES 工单/待办实体（**本段在此结束，不挂起**）+ 确认回调 `/advance` 重发起下一段（重查事实、幂等可重入）+ 动作卡双通道推送。
 12. **换线全程 PASS 路径跑通，LLM 调用为 0**——先证明"代码能跑的不交给 LLM"。
 13. 写工具白名单 + 网关一次性动作令牌 + `writes_via` 落库路径。
 
@@ -579,7 +579,7 @@ class DomainEventTrigger:
 - [ ] 编排的确定性步骤（query/compare/barrier/gate）不调 LLM，`node_type=CODE` 落库可验。
 - [ ] 编排调诊断 / 草稿时 `parent_session_id` 落库，一条 trace 串起跨能力链路。
 - [ ] 报告 / 草稿带置信度与 disclaimer，低置信度转人工。
-- [ ] 单工具超时 ≤2s；诊断整会话 ≤60s；编排 ≤3600s（含人确认）。
+- [ ] 单工具超时 ≤2s；诊断整会话 ≤60s；**编排每段 ≤300s（不含等人确认，确认时长在 MES 工单侧计时）**。
 - [ ] 主动触发只订阅只读事件，产出仍需人确认。
 - [ ] 结构化输出经 Pydantic 校验，不符合 schema 判失败重试，重试仍失败转人工。
 
@@ -597,7 +597,7 @@ A：不会，风险梯度改由两个更本质的维度控制：① **能力的�
 A：不会，因为工具是**按能力切片下发**的。`ToolDescriptor.capabilities` 声明哪些能力可见，`tools_for(capability, tenant)` 双维过滤后挂进该能力的 `Toolkit`——诊断模型看到的是 8–10 个只读工具，编排里的根因能力节点看到的是钢网/工艺审计相关的少数几个。这和"多个 sub-agent 各持小工具集"效果一致，但共用一个注册表和一套断言，不用维护多份工具定义。更有据的是：候选工具 K≈7.4 个即可达到全目录 50 个的准确率（90.3% vs 90.8%），所以**检索式工具门控优先于拆 Agent**（ADR-09）。
 
 **Q：底座为什么选 AgentScope 2.0，而不是图框架 / 裸调模型 API？**
-A：先说清楚**换了什么、没换什么**。换掉的是横切能力：单 Agent 循环用统一 `Agent`（`reply` / `reply_stream` 事件流，天然带权限检查点与 HITL）、工具用 `Toolkit`（+ MCP / Skills）、档位拦截用 `PermissionEngine` / `PermissionRule` / `PermissionMode`、会话续跑用 `SessionService` + `AgentState`、挂起确认用 `event.RequireUserConfirmEvent`、可观测用 `TracingMiddleware`、超大结果卸载用 `Offloader` + `ToolOffloadMiddleware`、服务化用 `create_app`。没换的是**编排形状**：2.0 已删 `MsgHub` / `sequential_pipeline` / `fanout_pipeline`，`GoalPipeline` / `TeamPipeline` 是 experimental 且"成员间不互相说话"，所以顺序协同写成一串 `await`、并行写成 `asyncio.gather` 并发各自独立的 `Agent.reply()` 再在应用层显式合并——代码在本仓库，可读、可回归、不随框架 API 漂移。这样"确定性步骤不消耗 LLM 调用、能力节点才调 LLM"两类步骤仍能同一条 flow 混合；步数与工具调用预算（诊断 20 / 草稿 8 / 编排 40）是硬上限；跨天 gate 与补偿交工作流引擎（ADR-05），不把框架当工作流引擎用。裸调模型 API 的问题是没现成的会话 / 权限 / 沙箱 / 事件流外壳；`AgentExecutor` 类黑盒循环则是拦截点太粗。
+A：先说清楚**换了什么、没换什么**。换掉的是横切能力：单 Agent 循环用统一 `Agent`（`reply` / `reply_stream` 事件流，天然带权限检查点与 HITL）、工具用 `Toolkit`（+ MCP / Skills）、档位拦截用 `PermissionEngine` / `PermissionRule` / `PermissionMode`、会话内上下文与多轮记忆用 `SessionService` + `AgentState`、可观测用 `TracingMiddleware`、超大结果卸载用 `Offloader` + `ToolOffloadMiddleware`、服务化用 `create_app`。没换的是**编排形状**：2.0 已删 `MsgHub` / `sequential_pipeline` / `fanout_pipeline`，`GoalPipeline` / `TeamPipeline` 是 experimental 且"成员间不互相说话"，所以顺序协同写成一串 `await`、并行写成 `asyncio.gather` 并发各自独立的 `Agent.reply()` 再在应用层显式合并——代码在本仓库，可读、可回归、不随框架 API 漂移。这样"确定性步骤不消耗 LLM 调用、能力节点才调 LLM"两类步骤仍能同一条 flow 混合；**本段**步数与工具调用预算（诊断 20 / 草稿 8 / 编排 40）是硬上限；确认等待与跨天补偿交 MES 工单/审批流与工作流引擎（ADR-05），**不把框架当工作流引擎用，也不自建挂起/续跑**。裸调模型 API 的问题是没现成的会话 / 权限 / 沙箱 / 事件流外壳；`AgentExecutor` 类黑盒循环则是拦截点太粗。
 
 **Q：为什么 Agent 用 Python，而 MES 主体是 Java？**
 A：Agent 是**旁路服务**，不参与过点主事务，最坏情况是"没诊断出来 / 草稿没用上"，不产生写副作用——这降低了跨语言运维代价；而 Python 在 AgentScope 2.0、模型 SDK、评测工具上更成熟。跨语言的物理边界反而强化红线：Agent 进程无法共享 Java 事务与内存，天然不能进过点主事务、不能旁路应用服务写路径。两侧只通过 REST + Kafka 契约解耦，复用既有契约不造新管道。

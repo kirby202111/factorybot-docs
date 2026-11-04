@@ -41,7 +41,7 @@ DraftRequest(report, draft_kind, tenant)
 Draft（返回给前端，等人在正式界面确认）
 ```
 
-- **为什么仍走同一条固定链**：为了与诊断、编排共用同一个运行时——同一套 `SessionService` + `AgentState`（大草稿生成挂起后可续跑）、同一套 `TracingMiddleware` trace 注入、同一套步数与工具调用预算上限（草稿 8）。**不是**为了开放规划，草稿链的步骤顺序是硬编码的直线。
+- **为什么仍走同一条固定链**：为了与诊断、编排共用同一个运行时——同一套 `SessionService` + `AgentState`（会话内上下文与多轮记忆）、同一套 `TracingMiddleware` trace 注入、同一套步数与工具调用预算上限（草稿 8）。**不是**为了开放规划，草稿链的步骤顺序是硬编码的直线。
 - **为什么差异用策略而不是分支**：返工单 / 8D / SOP / 处置卡 / 隔离集卡的差异是"证据字段 + prompt + payload schema"，用 `DraftBuilder` 子类表达最直接（新增类型只加一个 builder，不改 flow 装配）。
 
 ### 1.3 硬边界
@@ -131,7 +131,7 @@ async def run_draft_chain(deps, req: DraftRequest, sessions: SessionService) -> 
     return await deps.flow_steps.validate_archive(draft, sessions, budget=8)
 ```
 
-步数与工具调用预算上限 `8`（超限标 `FAILED` 转人工）；挂起与续跑走 `event.RequireUserConfirmEvent` + `SessionService` 载回 `AgentState`，长任务由 `BackgroundTaskManager` 托管——框架级 `interrupt` / `Command(resume=…)` / checkpoint 表不存在，不可依赖。
+步数与工具调用预算上限 `8`（超限标 `FAILED` 转人工）；草稿落库前的确认是**同一次调用内**的前端确认（`Draft.requires_confirmation` 恒真，人编辑后走应用服务）；若草稿产物成为编排动作卡，**审批确认**落 MES 工单/待办实体，确认后重新发起下一段——**不挂起、不续跑**（框架级 `interrupt` / `Command(resume=…)` / checkpoint 表也不存在，不可依赖）。
 
 ### 4.2 生成能力节点（策略分派）
 

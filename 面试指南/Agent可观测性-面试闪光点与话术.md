@@ -393,7 +393,7 @@ A：两个维度。git diff 是**开发时**的版本控制（谁改了什么）
 | 技术栈 | OpenTelemetry Python + prometheus-client + 结构化日志（JSON） | §定位 |
 | 通用指标 | 14 个（session/tool/llm/token/cost/low_confidence/步数预算/schema_error 等） | §5.2 |
 | 草稿能力专属指标 | 7 个（draft_total/adoption/rejected/active_trigger/acl_error 等） | §5.2 |
-| 编排能力专属指标 | 9 个（node_total/llm_invocation/gate_decision/suspended/write_rejected 等） | §5.2 |
+| 编排能力专属指标 | 11 个（llm_invocation/gate_decision/segment_waiting/advance_callback/advance_latency/write_rejected 等） | §5.2 |
 | SLI/SLO | 7 项（会话 P99 / 工具错误率 / schema 失败率 / 步数预算命中 / 转人工突增 / 成本漂移 / 写工具被拦） | §5.4 |
 | 兜底分支 | **11 类**全分支落观测 | §12 |
 | 观测表族 | 6 张（tool_call_trace / draft_trace / node_trace / llm_call_log / diagnosis_session / diagnosis_report） + eval_case/eval_run/drift_report | §7.1 / §13 |

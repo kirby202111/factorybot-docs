@@ -95,7 +95,7 @@
 | 最大步数 | 步数与工具调用预算上限 `=20` | 一次 model+tool 算 2 步，最多 10 次工具调用；超预算即终止并兜底 |
 | 单工具超时 | ≤2s | httpx timeout |
 | 整会话超时 | ≤60s | `asyncio.wait_for` 包住 Agent 驱动 |
-| 挂起与续跑 | `AgentState` + `SessionService`（Redis-backed） | 中间状态落 Redis，进程重启按 `session_id` 从断点续跑；HITL 用 `event.RequireUserConfirmEvent` |
+| 会话内上下文 | `AgentState` + `SessionService`（Redis-backed） | 多轮追问与会话隔离（按 `session_id`）；**不承担跨闸门断点续跑**（诊断是一次性出报告的短调用）；同一调用内的 HITL 确认用 `event.RequireUserConfirmEvent` |
 | 收口条件 | 模型无 tool call | 输出 `DiagnosisReport`（Pydantic 校验） |
 
 ---

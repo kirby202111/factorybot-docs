@@ -1,7 +1,7 @@
 # Agent 记忆系统 -- 设计与实现方案（Python 技术栈，三项能力共用）
 
 > 本文档把 factorybot Agent 中所有与"记忆"相关的设计沉淀为一处。它不是新设计，而是把散落在
-> `Agent长程任务-实现细节深度剖析.md`（状态持久化 / gate 挂起与续跑）、
+> `整体技术选型与模块划分.md` §3.5.3（人工确认与写闸门）、
 > `AgentToken成本优化-设计与实现方案.md`（上下文压缩 / 缓存）、
 > `Agent可观测性-设计与实现方案.md`（证据链落库）里的记忆相关内容，
 > 按"存给谁看 / 活多久"两个维度重新组织，补齐它们各自没讲全的层间关系。
@@ -15,7 +15,7 @@
 很多人一听"Agent 记忆"就去找一个叫 `Memory` 的类--在 factorybot 里**没有这个单体模块**。
 记忆是一套**分层架构**，按两个正交维度切成五层：
 
-- **存给谁看**：给 `SessionService` 看（续跑用）/ 给 LLM 看（推理用）/ 给系统看（审计用）/ 给降本用（命中复用）
+- **存给谁看**：给 `SessionService` 看（会话内上下文与多轮记忆）/ 给 LLM 看（推理用）/ 给系统看（审计用）/ 给降本用（命中复用）
 - **活多久**：瞬时（单次 LLM 调用）-> 会话内（一个 session）-> 跨会话（多个 session）-> 永久（落库归档）
 
 一句话核心哲学，贯穿全栈：
@@ -40,7 +40,7 @@
 
 | 既有文档 | 讲了什么 | 本文档的补充 |
 |---|---|---|
-| `Agent长程任务-实现细节深度剖析.md` | `OrchestrationState`（`AgentState`）/ SessionService 状态快照 / gate 挂起-续跑 / 跨进程恢复 / Permission 确认记录 | 把它讲的"工作记忆"+"确认令牌"纳入分层视图，补它与上下文压缩、证据链的层间关系 |
+| `整体技术选型与模块划分.md` §3.5.3、`FactoryAgent/FactoryAgent-流程编排能力.md` §4.2 | `OrchestrationState`（`AgentState`）/ SessionService 会话内上下文 / gate 分段与确认回调 / 一次性确认令牌 | 把它讲的"工作记忆"+"确认令牌"纳入分层视图，补它与上下文压缩、证据链的层间关系 |
 | `AgentToken成本优化-设计与实现方案.md` | `Offloader` + `ToolOffloadMiddleware` / 缓存标记 Middleware / 早停 Middleware / ToolResultCache / 语义缓存 | 把它讲的"上下文窗口记忆"+"跨会话缓存"纳入分层视图，补"模型看摘要"与"trace 落全文"的双路设计 |
 | `Agent可观测性-设计与实现方案.md` | tool_call_trace / node_trace 表族 / 证据链回溯 | 把它讲的"证据链长期记忆"纳入分层视图，补 trace 与 LLM 压缩版的对应关系 |
 
@@ -50,7 +50,7 @@
 
 - 不覆盖三项能力各自的业务流程（见各自实现方案）。
 - 不覆盖可观测性的指标体系细节（见可观测性文档）。
-- 不覆盖写路径的 ACL 客户端实现（见长程任务文档 §7）。
+- 不覆盖写路径的 ACL 客户端实现（见 `FactoryAgent/FactoryAgent-流程编排能力.md` §4.3）。
 
 ## 2. 记忆分层模型
 
@@ -58,14 +58,14 @@
 
 | 层 | 名称 | 核心组件 | 存储介质 | 存什么 | 寿命 | 服务对象 | 落地状态 |
 |---|---|---|---|---|---|---|---|
-| M1 | 工作记忆 | `SessionService` + `OrchestrationState`（`AgentState`） | Redis-backed Session store | 显式状态快照（类型化字段值） | 会话级，可跨进程恢复 | 编排续跑（gate 挂起 -> 确认事件续跑） | 📐 设计目标，尚未落地 |
+| M1 | 工作记忆 | `SessionService` + `OrchestrationState`（`AgentState`） | Redis-backed Session store | 会话内上下文字段值（类型化） | 会话级（`session_id` 隔离） | 多轮对话与会话隔离；**不服务跨闸门续跑**：编排到 gate 就产待办并 return，下一段重查当下事实 | 📐 设计目标，尚未落地 |
 | M2 | 上下文窗口记忆 | `Offloader` / `ToolOffloadMiddleware` / 缓存标记与早停 Middleware | 内存（请求级） | 喂模型的消息压缩、prompt 缓存标记 | 单次 LLM 调用 ~ 5min/1h | LLM | 📐 设计目标，尚未落地 |
 | M3 | 证据链长期记忆 | `ToolCallTraceRepo` / `NodeTraceRepo` / `OrchestrationStep` | MySQL 平铺表 | 工具调用全文、节点执行记录 | 永久 | 工程师 UI / 审计 | 📐 设计目标，尚未落地 |
 | 自治 | 跨会话缓存 | `ToolResultCache` | Redis | 稳定工具结果的版本化缓存 | 按 tool 策略 TTL | 降本（命中省一次 ACL+回灌） | 📐 设计目标，尚未落地（语义缓存默认关闭） |
 | L5 | 会话元数据 & 确认记录 | `Repo`（会话台账）/ Permission 确认记录存储 | MySQL + Redis | 会话生命周期、失败计数、gate 确认令牌 | 会话级 ~ 30min | 编排器 / 写动作闸门 | 📐 设计目标，尚未落地 |
 
 > 落地状态图例：📐 设计目标，尚未落地（本文全部条目均为此状态；代码仓现状见文首"落地状态声明"）。
-> **命名提醒**：M1 的 `SessionService` 是 AgentScope 2.0 的会话恢复能力（框架侧，Redis-backed，`app/_service/_session.py`；**2.0.5 起由旧名改名而来，按旧名写不可导入**）；L5 里的会话台账是本项目 MySQL 业务表（`agent_session` / 失败计数），两者职责不同不可混称。本项目**不自研**会话封装类，恢复语义一律由框架 `SessionService` 承担。
+> **命名提醒**：M1 的 `SessionService` 是 AgentScope 2.0 的会话存储能力（框架侧，Redis-backed，`app/_service/_session.py`；**2.0.5 起由旧名改名而来，按旧名写不可导入**），用途限于**会话内上下文与多轮对话记忆**；L5 里的会话台账是本项目 MySQL 业务表（`agent_session` / 失败计数），两者职责不同不可混称。本项目**不自研**会话封装类，也不在其上实现挂起/恢复语义。
 
 ### 2.2 分层架构图
 
@@ -92,10 +92,10 @@
    └──────────────────────────────────────────────────────────────────┘
 
    ┌──────────────────────────────────────────────────────────────────┐
-   │  M1 工作记忆（会话级，可跨进程）                                    │
-   │  AgentScope SessionService（Redis-backed） 恢复键 = session_id     │
-   │  存：AgentState 显式状态快照（类型化字段值）                        │
-   │  gate 拦截挂起 ──确认事件──> 任意副本按 session_id 续跑            │
+   │  M1 工作记忆（会话级）                                               │
+   │  AgentScope SessionService（Redis-backed）会话键 = session_id        │
+   │  存：AgentState 会话内上下文与多轮记忆（类型化字段值）               │
+   │  gate 产待办即本段终点——不挂起、不载回快照续跑                     │
    └──────────────────────────────────────────────────────────────────┘
                               │
    ┌──────────────────────────┴───────────────────────────────────────┐
@@ -133,7 +133,7 @@ Agent（内置 ReAct）产出 pending_tool_calls
 
 ## 3. M1 工作记忆：SessionService + AgentState（OrchestrationState）
 
-这是大家通常说的"Agent 记忆"--**编排跑到一半挂起，靠它续跑**。
+这是大家通常说的"Agent 记忆"--**多轮对话与会话隔离靠它**；它**不**用来"跑到一半挂起、事后继续"。
 
 ### 3.1 状态 schema：OrchestrationState（显式类型化字段）
 
@@ -175,22 +175,22 @@ class OrchestrationState(BaseModel):      # AgentState 的业务投影（显式�
 并发分支同写一个字段时在汇合（barrier）处取后者、`None` 不覆盖有效值--这是本项目在应用层合并时自定的归并规则，不依赖任何引擎/框架的状态归并原语（框架无共享状态图，也无广播原语）。
 四类场景（换线 / 故障复产 / 客诉 8D / 工艺变更）**共用一套 schema，各场景只装配自己用到的子集**--DDD 共享内核 + 限界上下文装配的落地。
 
-### 3.2 持久化：恢复键 = session_id
+### 3.2 持久化：会话键 = session_id
 
 会话状态的持久化由 AgentScope 2.0 的 `SessionService` 承载（随 FastAPI Agent Service（`create_app`）的 lifespan 装配），存储后端由配置决定：
 
 ```python
 # app/infrastructure/session/  （本项目接线层，示意；构造签名以目标版本官方 API 为准）
 # 会话服务：agentscope 的 SessionService（app/_service/_session.py，Redis-backed storage）
-# 业务侧只见 session_id，不感知存储后端；恢复语义不由本项目自己实现
+# 业务侧只见 session_id，不感知存储后端；会话内上下文的读写不由本项目自己封装
 session_service = build_session_service(settings)   # 存储后端由配置决定，业务侧只见 session_id
 ```
 
-**关键映射**：恢复键 = `session_id`（本项目在编排服务装配处建立该映射，设计目标）。
+**关键映射**：会话键 = `session_id`（本项目在编排服务装配处建立该映射，设计目标）。
 `SessionService` 按 `session_id` 隔离 `AgentState`；同一会话的状态更新串行落盘（单写者），不同会话互不影响。
 
 > 落地状态：**设计目标，尚未落地**——代码仓尚无会话层实现，Redis-backed storage 接线属于真实部署阶段的待建工作。
-> 设计约束："工作记忆"必须是可跨进程恢复的（跨进程恢复依赖 Redis-backed storage 接线），gate 挂起-确认续跑走 `event.RequireUserConfirmEvent`。
+> 设计约束：`SessionService` + `AgentState` 的用途限定为**会话内上下文与多轮对话记忆**；本项目**不在其上实现 gate 挂起/续跑**（见 §3.6）。下一段为何要重查事实而不是取回会话里的旧字段，理由也在 §3.6。
 
 ### 3.3 MySQL 侧不再承担会话状态表
 
@@ -198,73 +198,67 @@ session_service = build_session_service(settings)   # 存储后端由配置决�
 
 | 表 | 主键 | 存什么 |
 |---|---|---|
-| `agent_session` | `session_id` | 会话台账：状态机、场景、租户、挂起原因 |
+| `agent_session` | `session_id` | 会话台账：状态机、场景、租户、待办原因（转人工待办的缘由） |
 | `agent_step_record` / `node_trace` | `(session_id, step)` | 每步执行记录（CODE/AGENT 性质、gate 决策、trace 引用） |
 | `tool_call_trace` | `trace_id` | 工具调用全文（证据链） |
 
-会话状态快照本身在 Redis-backed Session store；如需长期留痕，可把 `AgentState` **可选归档**到 MySQL 审计表（只读，不参与续跑）。
+会话内上下文本身在 Redis-backed Session store；如需长期留痕，可把 `AgentState` **可选归档**到 MySQL 审计表（只读，仅供复盘，**不作为恢复源**）。
 
-### 3.4 状态快照序列与"存了什么"
+### 3.4 字段演进序列与"存了什么"
 
-每次状态更新带 parent 指针，形成可追溯的快照序列（类似 git commit 链）：
+每次状态更新带 parent 指针，形成可追溯的字段演进序列（类似 git commit 链，**仅供审计复盘，不作为恢复入口**）：
 
 ```
-snapshot_1 (parent=null)   <- plan 执行完
-snapshot_2 (parent=snap_1) <- first_article 执行完
-snapshot_3 (parent=snap_2) <- gate_first_article 挂起待人确认处
-snapshot_4 (parent=snap_3) <- process_switch 执行完（确认后续跑）
+snap_1 (parent=null)   <- plan 执行完
+snap_2 (parent=snap_1) <- first_article 执行完
+snap_3 (parent=snap_2) <- gate_first_article 产待办（本段结束，不是挂起）
+snap_4 (parent=snap_3) <- 下一段重查事实后 process_switch 执行完
 ```
 
-存的是 **state 本身**（各字段的当前值）。注意：推给责任人的**动作卡以事件形式流出**，不进状态快照--快照只在需要"这步要落库"时留一份意图字段；
-续跑时从 Session store 取最新 `AgentState`，从 gate 拦截点的下一步继续。
+存的是 **state 本身**（各字段的当前值）。注意：推给责任人的**动作卡以事件形式流出**，不进状态快照--快照只在需要"这步要落库"时留一份意图字段与待办 id；
+下一段**不从快照继续**，而是按 `session_id` + `evidence_set_id` 重查当下事实（见 §3.6）。
 编排能力不用回退（gate 确认后不撤销），序列只服务审计与复盘。
 
-### 3.5 gate 挂起 / 续跑协议
+### 3.5 gate 分段与确认回调协议
 
-gate 步骤挂起（本项目在 `EXPLORE` / 自定义 deny 规则之上组合出的写闸门策略拦截写工具执行，接线点拟建于 `app/application/orchestration_service.py`，设计目标路径）：
+gate 步骤不是挂起点，而是**本段终点**（本项目在 `EXPLORE` / 自定义 deny 规则之上组合出的写闸门策略拦截写工具执行，接线点拟建于 `app/application/orchestration_service.py`，设计目标路径）：
 
 ```python
-async def await_confirmation(self, session_id, step, card):
-    await self._dispatcher.push(card)    # 1. 经事件系统推动作卡
-    confirmation = await self._permission.await_hitl(session_id, step, card)  # 2. 挂起等待确认事件
-    # —— 协程让出，AgentState 已在 Session store，直到确认事件投来 ——
-    if not confirmation.valid_for(card.writes_via_action()):
-        return "REJECT"
-    return "PASS" if confirmation.approved else "REJECT"
+async def open_gate(self, session_id, step, card):
+    await self._dispatcher.push(card)              # 1. 经事件系统推动作卡
+    ticket = await self._tickets.create(           # 2. 待办落成 MES 已有工单/审批实体
+        card, session_id=session_id, step=step)    #    （维修单/隔离单/首件放行/8D/SOP）
+    # —— 本段 flow 在此 return：协程不让出等事件，不保存待恢复快照 ——
+    return GateOutcome(step=step, waiting_ticket=ticket.id, decision="WAITING")
 ```
 
-Permission gate 做四件事：① 先把 `AgentState` 落 Session store ② 拦住写工具执行（闸门在每次执行，不在提示词层）③ 会话标 `GATE_WAITING` ④ 流出待确认事件。
+写闸门做四件事：① 先把本段执行记录落 `agent_step_record`（含待办 id）② 拦住写工具执行（闸门在每次执行，不在提示词层）③ 会话标 `WAITING` ④ 流出待办与动作卡事件。责任人分派、催办、超时升级全在工单实体生命周期里，agent 侧不计时。
 
-人确认后续跑（本项目在编排服务里封装 `resume()`，方法名是本项目封装，非框架 API）：
+审批完成后起下一段（回调 `POST /agent/orchestration/{session_id}/advance`，`advance()` 是本项目封装的方法名，非框架 API）：
 
 ```python
-state = await self._sessions.load_state(session_id)      # 取回 AgentState 与待确认动作卡
-card = _extract_pending_card(state)
+ctx   = await self._sessions.load_identity(session_id)      # 只取会话标识 + scenario + 待确认动作
 token = await self._permission.record_confirmation(session_id, step, approved, user_id,
-                                                    action=card.writes_via_action())
-await self._events.publish(GateConfirmed(session_id, step, token_id=token.id))  # 确认事件 -> 续跑
+                                                   action=card.writes_via_action())  # 网关一次性令牌（主闸）
+facts = await self._flows.requery_live_facts(ctx)            # ★ 重查当下现场事实，不取历史快照
+await self._flows.run_next_segment(ctx, facts, token)        # 新的一次短调用，幂等可重入
 ```
 
-续跑内部：① 按 `session_id` 从 Session store 取回 `AgentState` ② 定位 `GATE_WAITING` 的那一步 ③ 把确认记录交回 gate 判定 ④ 从拦截点的下一步继续。
+下一段内部：① 按 `session_id` 取会话标识与 `evidence_set_id` ② **重查当下事实** ③ 校验一次性动作令牌 ④ 过写路径。**不存在"从拦截点继续"这层语义**——分段之间的衔接靠业务事实，不靠内存态。
 
-### 3.6 跨进程恢复（工作记忆真正发挥价值之处）
+### 3.6 为什么不做跨进程恢复（原"工作记忆价值"论证不再成立）
 
-```
-副本 A (pod-1): 编排 run(initial_state, session_id=S-001)
-  -> plan -> first_article -> gate_first_article -> Permission gate 拦截
-  -> AgentState 落 Redis-backed Session store -> 本次驱动结束（不占执行槽）
-  ---- pod-1 OOM Killed ----
-副本 B (pod-2): 收到 POST /confirm，确认事件进入事件系统
-  -> 按 session_id=S-001 从 Session store 取回 AgentState
-  -> 反序列化 state（停在 gate_first_article）
-  -> 确认记录交回 gate 判定 -> 继续 process_switch -> ...
-```
+曾经的设计是：副本 A 跑到 gate 挂起 -> `AgentState` 落 Redis -> 进程死 -> 副本 B 收到确认后按 `session_id` 载回 state 从断点继续。**这套机制本项目不实现，也不找框架等价物替换**（框架级 `interrupt` / `Command(resume=…)` / checkpoint 表本身也不存在），理由三条：
 
-**内存里的后台任务会丢，但 state 不丢**。续跑不需要"同一个在途调用被唤醒"这种前提：后台任务由 `BackgroundTaskManager` 托管、状态外置在 Session store，确认事件一到，任意副本都能接手--这才是跨进程恢复的真正靠山。
+1. **没有需要保住的计算态**：gate 之间几乎全是确定性代码步骤（换线快路径 LLM 调用为 0），"挂起期"只是在等人，不持有必须原样恢复的中间结果。
+2. **重查比重放更正确**：MES 现场事实**时变**（首件状态、路线版本、钢网在借、齐套数量都会变），把 T+3s 的快照载回 T+10min 的进程继续跑，等于用过期事实做当下的决策。与 §1.1 时变性红线（语义缓存默认关闭）是同一条理由。
+3. **等待本就有更可靠的载体**：每个 gate 产出的都是 MES 已有业务对象（维修单 / 隔离单 / 首件放行 / 8D / SOP），状态机、责任人分派、催办、超时升级、审计时间线全在现成的审批流里（ADR-05）。
+
+于是进程中途死亡**不需要特殊处理**：每段以 `session_id + step` 为幂等键、写路径另以 `confirmation_id` 为幂等键，本段落库后下一段照常由回调重新发起。`BackgroundTaskManager` 只托管**单次调用的短后台任务**，不再承担"长任务不随请求生命周期终止"这一职责。
 
 ### 3.7 能力节点的子会话隔离
 
-主编排调用能力 Agent 时使用独立的子会话键（长程任务文档 §9.2）：
+主编排调用能力 Agent 时使用独立的子会话键（见 `FactoryAgent/FactoryAgent-流程编排能力.md` §6.2）：
 
 ```python
 result = await agent.reply(
@@ -276,12 +270,12 @@ result = await agent.reply(
 `{session_id}:{capability}` 使主编排状态与能力节点的推理状态在 Session store 分开存放，互不覆盖。
 这是"多 session 并发 + 能力节点独立"的隔离手段（调用时机由本项目 `flows/` 里的应用层代码决定——顺序 `await` 串联、`asyncio.gather` 并发多个各自独立的 `Agent.reply()`；框架无移交原语，隔离一律靠会话键）。
 
-### 3.8 诊断能力为何不注册会话恢复
+### 3.8 诊断能力为何不接会话存储
 
 诊断能力是短链路 ReAct（步数与工具调用预算 = 20），一次 `reply` 跑完即出报告，**不需要中途暂停**，所以不注册 Session、不做工作记忆持久化。
 
 > **记忆按场景需要才上，不是无脑全配。** 诊断能力无 Session 持久化 / 无 Offloader 接线；
-> 编排能力必接 `SessionService`（长程任务要 gate 挂起 / 跨进程恢复）。这是分层记忆的"按需启用"原则。
+> 编排能力接 `SessionService` 用于**会话隔离与多轮上下文**（不承担跨闸门续跑；分段之间靠 `session_id` + 重查事实衔接）。这是分层记忆的"按需启用"原则。
 
 ## 4. M2 上下文窗口记忆：喂模型的瞬时记忆
 
@@ -409,7 +403,7 @@ class ToolCallTrace:
 - `OrchestrationStep`：步骤级记录，状态 `PENDING|RUNNING|GATE_WAITING|CONFIRMED|FAILED`
 - `DraftTraceRepo`：草稿归档（草稿能力只落草稿不落库）
 
-以上三者的落库位置为 MySQL（`app/infrastructure/persistence/models.py` 拟建，设计目标路径），表结构对齐可观测文档 §7.1 / 长程任务 §2.2——**均为设计目标，尚未落地**。
+以上三者的落库位置为 MySQL（`app/infrastructure/persistence/models.py` 拟建，设计目标路径），表结构对齐可观测文档 §7.1 / 流程编排能力 §5——**均为设计目标，尚未落地**。
 
 ### 5.3 与工程师 UI 回溯的关系
 
@@ -465,11 +459,11 @@ class ToolResultCache:
 ### 7.1 Repo / 会话台账：会话生命周期记忆
 
 会话台账由本项目的 `Repo`（拟建 `app/infrastructure/persistence/repos.py`，设计目标路径）承载（MySQL 业务台账，与 M1 的框架 `SessionService` 职责不同）：
-- 会话状态机 `PLANNING -> RUNNING -> SUSPENDED/DONE/FAILED`
-- **失败计数** `failure_count: dict[str,int]`，按 `(session_id, capability)` 追踪 agent 连续失败，≥2 次触发 `SUSPENDED`（agent 故障隔离，不自动重试）
-- `suspend_reason`、gate 决策记录、步骤记录
+- 会话状态机 `PLANNING -> RUNNING -> WAITING/DONE/FAILED`（`WAITING` = 已产待办、本段已结束，**不是挂起态**）
+- **失败计数** `failure_count: dict[str,int]`，按 `(session_id, capability)` 追踪 agent 连续失败，≥2 次本段置 `WAITING` 并转人工待办（agent 故障隔离，不自动重试）
+- `waiting_reason`（转人工待办的缘由）、gate 决策记录、步骤记录
 
-会话状态的**恢复**能力由框架 `SessionService`（Redis-backed）承担；本项目**不自研**会话封装类，业务侧只保留"按 `session_id` 取回台账"这一层，续跑语义不再自己实现。
+会话内上下文的存储由框架 `SessionService`（Redis-backed）承担；本项目**不自研**会话封装类，业务侧只保留"按 `session_id` 取回台账"这一层；**不做续跑语义**，下一段由确认回调重新发起并重查事实。
 
 ### 7.2 失败计数与 agent 故障隔离
 
@@ -481,7 +475,7 @@ async def increment_failure_count(self, session_id, capability) -> int:
     return self._failure_counts[key]
 ```
 
-`FailureTracker` 调用：agent 成功则 `reset_failure_count`；失败则 `increment`，≥2 次 `update_status(SUSPENDED)` + `log_suspend_reason`。
+`FailureTracker` 调用：agent 成功则 `reset_failure_count`；失败则 `increment`，≥2 次 `update_status(WAITING)` + `log_waiting_reason`（并开人工待办）。
 **不自动重试**--agent 连续失败说明证据不足或工具异常，转人工更安全。
 
 ### 7.3 Permission 确认记录：写动作的人确认记忆
@@ -496,7 +490,7 @@ Key2: confirm:session:{session_id}:{step}    -> token_id（防重复确认，幂
 `action = f"{verb}:{session_id}"`（如 `activate_route:S-xxx`）绑定 session+step，校验时 `valid_for(expected_action)` 防篡改。
 两个 key 都 TTL 30min。`is_already_confirmed` 提供幂等：同 session+step 已确认则返回既有 token。
 
-**token 双重身份**：既是确认事件触发续跑时交回 gate 判定的**凭据**（Permission 只在此凭据有效时放行写工具执行），又是下游应用服务的**幂等键**--
+**token 双重身份**：既是 `/advance` 回调起下一段时交回 gate 判定的**凭据**（Permission 只在此凭据有效时放行写工具执行），又是下游应用服务的**幂等键**--
 Agent 侧重试不会导致重复写（如重复创建隔离单）。这是 L5 记忆与写路径的交汇点。
 
 > 落地状态：**设计目标，尚未落地**——确认令牌的签发与校验在 gate 判定处实现（真边界在工具网关的服务端二次鉴权 + 一次性确认令牌，`Permission` 只是叠加层，见 ADR-04）。
@@ -522,16 +516,16 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 
 ### 8.4 记忆按场景需要才上
 
-诊断能力不注册会话恢复（短链路跑完即出）、不接 `Offloader`；编排能力必接 `SessionService`（长程任务要 gate 挂起 / 跨进程恢复）。
+诊断能力不接会话存储（短链路跑完即出）、不接 `Offloader`；编排能力接 `SessionService` 用于**会话隔离与多轮上下文**（gate 分段之间靠重查事实衔接，不靠会话快照恢复）。
 **不无脑全配**--记忆组件都有成本（存储 I/O / 缓存失效复杂度 / 接线维护），按场景痛点启用。
 
-> 顺带把口径钉清楚：长程任务真正需要的是**外部化状态 + 上下文压缩**这两件事，多 Agent 只是可选的实现方式之一，不是必要条件。本项目的分层记忆就是围绕这两件事建的。
+> 顺带把口径钉清楚：本项目真正需要的是**外部化状态（审计与可重入）+ 上下文压缩**这两件事，**不需要跨进程挂起/恢复**；多 Agent 也只是可选的实现方式之一，不是必要条件。本项目的分层记忆就是围绕这两件事建的。
 
-### 8.5 状态外置换跨进程生存
+### 8.5 状态外置换的是审计与可重入，不是挂起恢复
 
-**权衡**：每次步骤执行一次状态写入（Redis-backed Session store）的延迟 vs 跨进程生存。选前者换后者。
-后台任务的单副本故障域靠状态外置弥补--进程死了任务丢，但 `AgentState` 在 Session store，确认事件一到就按 `session_id` 从任意副本续跑。
-状态快照粒度是 per-step（非 per-tool-call），开销有界。
+**权衡**：每次步骤执行一次状态写入（Redis-backed Session store + MySQL 台账）的延迟 vs 可审计、可重入。选前者换后者。
+⚠️ 注意这一条**不是**"为了进程死后能接着跑"：本项目不载回快照续跑（理由见 §3.6），而是保证每步的输入输出与 gate 决策可回溯、且每段幂等可重入--进程死了本段重跑或下一段照常发起，不需要"同一个在途调用被唤醒"。
+状态记录粒度是 per-step（非 per-tool-call），开销有界。
 
 ### 8.6 并发隔离靠 session_id
 
@@ -548,8 +542,8 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 
 | 存储 | 技术 | 存什么 | key | TTL | 用途 | 落地 |
 |---|---|---|---|---|---|---|
-| 会话状态快照（AgentState） | Redis-backed Session store（`SessionService`） | 编排状态全量快照 + 待确认上下文 | `session_id`（能力子会话 `{session_id}:{capability}`） | 会话级 + TTL 策略 | M1 工作记忆，gate 挂起 -> 确认事件续跑 | 📐 设计目标 |
-| `agent_state_archive` | MySQL（**可选**） | 状态快照归档留痕 | session_id + 快照序号 | 永久 | 审计复盘，不参与续跑 | 📐 设计目标 |
+| 会话内上下文（AgentState） | Redis-backed Session store（`SessionService`） | 会话内字段值 + 多轮对话记忆 | `session_id`（能力子会话 `{session_id}:{capability}`） | 会话级 + TTL 策略 | M1 工作记忆；**不作为 gate 续跑的快照源**（分段靠重查事实衔接） | 📐 设计目标 |
+| `agent_state_archive` | MySQL（**可选**） | 字段演进序列归档留痕 | session_id + 快照序号 | 永久 | 审计复盘，**不作为恢复源** | 📐 设计目标 |
 | `tool_call_trace` | MySQL (app) | 工具调用全文 | trace_id | 永久 | M3 证据链 | 📐 设计目标 |
 | `node_trace`（flow 步骤记录）/ `agent_step` | MySQL (app) | flow 步骤 / 委托执行记录 | record_id | 永久 | 编排能力审计 | 📐 设计目标 |
 | `agent_session` | MySQL (app) | 会话元数据 | session_id | 永久 | L5 生命周期 | 📐 设计目标 |
@@ -558,7 +552,7 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 | `confirm:session:{sid}:{step}` | Redis | 防重复确认 | (session_id, step) | 30min | L5 幂等 | 📐 设计目标 |
 | `tc:{tenant}:{tool}:{hash}` | Redis | 工具结果缓存 | tenant+tool+args+version_anchor | 按 tool 策略 | 自治 降本 | 📐 设计目标 |
 | `llm_call_log` | MySQL (app) | LLM 调用指标 | call_id | 永久 | 可观测/降本归因 | 📐 设计目标 |
-| `BackgroundTaskManager` 活跃任务登记表 | 框架托管（`app/_manager/`） | session_id->后台任务 | session_id | 进程寿命 | 活跃任务跟踪 | 📐 设计目标 |
+| `BackgroundTaskManager` 活跃任务登记表 | 框架托管（`app/_manager/`） | session_id->后台任务 | session_id | 进程寿命 | **单次调用的短后台任务**跟踪（不做 gate 计时/催办） | 📐 设计目标 |
 | prompt cache | provider 侧 | system prompt+工具定义 | 内容哈希 | 5m/1h | 上下文窗口层降本 | 📐 设计目标 |
 
 ## 10. 落地状态与接线清单
@@ -567,8 +561,8 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 
 | 组件 | 设计状态 | 落地待办 |
 |---|---|---|
-| `SessionService` + `AgentState`（M1 工作记忆） | 📐 设计目标 | 随 `create_app` 的 lifespan 装配 Redis-backed storage；恢复语义用框架能力，不自研 |
-| MySQL 状态快照归档（可选） | 📐 设计目标 | 落 `agent_state_archive` 归档表，不参与续跑 |
+| `SessionService` + `AgentState`（M1 工作记忆） | 📐 设计目标 | 随 `create_app` 的 lifespan 装配 Redis-backed storage；仅用于会话内上下文与多轮记忆，不自研会话封装类，**不实现挂起/续跑** |
+| MySQL 状态归档（可选） | 📐 设计目标 | 落 `agent_state_archive` 归档表，仅供审计复盘，不作为恢复源 |
 | `ToolCallTraceRepo` | 📐 设计目标 | Toolkit 工具执行回调处每次落一行（SQLAlchemy） |
 | `Repo`（会话台账） | 📐 设计目标 | `agent_session` / `failure_count` 落 MySQL |
 | Permission 确认记录存储 | 📐 设计目标 | `PermissionEngine` 叠加层 + 网关一次性确认令牌；Redis 存确认记录 |
@@ -580,24 +574,24 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 > 上表的 `SessionService` / `Offloader` / `ToolOffloadMiddleware` / `PermissionEngine` 是 **AgentScope 2.0 已核实的框架能力名**；
 > 表内 `Repo` / `ToolResultCache` / `ToolCallTraceRepo` 一类是本项目的自研封装与台账仓储**命名（尚未创建）**，不是框架 API。
 
-**设计原则**：先用最小端到端链路验证"流程正确性"（记忆流转、gate 挂起/确认续跑、证据链落库），
+**设计原则**：先用最小端到端链路验证"流程正确性"（记忆流转、gate 分段/确认回调、证据链落库），
 再启用"降本有效性"（压缩、缓存、prompt 缓存命中）。两者解耦，可分阶段启用。
 
 ## 11. 与既有文档的引用映射
 
 | 本文章节 | 详细实现见 |
 |---|---|
-| §3 M1 工作记忆 | `Agent长程任务-实现细节深度剖析.md` §2-4（`SessionService` + `AgentState` / gate 挂起-确认续跑 / 跨进程恢复） |
-| §3.7 能力节点子会话隔离 | `Agent长程任务-实现细节深度剖析.md` §9 |
+| §3 M1 工作记忆 | `整体技术选型与模块划分.md` §3.5.3、`FactoryAgent/FactoryAgent-流程编排能力.md` §4.2（`SessionService` + `AgentState` 的限定用途 / gate 分段与确认回调 / 为何不做跨进程恢复） |
+| §3.7 能力节点子会话隔离 | `FactoryAgent/FactoryAgent-流程编排能力.md` §6.2 |
 | §4 M2 上下文窗口记忆 | `AgentToken成本优化-设计与实现方案.md` §6-7（Prompt Caching / `Offloader` 压缩 / 早停 Middleware） |
 | §5 M3 证据链 | `Agent可观测性-设计与实现方案.md` §7（trace 落库表族 / 证据链回溯） |
 | §6 自治 跨会话缓存 | `AgentToken成本优化-设计与实现方案.md` §8（工具结果缓存 / 语义缓存） |
-| §7.3 Permission 确认记录 | `Agent长程任务-实现细节深度剖析.md` §5（Token 签发与校验） |
-| §7.2 失败计数 | `Agent长程任务-实现细节深度剖析.md` §11（agent 连续失败隔离） |
+| §7.3 Permission 确认记录 | `FactoryAgent/FactoryAgent-流程编排能力.md` §4.2、`架构设计v2/00-架构决策记录ADR.md` ADR-04（Token 签发与校验，主闸在工具网关） |
+| §7.2 失败计数 | `FactoryAgent/FactoryAgent-流程编排能力.md` §6.1（能力节点连续失败转人工待办） |
 
 ---
 
-> **一句话总结**：factorybot Agent 的记忆是五层分层架构--M1 工作记忆（`SessionService` + `AgentState` 续跑）、
+> **一句话总结**：factorybot Agent 的记忆是五层分层架构--M1 工作记忆（`SessionService` + `AgentState`，**只管会话内上下文与多轮记忆，不做挂起续跑**）、
 > M2 上下文窗口记忆（压缩 + prompt 缓存）、M3 证据链长期记忆（全文落库审计）、
 > 自治 跨会话缓存（版本化精确缓存）、L5 会话元数据 & 令牌（生命周期 + 写动作闸门）。
 > 核心哲学"模型看摘要，trace 落全文"贯穿 M2↔M3；版本一致性红线贯穿 M1->M4；时变性红线决定 M4 缓存策略。

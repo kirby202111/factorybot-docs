@@ -11,17 +11,17 @@
 
 ## 0. 为什么用 AgentScope 2.0 重构
 
-原架构以 **LangGraph** 为编排核心，配套大量**自研横切能力**（成本优化 `cost/`、可观测 `obs/`、长程任务 `longtask/`）与**自研 流程编排层**（supervisor_graph / code_nodes / agents / scenarios）。这套方案可控性强，但存在三个结构性负担：
+原架构以 **LangGraph** 为编排核心，配套大量**自研横切能力**（成本优化 `cost/`、可观测 `obs/`）与**自研 流程编排层**（supervisor_graph / code_nodes / agents / scenarios）。这套方案可控性强，但存在三个结构性负担：
 
-1. **横切能力自研成本高**：checkpoint 持久化、interrupt/resume、confirmation gate、token 签发、可观测埋点、成本路由等，都是团队从零搭建并长期维护。
+1. **横切能力自研成本高**：confirmation gate、token 签发、可观测埋点、成本路由等，都是团队从零搭建并长期维护。
 2. **多智能体协同是"手搓图"**：编排能力的 supervisor + subgraph、并行 barrier、agent 能力互调，全部靠 StateGraph 边和代码节点显式拼装，扩展一个新场景成本高。
-3. **分布式与多租户靠外部拼装**：Pod 重启续跑依赖"同 `thread_id` + MySQL checkpoint"，多租户隔离、沙箱执行、后台任务调度都需自行实现。
+3. **分布式与多租户靠外部拼装**：多租户隔离、沙箱执行、后台任务调度都需自行实现。
 
-AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）恰好把上述"硬骨头"做成了**框架内生能力**：
+AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）把其中大部分"硬骨头"做成了**框架内生能力**，另一部分（checkpoint / interrupt / resume 这类跨闸门状态续跑）则**直接取消需求**——理由见 [ADR-05](架构设计v2/00-架构决策记录ADR.md)：
 
 | 原架构痛点 | AgentScope 2.0 对应能力 |
 |-----------|------------------------|
-| 自研 checkpoint / interrupt / resume | **`AgentState` 显式状态 + `SessionService` + Redis-backed storage**，无状态水平扩展，任意副本恢复任意会话上下文（`SessionService` 是 2.0.5 起的正式名，旧名 `SessionManager` 已失效） |
+| 自研 checkpoint / interrupt / resume | **已取消该需求，不找等价替换**：Agent 一次调用只跑到下一道确认闸门为止，产出 `ActionCard`（业务对象）后本次调用结束；人确认由 MES 已有工单/待办实体承载，确认后回调**重新发起下一段**并重查当下现场事实。`AgentState` + `SessionService` 只用于**会话内上下文与多轮对话记忆**，不再承担跨闸门续跑 |
 | 自研 confirmation gate + token 签发 | **Permission 权限系统**：Gate tool execution + Human-in-the-loop confirmation + Agent autonomy control（内生） |
 | 自研可观测埋点（obs/） | **Middleware 体系**：`TracingMiddleware`（OTel 内生入口）关注点分离 |
 | 自研成本压缩（ResultCompactor） | **Offloader 接口 + `ToolOffloadMiddleware`**：上下文压缩与超大工具结果卸载内生 |
@@ -104,11 +104,12 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 | 单 Agent 推理循环 | LangGraph StateGraph ReAct | **统一 `Agent` 类**（`reply_stream` 流式 + `reply`），内置 ReAct | 事件流原生支持权限检查 / HITL / 前端集成，不再手搓 StateGraph |
 | 多 Agent 协同 | supervisor_graph + subgraph 手搓 | **单 `Agent` + `Toolkit` 为主干；确需并行时用应用层 `asyncio.gather` 并发多个独立 `Agent.reply()`，结论在应用层显式合并；跨能力共享上下文经 `evidence_set_id` 显式传递，不共享消息流** | ⚠️ 2.0 已删 `MsgHub` / `sequential_pipeline` / `fanout_pipeline`，"多 Agent 广播共享上下文"在 2.0 **无原语支撑**；且 MES 写单线程 + 只读旁路的形态本就不需要广播式协同 |
 | 任务规划 | code_nodes/plan.py 自研 | **`TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate` 工具 + `Task`/`TaskContext` + `AgentState`** | 任务分解与跟踪以**工具**形态内生；⚠️ 不存在独立"Plan 模块"，长链路规划的持久化与重规划仍属应用层职责 |
-| 状态/会话 | 自研 + LangGraph checkpoint | **`AgentState` 显式状态 + `SessionService`** | 显式类型化状态，无状态水平扩展，副本可恢复；⚠️ 2.0.5 起 `SessionManager` 已改名 `SessionService`，旧名不可用 |
+| 状态/会话 | 自研 + LangGraph checkpoint | **`AgentState` 显式状态 + `SessionService`** | 显式类型化状态，无状态水平扩展；**用途限定为会话内上下文与多轮对话记忆**，不承担跨闸门状态续跑；⚠️ 2.0.5 起 `SessionManager` 已改名 `SessionService`，旧名不可用 |
 | 结构化数据 | Pydantic v2（with_structured_output） | **Content Block（Pydantic BaseModel）** + `Msg`（含 `usage`/时间戳） | 消息与内容块原生 Pydantic 化，天然可校验/序列化/溯源（block `id`） |
 | 工具 | 自研 ACL client + LangGraph tool | **Toolkit / Tool + MCP + 智能体技能(Skills)** | 工具体系标准化，支持 MCP 生态接入与技能封装 |
 
-> **不再选 LangGraph**：其 checkpoint / interrupt / resume 的成本，已被 AgentScope 2.0 的 `SessionService` / Permission / Workspace 内生能力覆盖；同时获得沙箱、多租户、事件系统等 LangGraph 不提供的生产能力。
+> **不再选 LangGraph**：沙箱、多租户、事件系统等 LangGraph 不提供的生产能力由 AgentScope 内生覆盖；而它的 checkpoint / interrupt / resume 这一层，本项目**已整体取消**（不是替换）——Agent 无状态分段执行、每段幂等可重入，人工确认归 MES 工单/审批流与 [ADR-05](架构设计v2/00-架构决策记录ADR.md) 的工作流引擎。
+> **为什么不做 agent 侧挂起续跑**：① 编排的 gate 之间全是确定性代码步骤，挂起期没有任何需要保住的计算态；② MES 现场事实是**时变**的，恢复 T+3s 的快照到 T+10min 可能已经不成立，**重查比快照重放更正确**。
 > **诚实边界**：LangGraph 的**图编排本身没有被框架替换**——2.0 删掉了 `pipeline` 三原语，编排形状改由应用层 Python 代码（顺序 `await` + `asyncio.gather` + 显式合并）承担，跨请求/跨天的持久编排归工作流引擎。见 [架构设计v2/00-架构决策记录ADR.md](架构设计v2/00-架构决策记录ADR.md) ADR-05。
 > **仍保留的判断**：不用 AutoGen（conversational 不适合严格步骤编排）、CrewAI（抽象偏高难做细粒度权限）。AgentScope 2.0 在"可控性 + 生产化"上同时优于两者。
 
@@ -128,9 +129,9 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 
 | 组件 | 用途 | 替换/说明 |
 |------|------|----------|
-| **AgentScope FastAPI Agent Service**（`create_app`） | HTTP 入口 + lifespan-scoped `SessionService`/`SchedulerManager`/`BackgroundTaskManager` | **替换自研 FastAPI 编排 + 自研长程任务点火**；开发与部署一体（Runtime 合并入主库） |
+| **AgentScope FastAPI Agent Service**（`create_app`） | HTTP 入口 + lifespan-scoped `SessionService`/`SchedulerManager`/`BackgroundTaskManager` | **替换自研 FastAPI 编排 + 自研后台点火**；开发与部署一体（Runtime 合并入主库） |
 | **httpx（封装为 Tool）** | 出站只读 REST / 受限写，`traceparent` 由 Middleware 注入 | 保留 httpx，封装形态改为 AgentScope Tool |
-| **asyncio** | 协程驱动流式 reply 与后台任务 | 不变，但由 `BackgroundTaskManager` 托管 |
+| **asyncio** | 协程驱动流式 reply 与后台任务 | 不变，但由 `BackgroundTaskManager` 托管**单次调用的短后台任务**（跑完一段即结束，不跨闸门存活） |
 | uvicorn + gunicorn / K8s | 部署为独立微服务 | 不变，天然无状态水平扩展 |
 
 ### 2.5 执行环境与隔离（新增能力域）
@@ -183,9 +184,9 @@ AgentScope 2.0（阿里通义实验室，2026-05 发布的 breaking release）�
 |-------------|--------|---------------------|
 | `infrastructure/cost/` 成本优化 | ModelRouter/CacheControl/ResultCompactor/EarlyStop… | **Offloader + `ToolOffloadMiddleware`**（上下文压缩/超大结果卸载）+ Model 抽象分层路由 + 自定义 Middleware（缓存/早停） |
 | `infrastructure/obs/` 可观测 | ObservabilityContext/Tracing/MetricsCollector… | **`TracingMiddleware`** + Middleware 链（+ OTel/Tempo 查看；Studio 已归档不用） |
-| `infrastructure/longtask/` 长程任务 | SqlSaver/GateManager/ConfirmationStore… | **`SessionService` + `AgentState` + Permission(gate) + `BackgroundTaskManager` + `SchedulerManager`** |
+| ~~`infrastructure/longtask/` 长程任务~~ | SqlSaver/GateManager/ConfirmationStore… | **整体取消**：agent 侧不做挂起/续跑/断点恢复。人工确认落成 MES 已有工单与待办实体，催办与超时升级由审批流/工作流引擎承担（ADR-05）；**保留**的是写闸门（网关一次性令牌为主闸 + `Permission` 叠加层）与 `SessionService`/`AgentState` 的会话内上下文；`BackgroundTaskManager`/`SchedulerManager` 只用于短后台任务与定时巡检 |
 
-> 关键收益：三大横切能力从"团队自研+长期维护"变成"框架内生+自定义 Middleware 扩展"，团队只写**业务专属 Middleware**（如 MES 脱敏 `Redactor`、成本预算拦截），底座由框架保证。
+> 关键收益：横切能力从"团队自研+长期维护"变成"框架内生+自定义 Middleware 扩展"（成本、可观测两项），第三项（长程任务）经场景复核后**确认不是刚需并整体取消**；团队只写**业务专属 Middleware**（如 MES 脱敏 `Redactor`、成本预算拦截），底座由框架保证。
 
 ---
 
@@ -218,7 +219,7 @@ agent_service/app/
 │   └── process_change.py         # ④ 工艺变更落地（跨天部分交工作流引擎）
 │
 ├── task_context/                 # 任务清单：TaskCreate/Get/List/Update + Task/TaskContext
-│   └── long_chain_tasks.py       #   长链路场景的任务分解与进度跟踪（非框架 Plan 模块）
+│   └── task_tracking.py          #   多步任务的分解与进度跟踪（非框架 Plan 模块；跨天流程推进归工作流引擎）
 │
 ├── middleware/                   # 自定义 Middleware（业务横切）
 │   ├── redactor_mw.py            #   MES 脱敏（序列号/批次/PII）
@@ -258,7 +259,7 @@ agent_service/app/
 | `POST /agent/draft` | 草稿能力 | 草拟处置，返回 `Draft`（`requires_confirmation=True`） |
 | `GET /agent/draft/{id}/evidence` | 草稿能力 | 回溯草稿证据 |
 | `POST /agent/orchestration/{scenario}/start` | 编排能力 | 启动编排流程（`flows/` 应用层代码，scenario ∈ changeover/fault_response/complaint_8d/process_change） |
-| `POST /agent/orchestration/{session_id}/confirm` | 编排能力 | Permission gate 确认，由事件系统触发续跑（替换 `Command(resume=token)`） |
+| `POST /agent/orchestration/{session_id}/advance` | 编排能力 | 确认回调入口：MES 工单/待办审批完成后回调，**重新发起下一段**（新一次调用，按 `session_id` 重查当下现场事实，不恢复历史快照；旧端点名 `/confirm` 已废弃，因它易被读成"载回挂起态继续跑"） |
 | `GET /agent/orchestration/{session_id}/events` | 编排能力 | 事件流订阅（AGUI），动作卡实时推送 |
 
 ### 3.2 `rag-service` 模块结构（文档知识工具，Tool over HTTP 接入 agent-service）
@@ -330,8 +331,9 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 
 编排能力 flows/ -> 顺序 await 与 asyncio.gather 调度确定性节点
               ↓ 非确定分支 invoke("diagnosis") / invoke("drafting")
-          能力产物 -> ActionCard
-              ↓ Permission gate（拦截 -> 事件系统 HITL 确认 -> 续跑）
+          能力产物 -> ActionCard（落成 MES 工单/待办实体，本次调用结束）
+              ↓ Permission gate 拦写工具 + 人确认（审批在 MES 侧完成）
+              ↓ 确认回调 -> 重新发起下一段（重查当下事实，不恢复快照）
           MES 正式应用服务落库
 ```
 
@@ -362,8 +364,8 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 |---|------|---------|
 | 1 | **用 AgentScope 2.0 统一 Agent 类替代 LangGraph StateGraph** | 事件流原生支持权限/HITL/前端集成；省去手搓图与 checkpoint 自研 |
 | 2 | **多智能体协同：默认单 Agent + `Toolkit`；确需并行用应用层 `asyncio.gather` 并发独立 `Agent.reply()`，结论显式合并** | ⚠️ 2.0 已删 `pipeline` 三原语与 `MsgHub`，框架不提供声明式协同；协同代码留在本仓库，换来"能读得懂 + 不随框架 API 变动" |
-| 3 | **写闸门主闸在工具网关（一次性动作令牌），Permission 作叠加层** | 网关与调用方是否走 Agent 无关，绕不过；Permission 提供循环内的细粒度拦截与 HITL 续跑 |
-| 4 | **长程任务用 `SessionService` + `AgentState` + `BackgroundTaskManager` 替代自研 SqlSaver/Celery/interrupt** | 无状态水平扩展，任意副本恢复任意会话；不再自研 checkpoint 三表。⚠️ 跨天/跨进程的持久编排不在此列，归工作流引擎（ADR-05） |
+| 3 | **写闸门主闸在工具网关（一次性动作令牌），Permission 作叠加层** | 网关与调用方是否走 Agent 无关，绕不过；Permission 提供循环内的细粒度拦截与 HITL 确认 |
+| 4 | **Agent 侧不做跨闸门的状态续跑**（无状态分段执行 + 每段幂等可重入） | 人工确认的时长（分钟~跨天）由 MES 工单/待办实体与工作流引擎承载（ADR-05）；每段跑完即退出，下一段**重查当下事实**而非恢复快照——MES 数据时变，重查更正确；`SessionService`/`AgentState` 只承担会话内上下文 |
 | 5 | **可观测用 TracingMiddleware 替代自研 obs/** | OTel 内生入口、关注点分离；⚠️ Studio 已归档，研发期调试走 Tempo/Jaeger |
 | 6 | **成本优化用 Offloader + ToolOffloadMiddleware + Model 分层 替代自研 cost/** | 超大结果卸载/上下文压缩内生；便宜模型降级仍须过评测门禁 |
 | 7 | **执行隔离用 Workspace（Local/Docker/E2B）+ WorkspaceManager** | 受限写/代码执行沙箱化；多租户 agent-level isolation 内生 |
@@ -383,7 +385,7 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 
 > 本节早先写作"Pipeline 三形态 + MsgHub + Handoffs/Routing + Plan 模块"，经源码树逐 tag 核对后**全部撤回**：这些是 AgentScope **1.x** 的 API，2.0.0 起 `agentscope/pipeline`、`agentscope/msghub` 模块已不存在，`Handoffs/Routing`/独立 `Plan` 模块从未提供。以下是 2.0 真实可依赖的部分。
 
-- **统一 Agent 类 + 事件流**：每个 Agent 是 pure producer，`reply_stream` 事件天然支持并发消费、实时干预与 HITL 挂起续跑——这是本节唯一由框架承载的收益。
+- **统一 Agent 类 + 事件流**：每个 Agent 是 pure producer，`reply_stream` 事件天然支持并发消费、实时干预与 HITL 确认事件——这是本节唯一由框架承载的收益。
 - **顺序协同**（诊断 -> 追溯 -> 草拟）：应用层 `await` 串联，上游产物以 Content Block 显式传入下游输入。
 - **并行协同**（故障复产多能力）：`asyncio.gather` 并发多个**各自独立**的 `Agent.reply()`，结论在应用层显式合并；每个分支独立预算、独立超时、独立 `Permission` 规则。
 - **⚠️ 不提供"广播共享上下文"**：`MsgHub` 式"A 根因 + B 隔离范围互相看到彼此结论"在 2.0 **无原语**。硬做要自建消息中转，等于回到手搓。本项目的替代方案：各分支只读同一份 **`evidence_set_id`**（关系型证据子集），彼此**不**看对方结论——刻意如此，因为扇出式互看会放大错误（无中心校验 17.2× vs 中心化 4.4×，见《Multi-Agent必要性-独立复核与批判》）。
@@ -392,8 +394,8 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 
 ### 6.2 分布式支持
 
-- **无状态水平扩展**：`AgentState` 显式化 + `SessionService`（Redis-backed）持久会话，**任意副本恢复任意用户完整上下文**——Pod OOM/滚动更新后新副本按 `session_id` 续跑，无需自研 checkpoint。
-- **BackgroundTaskManager + SchedulerManager**：长程任务与定时巡检由框架托管，替代自研 asyncio 点火与 Celery。
+- **无状态水平扩展**：`AgentState` 显式化 + `SessionService`（Redis-backed）持久**会话内上下文**，多轮对话按 `session_id` 取回。**不再有"Pod 重启续跑挂起任务"这回事**：一次调用只跑一段，跑完即结束；进程中途死亡时下一段照常幂等重跑（不依赖任何副本恢复能力）。
+- **BackgroundTaskManager + SchedulerManager**：单次调用的短后台任务（HTTP 立即返回、十几秒级取证跑完即结束）与定时巡检由框架托管，替代自研 asyncio 点火与 Celery。**不用于 gate 计时与催办**（那是审批流的职责，ADR-05）。
 - **Workspace 分布式形态**：同一份业务代码按需切换 Local->Docker->E2B，执行环境可独立扩缩容。
 
 ### 6.3 可扩展性
@@ -413,7 +415,7 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 | **第 0 步** | 底座切换 | 引入 AgentScope 2.0（pin 具体小版本），搭 FastAPI Agent Service（`create_app`）+ `SessionService` + `TracingMiddleware`，跑通空壳 |
 | **第 1 步** | 诊断迁移 | 将 StateGraph ReAct 重写为统一 Agent + Toolkit + `readonly_policy`；对齐评测基线 |
 | **第 2 步** | 草稿迁移 | draft agents + `nowrite_policy`；证据回查 Tool 化（`fetch_evidence_set`） |
-| **第 3 步** | 横切能力替换 | obs->TracingMiddleware、cost->Offloader/`ToolOffloadMiddleware`、longtask->`SessionService`/Permission |
+| **第 3 步** | 横切能力替换 | obs->TracingMiddleware、cost->Offloader/`ToolOffloadMiddleware`；longtask **取消**（不替换：人工确认归 MES 工单/审批流，写闸门保留 Permission + 网关令牌） |
 | **试点** | 编排能力换线编排 | `flows/changeover.py` 顺序 `await` + 网关令牌（主闸）+ Permission gate + 事件系统 HITL，confirmation 做扎实 |
 | **扩展** | 编排能力其余场景 | `asyncio.gather` 并发独立 Agent 承载故障复产；客诉 8D / 工艺变更为顺序调用（跨天部分待工作流引擎） |
 | **收口** | 独立入口网关 `agent-gateway-service` | 意图分诊用规则 + LLM 兜底分类器（不是 Agent ReAct），跨能力委托为显式调用 + `evidence_set_id` 传递；检索内工具选择归 `agent-service` 编排层（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)） |
@@ -432,13 +434,13 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 | Permission 系统（`PermissionEngine`/`Rule`/`Mode`/`Decision`） | 写动作三层防线的**叠加层**（主闸是网关一次性令牌） |
 | Middleware（`TracingMiddleware`/`AGUIProtocolMiddleware`/`ToolOffloadMiddleware` + 自定义） | 可观测/前端流/成本/脱敏/审计 |
 | `Offloader` + `LocalWorkspace` 等 8 种后端 | 超大结果卸载 + 执行隔离 + 多租户 |
-| `AgentState` + `SessionService`（Redis-backed） | 分布式会话恢复、长程任务 |
-| `BackgroundTaskManager` / `SchedulerManager` | 后台任务 / 定时巡检 |
+| `AgentState` + `SessionService`（Redis-backed） | 会话内上下文与多轮对话记忆（**不承担**跨闸门续跑） |
+| `BackgroundTaskManager` / `SchedulerManager` | 短后台任务 / 定时巡检（**不承担** gate 计时与催办） |
 | `Toolkit` + MCP + Skills | ACL 工具 / 外部服务 / 领域技能 |
 | `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate` + `Task`/`TaskContext` | 任务清单与进度跟踪（无独立 Plan 模块） |
 | Model + Embedding | provider 可插拔 + RAG 向量化 |
 | RAG 模块 | 文档检索能力——⚠️ 无 ChromaDB 适配器，且该模块曾被整体删除过一次，需版本 pin + 降级预案 |
-| `event.RequireUserConfirmEvent` | HITL 确认与续跑 |
+| `event.RequireUserConfirmEvent` | 同一次调用内的 HITL 确认事件（跨调用的确认走 MES 工单审批 + 回调，不靠此事件续跑） |
 
 **已核实为不存在/已删除，本架构不写进生产路径：**
 
