@@ -131,7 +131,7 @@ async def run_draft_chain(deps, req: DraftRequest, sessions: SessionService) -> 
     return await deps.flow_steps.validate_archive(draft, sessions, budget=8)
 ```
 
-步数与工具调用预算上限 `8`（超限标 `FAILED` 转人工）；草稿落库前的确认是**同一次调用内**的前端确认（`Draft.requires_confirmation` 恒真，人编辑后走应用服务）；若草稿产物成为编排动作卡，**审批确认**落 MES 工单/待办实体，确认后重新发起下一段——**不挂起、不续跑**（框架级 `interrupt` / `Command(resume=…)` / checkpoint 表也不存在，不可依赖）。
+步数与工具调用预算上限 `8`（超限标 `FAILED` 转人工）；草稿落库前的确认是**同一次调用内**的前端确认（`Draft.requires_confirmation` 恒真，人编辑后走应用服务）；若草稿产物成为编排动作卡，**审批确认**落 MES 工单/待办实体，确认后重新发起下一段——**不挂起、不续跑**（框架只有单次调用作用域内的 `RequireUserConfirmEvent` 与 `interrupt` 端点，没有 `Command(resume=…)` / checkpoint 续跑原语，不可依赖）。
 
 ### 4.2 生成能力节点（策略分派）
 

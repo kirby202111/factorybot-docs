@@ -118,7 +118,7 @@
 | 单工具超时 | ≤2s | httpx timeout |
 | 整会话超时 | ≤60s | `asyncio.wait_for` |
 | 收口条件 | 模型无 tool call | `DiagnosisReport` Pydantic 校验 |
-| 会话内上下文 | `AgentState` + 框架 `Storage`（本项目落 MySQL；`SessionService` 是其上门面，旧名 `SessionManager` 已失效） | 多轮对话记忆与会话隔离（按 `session_id`）；**不承担跨闸门续跑**（框架也无 `interrupt` / `Command(resume=…)` 原语，且不自建同语义机制） |
+| 会话内上下文 | `AgentState` + 框架 `Storage`（本项目落 MySQL；`SessionService` 是其上门面，旧名 `SessionManager` 已失效） | 多轮对话记忆与会话隔离（按 `session_id`）；**不承担跨闸门续跑**（框架只有单次调用作用域内的 `RequireUserConfirmEvent` 与 `interrupt` 端点，无 `Command(resume=…)` / checkpoint 续跑原语，且不自建同语义机制） |
 | 兜底 | 超预算 / 超时 / 连续 3 次工具失败 | 返回 `partial` 报告"已转人工"，不硬答；`failure_count >= 2` 本段置 `WAITING` 并推异常卡 |
 
 > 设计目标骨架，尚未落地（当前代码仓 `src/` 无相应实现）。下列参数名为本仓库装配层的写法，非逐字核实过的框架关键字；已核实的框架入参只有 `name` / `model` / `toolkit` / `offloader`，事件流走 `reply_stream`（`print` 接口已 deprecated）。

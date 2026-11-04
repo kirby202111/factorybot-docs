@@ -262,7 +262,7 @@ await self._flows.run_next_segment(ctx, facts, token)        # 新的一次短�
 
 ### 3.6 为什么不做跨进程恢复（原"工作记忆价值"论证不再成立）
 
-曾经的设计是：副本 A 跑到 gate 挂起 -> `AgentState` 落 Redis（旧方案的存储后端；现选型见 §3.2）-> 进程死 -> 副本 B 收到确认后按 `session_id` 载回 state 从断点继续。**这套机制本项目不实现，也不找框架等价物替换**（框架级 `interrupt` / `Command(resume=…)` / checkpoint 表本身也不存在），理由三条：
+曾经的设计是：副本 A 跑到 gate 挂起 -> `AgentState` 落 Redis（旧方案的存储后端；现选型见 §3.2）-> 进程死 -> 副本 B 收到确认后按 `session_id` 载回 state 从断点继续。**这套机制本项目不实现，也不找框架等价物替换**（框架只有单次调用作用域内的 `RequireUserConfirmEvent` 与 `interrupt` 端点，没有 `Command(resume=…)` / checkpoint 这类从存档位置续跑的原语），理由三条：
 
 1. **没有需要保住的计算态**：gate 之间几乎全是确定性代码步骤（换线快路径 LLM 调用为 0），"挂起期"只是在等人，不持有必须原样恢复的中间结果。
 2. **重查比重放更正确**：MES 现场事实**时变**（首件状态、路线版本、钢网在借、齐套数量都会变），把 T+3s 的快照载回 T+10min 的进程继续跑，等于用过期事实做当下的决策。与 §1.1 时变性红线（语义缓存默认关闭）是同一条理由。
