@@ -300,7 +300,7 @@ def validate_acl_clients(clients: dict[str, object], specs: dict[str, Capability
 
 ### 5.4 工具规模治理：四层收敛
 
-10+ 个上下文 × 每上下文数十 API，若按 1 API = 1 tool 封装，单会话 schema 膨胀到上百工具——上下文税每步都交，且工具越多选择错误率越高（context rot，[Multi-Agent必要性-独立复核与批判.md](../Multi-Agent必要性-独立复核与批判.md)）。四层收敛，优先级从上到下（与降本杠杆同构：结构手段在前，模型兜底在后）：
+10+ 个上下文 × 每上下文数十 API，若按 1 API = 1 tool 封装，单会话 schema 膨胀到上百工具——上下文税每步都交，且工具越多选择错误率越高（context rot）。四层收敛，优先级从上到下（与降本杠杆同构：结构手段在前，模型兜底在后）：
 
 | 层 | 手段 | 一句话规则 |
 |---|------|-----------|

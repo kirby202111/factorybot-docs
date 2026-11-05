@@ -388,7 +388,7 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 - **统一 Agent 类 + 事件流**：每个 Agent 是 pure producer，`reply_stream` 事件天然支持并发消费、实时干预与 HITL 确认事件——这是本节唯一由框架承载的收益。
 - **顺序协同**（诊断 -> 追溯 -> 草拟）：应用层 `await` 串联，上游产物以 Content Block 显式传入下游输入。
 - **并行协同**（故障复产多能力）：`asyncio.gather` 并发多个**各自独立**的 `Agent.reply()`，结论在应用层显式合并；每个分支独立预算、独立超时、独立 `Permission` 规则。
-- **⚠️ 不提供"广播共享上下文"**：`MsgHub` 式"A 根因 + B 隔离范围互相看到彼此结论"在 2.0 **无原语**。硬做要自建消息中转，等于回到手搓。本项目的替代方案：各分支只读同一份 **`evidence_set_id`**（关系型证据子集），彼此**不**看对方结论——刻意如此，因为扇出式互看会放大错误（无中心校验 17.2× vs 中心化 4.4×，见《Multi-Agent必要性-独立复核与批判》）。
+- **⚠️ 不提供"广播共享上下文"**：`MsgHub` 式"A 根因 + B 隔离范围互相看到彼此结论"在 2.0 **无原语**。硬做要自建消息中转，等于回到手搓。本项目的替代方案：各分支只读同一份 **`evidence_set_id`**（关系型证据子集），彼此**不**看对方结论——刻意如此，因为扇出式互看会放大错误（无中心校验 17.2× vs 中心化 4.4×）。
 - **跨能力委托**：显式服务调用（`invoke` 语义由我们实现，不是框架关键字），上下文只传 `evidence_set_id` / `session_id` / `traceparent`，不传消息历史。
 - **任务分解与跟踪**：`TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate` 工具 + `Task`/`TaskContext`（已核实存在）。**但**"多 Agent 认领子任务"需要自建协调循环，框架不给调度器；长链路的持久规划归工作流引擎（ADR-05）。
 
@@ -421,7 +421,7 @@ rag-service 只做一件事：**给定问题与版本锚点，召回文档片段
 | **收口** | 独立入口网关 `agent-gateway-service` | 意图分诊用规则 + LLM 兜底分类器（不是 Agent ReAct），跨能力委托为显式调用 + `evidence_set_id` 传递；检索内工具选择归 `agent-service` 编排层（[Agent入口网关-意图路由.md](AGENT服务/Agent入口网关-意图路由.md)） |
 
 > 迁移策略：**端点契约不变**（`/agent/diagnose` 等），每层迁移后用 mes-eval（自研 runner + `py-openjudge`）对齐旧基线，通过评测门禁才切流量，保证平滑替换、可回滚。
-> **两条前置**：① 单 Agent 基线先跑通并测出准确率——基线 >45% 后加 Agent 是负回报（《复核》数据），不要用"上了多 Agent"当作里程碑；② 版本 pin 与 API 漂移检查列入 CI，`agentscope` 2.0.x 已出现过模块删除与改名（`pipeline`/`MsgHub` 删、`SessionManager`→`SessionService`）。
+> **两条前置**：① 单 Agent 基线先跑通并测出准确率——基线 >45% 后加 Agent 是负回报，不要用"上了多 Agent"当作里程碑；② 版本 pin 与 API 漂移检查列入 CI，`agentscope` 2.0.x 已出现过模块删除与改名（`pipeline`/`MsgHub` 删、`SessionManager`→`SessionService`）。
 
 ---
 
