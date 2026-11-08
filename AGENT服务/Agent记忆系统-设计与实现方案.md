@@ -320,6 +320,80 @@ result = await agent.reply(
 1. 右列字段进 `OrchestrationState` 必须配套 `*_observed_at`（见 §3.1），且下一段**禁止读取**，只允许写入与归档进 trace。
 2. 跨页面续聊（恢复会话继续问）与跨闸门推进（确认后起下一段）**都要走重查**，区别只在重查范围：前者查回答里引用的事实，后者查决策依据的事实。
 
+### 3.10 取数策略闸门：把 §3.9 的判据变成不可绕过的执行点
+
+§3.9 回答的是"哪些字段能存着复用"，但它是**文档判据**，不是运行时约束：ReAct 里的模型能读到 M1 消息历史（含历史 `tool_result` 块）与 M2 压缩结果，仅在 system prompt 里写"必须重查"无法保证它照做。本节把判据执行化——与 §1.1 时变性红线、§3.6 重查而非重放、§6.3 语义缓存默认关闭是同一条约束在会话层、执行层、缓存层的投影。
+
+> **落地状态**：本节全部为 📐 设计目标，尚未落地。`DataScopePolicy` / `AnswerValidator` / `history_rehydration_policy` 均为本项目拟定的自研封装命名，**不是 AgentScope 2.0 框架 API**；代码仓现状见文首"落地状态声明"。
+
+#### 3.10.1 不新增锚点维度：`data_scope` 只由 `as_of` 派生
+
+项目已有 `as_of`（网关 §6.1）与 `version_anchor`（§8.2）。**`version_anchor` 是贯穿全链路的约束条件，不是取数语义**：§8.2 要求它出现在 state、工具入参、缓存 key、trace 里，几乎每个请求都带；若把"带了 version"判成"按版本缓存答案"，等于给绝大多数现场查询开了答案缓存，直接击穿 §1.1 时变性红线。典型反例："SN-001 按 v3 路线过了哪几站"——version 只是过滤条件，问的是**当下**的过点记录（持续追加、时变）。
+
+因此 `data_scope` 只有两值，且**不是新请求字段**，由纯函数派生：
+
+| 请求里已有的信号 | 派生 `data_scope` | 语义 |
+|---|---|---|
+| `as_of` 非空 | `AS_OF(ts)` | 历史回放，必须按 `as_of` 取 M3 trace / 历史读模型快照，**禁查实时**（查实时反而答错） |
+| `as_of` 为空（默认） | `CURRENT` | 现场当下事实；`version` 是否存在都不改变它 |
+
+`version` / `version_kind` **不参与 scope 派生**，只下沉为工具级 `IMMUTABLE` 的缓存 key 维度与 `AUTHORITATIVE_RECORD` 的版本锚点（§3.10.3）。`as_of` 与 `version` 同时非空时不冲突：前者决定"看哪个时刻"，后者决定"按哪个版本解释这个时刻"。
+
+派生规则放 DDD 共享内核，网关与 `agent-service` **各自从同一请求字段调用同一函数**，不传 `data_scope`、不新增协议字段；判定 0 次 LLM，语义模糊时按 `Agent路由与多轮上下文-市面对照与演进方向.md` §3.3 补问，不猜。`turn_id` 由 `agent-service` 编排入口按 `session_id` + 请求序号**生成一次**，随能力调用下传（能力节点不自行生成），进 M3 trace 与出口校验；网关只派生 `data_scope` 供缓存决策，不需要 `turn_id`。
+
+#### 3.10.2 新鲜度的边界是「轮次」，不是时长
+
+MES 现场事实持续追加（§6.2 已把 `query_pass_records` 判为"持续追加、短 TTL 或不缓存"），齐套数 / 首件状态在几秒内就可能变，`max_staleness_ms` 给不出安全阈值。因此判定用 **turn 边界**：同一 turn 内的重复取数允许复用请求级 memo；跨 turn（跨页面续聊、跨闸门 `advance()` 新段）的 **`LIVE_ONLY` 取值一律重查**。`IMMUTABLE` 是版本化不可变数据，不受 turn 边界约束，可跨 turn 复用——这正是它与 `LIVE_ONLY` 的分界。`observed_at` 只作标注、审计与出口校验依据，**不参与"还新鲜吗"的判定**。
+
+这样 §3.5 的 `requery_live_facts`、§3.9 落地约束 2 的"两种重查范围"都成为同一规则的特例，不必逐处写约定；§3.8 的多轮追问连贯性也不受影响——记忆仍提供指代与叙事，只是不再提供事实取值。
+
+#### 3.10.3 四类取数策略与默认口径
+
+| `data_class` | 允许的数据源 | 典型 | 说明 |
+|---|---|---|---|
+| `LIVE_ONLY` | 本 turn 实时工具 | 首件状态、齐套数量、钢网在借、过点记录、设备实时参数 | 缓存 / 状态取值 / 历史 `tool_result` 一律不得作为断言依据 |
+| `AS_OF_ONLY` | M3 `tool_call_trace` 中 `occurred_at <= as_of` 的历史记录 / 按 `as_of` 的读模型快照 | "当时过点轨迹""回放当时的判定" | 由 `evidence_set_id` 锚点定位；实时结果在此语义下是错的 |
+| `IMMUTABLE` | §6 版本化工具结果缓存（长 TTL，可跨 turn） | `query_process_route(route_id, v3)` | key = `route_id + version_anchor + tenant`（§6.2 已有）；`version` 在这里才是取数依据，长 TTL 不需要数据水位 |
+| `AUTHORITATIVE_RECORD` | 记忆即权威源 | gate 决策、`confirmation_id`、指代锚点、`evidence_set_id`、`version_anchor` | 不是"允许用记忆"，而是**必须用记忆，且禁止被实时数据覆盖** |
+
+```python
+# 设计目标路径：app/domain/data_freshness_policy.py（项目自研，非框架 API）
+DATA_SCOPE_POLICY = {
+    "query_kitting_qty":     DataClass.LIVE_ONLY,
+    "query_pass_records":    DataClass.LIVE_ONLY,
+    "query_process_route":   DataClass.IMMUTABLE,           # 需带 version_anchor
+    "gate_first_article":    DataClass.AUTHORITATIVE_RECORD,
+    "seed.anchor_entity":    DataClass.AUTHORITATIVE_RECORD,
+}
+DEFAULT = DataClass.LIVE_ONLY       # ★ 未登记一律偏向查新（fail-safe）
+
+def resolve_data_scope(request) -> DataScope: ...          # 只看 as_of，不看 version
+def resolve(request, tool_or_field, turn_id) -> SourceDecision: ...
+```
+
+**默认必须是 `LIVE_ONLY`**：MES 里用错旧数据的代价远大于多查一次工具。第 4 类把"该用记忆"从"省钱优化"升格为语义要求——这也是 §3.10.6 里 `redundant_live` 反例的判定依据。注意 `AUTHORITATIVE_RECORD` 里的 `evidence_set_id` / `version_anchor` 是**引用与锚点**（本身就该存），`AS_OF_ONLY` 的历史记录是它们指向的内容，两者不重叠。
+
+#### 3.10.4 三个执行点：入口 / 取数 / 出口
+
+| 位置 | 组件 | 强制规则 |
+|---|---|---|
+| 入口 | `resolve_data_scope(request)`（网关 / 编排入口，纯函数） | 只派生 `AS_OF` / `CURRENT`、不落协议字段；结果供缓存与取数闸门消费 |
+| 取数 | `ToolExecHook`（§2.3 已拟建）+ ACL `get_or_compute` | **唯一取数通道**，与 `Permission` 同层，照搬 ADR-04「主闸在工具网关，模型绕不过」。`data_class == LIVE_ONLY` 且（`CURRENT` 或跨 turn）→ 强制实时，缓存命中也作废；`IMMUTABLE` / `AS_OF_ONLY` / `AUTHORITATIVE_RECORD` 按各自允许的数据源取 |
+| 出口 | `AnswerValidator`（`agent-service` 侧，能力产出答案前；确定性校验） | 对答案 `sources` 里每条断言，**按其 `data_class` 查同一张策略表**核验证据出处：`LIVE_ONLY` 必须 ① `turn_id == 当前 turn` ② `occurred_at >= 请求开始时间` ③ `source == LIVE`；`IMMUTABLE` 允许 `TOOL_CACHE` 但必须带 `version_anchor`；`AS_OF_ONLY` 必须来自 `as_of` 证据集；`AUTHORITATIVE_RECORD` 必须来自会话 / 台账。不满足 → 拒绝作答，触发重查或置 `needs_human_review` |
+
+`CURRENT` 请求里合法引用不可变版本数据（如"按 v3 路线查过点"）不会被误判：校验按 `data_class` 分支，不再一律要求 `LIVE_ONLY`。取数决策**不给 LLM**：模型可以"想用旧值"，但闸门不返回旧值。出口校验也不是让 LLM 判答案对不对，而是查 M3 `tool_call_trace` 核对证据出处，无需新表、无需 judge 模型；网关只消费 `needs_human_review`，不查 agent 侧 trace 表（保持 `Agent入口网关-意图路由.md` §1.2 的无状态分派器定位）。
+
+#### 3.10.5 两处需要同步的既有设计
+
+1. **消息历史回灌（§3.9 落地约束 1 没覆盖的路径，📐 待补）**：框架 message 记录永久留存且含 `tool_result` 块（见 §9），跨页面续聊会把上一轮"齐套数 = 3"的原文喂回模型。历史 `tool_result` 回灌走 `history_rehydration_policy`（复用 §4.2 `result_compactor` 的策略，加 `mode="history"`），降级为引用块 `{hint, trace_id, observed_at, usable_as_fact: false}`：**保留叙事与指代**，只取消其"可作事实断言"的资格，出口校验兜底。不做数值剥离——剥离会让模型不知道上一轮聊过什么，反而破坏 §3.8 的多轮追问。
+2. **网关答案缓存与工具结果缓存（已在网关文档同步）**：`Agent入口网关-意图路由.md` §9 的 `GatewayService.chat()` 原为无条件"缓存命中即返回"，与本节冲突；现改为按 `data_scope` 决定是否读写缓存——**仅 `AS_OF` 可缓存，`CURRENT` 一律跳过，即便请求带 `version`**（网关 §5 / §6.1 / §9 / §11.1 同步）。§6 工具结果缓存对 `LIVE_ONLY` 只允许 `scope="turn"` 的请求级 memo，跨 turn 失效；`IMMUTABLE` 仍按 §6.2 长 TTL 缓存。两处共用同一张策略表，避免双份口径。
+
+#### 3.10.6 可观测、评测门禁与落地顺序
+
+- `ToolCallTrace`（§5.1）加 `data_scope` / `data_class` / `source` / `turn_id` 四列；网关 `gateway_cache_hit_total` 按 `data_scope` 打 label，`CURRENT` 跳过缓存的请求不进命中率分母。
+- 评测集补三类反例：**`stale_hit`**（该查却用了旧值）、**`redundant_live`**（该用记忆却重复查）、**`version_leak`**（请求带 `version` 却被整体判成可缓存、返回旧现场数据，专门回归 §3.10.1 的防呆）；`stale_fact_rate = 0` 作 `EvalGate` 硬门禁，接 `RAG与Agent评测` 侧自研 `EvalRunner` / `EvalGate`（📐 设计目标）。没有这道门禁，"保证"只是设计宣言。
+- 落地顺序（最小改动优先）：① 派生 `resolve_data_scope`（0 侵入）→ ② 取数闸门 → ③ 两处缓存策略化 → ④ 历史回灌降级 → ⑤ 出口校验 + 评测门禁。与 §10「先验证流程正确性，再启用降本有效性」一致：①~④ 属正确性，缓存命中率属降本，**不得用后者压前者**。
+
 ## 4. M2 上下文窗口记忆：喂模型的瞬时记忆
 
 这层解决"ReAct 每步重发 system prompt + 历史，token 二次方放大"问题。属于"给 LLM 看的瞬时记忆"。
@@ -433,10 +507,15 @@ class ToolCallTrace:
     latency_ms: int
     tenant_id: str
     occurred_at: datetime
+    turn_id: str                  # ★ 新鲜度边界（§3.10.2）：跨 turn 的 LIVE_ONLY 取值不得作断言
+    data_scope: str               # CURRENT | AS_OF（只由 as_of 派生，非协议字段）
+    data_class: str               # LIVE_ONLY | AS_OF_ONLY | IMMUTABLE | AUTHORITATIVE_RECORD
+    source: str                   # LIVE | TOOL_CACHE | MEMORY | HISTORY_TRACE
 ```
 
 三种状态都落：`save_ok` / `save_denied`（被 gate 拒）/ `save_error`。
 `bounded_context` 字段把 trace 锚定到 DDD 限界上下文，给工程师 UI 按上下文回溯用。
+后四列是 §3.10 取数策略闸门的决策留痕：出口校验按 `data_class` 分支核对证据出处（`LIVE_ONLY` 才校 `turn_id` + `occurred_at`），工程师 UI 也能直接看出"这条事实是当场查的，还是复用来的"。均为 📐 设计目标，尚未落地。
 
 > 落地状态：**设计目标，尚未落地**——每次工具调用落一行 `tool_call_trace` 由工具执行节点（Toolkit 回调处）实现，代码仓尚无该节点。
 
@@ -557,6 +636,8 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 **权衡**：零成本答案复用 vs 数据漂移正确性风险。语义缓存默认关，因为 MES 答案随数据漂移。
 这是**领域特性倒逼技术选型**，不是通用 Agent 的做法。通用 Agent 鼓励语义缓存降本，MES 反其道行之。
 
+> **执行化落点**：本节只回答"缓存该不该开"；"该查新时真的查了、该用记忆时真的用了"由 §3.10 的取数策略闸门保证——四类 `data_class`、turn 边界、取数闸门、出口校验与评测门禁是这条红线在运行时的形态，不是额外一套设计。
+
 ### 8.4 记忆按需启用的粒度是"用途"，不是"能力"
 
 诊断与编排**都接** M1 的"多轮对话与会话隔离"用途；**都不接**它的"gate 挂起 / 断点续跑"用途（逐条理由见 §3.8；旧写法"诊断整套不接会话存储"已推翻）。分段之间靠重查事实衔接，不靠会话快照恢复。
@@ -614,7 +695,9 @@ MES 追溯不允许查错版本，这条红线从领域约束一路下沉到缓�
 | `Offloader` / `ToolOffloadMiddleware` 压缩策略 | 📐 设计目标 | 工具结果回灌前走压缩/卸载 |
 | 缓存标记 Middleware | 📐 设计目标 | 插在模型调用的 Middleware 链外层 |
 | 早停 Middleware | 📐 设计目标 | 接在诊断 Agent 的收敛判定处 |
-| `ToolResultCache` | 📐 设计目标 | ACL 客户端 `get_or_compute` 封装 |
+| `ToolResultCache` | 📐 设计目标 | ACL 客户端 `get_or_compute` 封装；`LIVE_ONLY` 只允许 `scope="turn"` 的请求级 memo（§3.10.5） |
+| `DataScopePolicy` + 取数闸门（§3.10） | 📐 设计目标 | 共享内核策略表 + `ToolExecHook` 侧唯一取数通道；与 `Permission` 同层，模型绕不过 |
+| `AnswerValidator` + `history_rehydration_policy`（§3.10） | 📐 设计目标 | 答案出口按 `turn_id` / `occurred_at` / `data_class` 校验证据出处；历史 `tool_result` 降级为引用块；评测集补 `stale_hit` / `redundant_live` 两类反例并接 `EvalGate` |
 
 > 上表的 `SessionService` / `Offloader` / `ToolOffloadMiddleware` / `PermissionEngine` 是 **AgentScope 2.0 已核实的框架能力名**；
 > 表内 `Repo` / `ToolResultCache` / `ToolCallTraceRepo` 一类是本项目的自研封装与台账仓储**命名（尚未创建）**，不是框架 API。

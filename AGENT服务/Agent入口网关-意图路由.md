@@ -98,7 +98,7 @@ IntentRouter.classify(question)
 ```
 
 - **不挂 ReAct**：网关不推理、不选工具、不做多步组合；选工具是多跳检索内部的事。
-- **缓存**：按"问题 + 租户 + 版本锚点"缓存，命中直接返回。
+- **缓存（策略化）**：`data_scope` **只由 `as_of`** 派生（纯函数，0 次 LLM，见 [Agent记忆系统-设计与实现方案.md](Agent记忆系统-设计与实现方案.md) §3.10.1）；**仅 `AS_OF`** 才按"问题 + 租户 + 版本锚点"读写答案缓存并命中返回，`CURRENT` 一律跳过——**即使请求带 `version`**。版本锚点是贯穿全链路的约束条件（记忆系统 §8.2 版本一致性红线），不是取数语义；若因"带了版本"就缓存答案，"SN-001 按 v3 路线过了哪几站"这类现场查询会拿到旧过点轨迹，直接违反时变性红线。
 - **预算与超时**：整问答 70s（略大于诊断 60s 委托超时）；检索子调用 15s（🔴 待压测标定）。
 - **只读**：网关无任何写工具、不领用写令牌、不调过点放行/拦截 API。
 
@@ -118,6 +118,8 @@ class RetrievalRequest(BaseModel):
     session_id: str | None = None
     max_tool_calls: int = 2           # 检索内预算，由网关透传但不放大
 ```
+
+> **不新增 `data_scope` 字段**：`data_scope` **只由 `as_of`** 派生（`AS_OF` / `CURRENT`），网关与 `agent-service` 用共享内核里的同一个纯函数各自计算，见 [Agent记忆系统-设计与实现方案.md](Agent记忆系统-设计与实现方案.md) §3.10.1。`version` / `version_kind` 仍按原语义作版本锚点透传，**不参与 `data_scope` 派生、也不放宽缓存策略**；这样版本锚点仍只有一套口径，网关也不必成为隐式会话中枢。
 
 ### 6.2 响应（`RagAnswer`）
 
@@ -230,11 +232,14 @@ class GatewayService:
     ) -> None: ...
 
     async def chat(self, request: ChatRequest, tenant: TenantContext) -> AgentAnswer:
-        # 1. 缓存
-        cached = await self._cache.get(request, tenant)
-        if cached:
-            self._metrics.cache_hit.inc()
-            return cached
+        # 1. 缓存（策略化，见 Agent记忆系统 §3.10；resolve 为共享内核纯函数，0 次 LLM）
+        scope = resolve_data_scope(request)
+        allow_cache = scope.allows_answer_cache        # AS_OF -> True / CURRENT -> False（与 version 无关）
+        if allow_cache:
+            cached = await self._cache.get(request, tenant)
+            if cached:
+                self._metrics.cache_hit.inc()
+                return cached
 
         # 2. 意图分诊（规则优先 + LLM 兜底）
         intent = await self._intent_router.classify(request.question)
@@ -278,9 +283,10 @@ class GatewayService:
             self._metrics.fallback.inc("downstream_error")
             answer = self._human_fallback(request, intent, f"下游能力不可用: {e}")
 
-        # 4. 审计 + 缓存
+        # 4. 审计 + 缓存（同一策略，避免 CURRENT 答案被写入缓存）
         await self._audit_repo.record(request, intent, answer)
-        await self._cache.set(request, tenant, answer)
+        if allow_cache:
+            await self._cache.set(request, tenant, answer)
         return answer
 ```
 
@@ -342,10 +348,13 @@ agent_gateway_service/
 | `gateway_route_accuracy` | 路由准确率（评测集 / 用户反馈，健康度核心） |
 | `gateway_delegation_total` | 委托次数（按 capability / status） |
 | `gateway_chat_latency_seconds` | 整问答延迟（Histogram） |
-| `gateway_cache_hit_total` | 缓存命中 |
+| `gateway_cache_hit_total` | 缓存命中（按 `data_scope` 打 label） |
+| `gateway_cache_skip_total` | 按策略跳过答案缓存的次数（`CURRENT`；📐 设计目标） |
 | `gateway_low_confidence_total` | 低置信度转人工 |
 | `gateway_unknown_intent_total` | 未识别意图转人工 |
 | `gateway_dependency_unreachable_total` | 下游不可达降级 |
+
+> `CURRENT` 请求不计入 `gateway_cache_hit_total` 的命中率分母——否则"按策略跳过缓存"会被统计成"缓存没命中"，指标反过来逼人把时变性红线调回去。能力侧 `AnswerValidator` 判定证据出处不合规时置 `needs_human_review`，网关只透传不改写；`stale_fact_rate`（该查却用了旧值）是评测侧 `EvalGate` 门禁指标，不在网关埋点，见 [Agent记忆系统-设计与实现方案.md](Agent记忆系统-设计与实现方案.md) §3.10.6。
 
 ### 11.2 trace
 
