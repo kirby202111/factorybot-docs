@@ -2,6 +2,8 @@
 
 > **文档性质（一开口就讲清）**：本文**不是现状说明书，也不是已拍板的设计**，而是一次架构评审的对照记录——把 Claude Code（下称 CC）"Snip / MicroCompact / Collapse / AutoCompact 四层按需压缩"放进 2025–2026 市面成熟做法里对照，指出**哪些该保留、哪些已有更优解、演进方向是什么**。所有标注"改 / 补 / 演进"的条目均为 **📐 演进方向（尚未落地、未拍板）**，落地前需按 §6 分档逐项确认。
 >
+> **实现说明**：档 0 / 档 1 的落地设计（架构分层、接口清单、DDL、指标、评测门禁、Step 0–7）见 [Agent上下文压缩管线-实现说明.md](../实现说明/Agent上下文压缩管线-实现说明.md)；本文只管"为什么分层与演进方向"，不重复实现细节。
+>
 > **底座口径**：AgentScope 2.0（Python，版本要求以 ADR 为准）。框架提供 `Offloader` / `ToolOffloadMiddleware`（上下文压缩与超大结果卸载）与 `Model` 抽象，**不提供 `compact` / `Handoffs` / `Routing` / `Pipeline` / `MsgHub` 原语**（见 [Agent记忆系统-设计与实现方案.md](Agent记忆系统-设计与实现方案.md) 文首、[ADR-01/ADR-13](../架构设计v2/00-架构决策记录ADR.md)）。本文所有"压缩分层 / 折叠 / 摘要"一律指**应用层实现**，不是框架能力；`OffloadCompactPolicy` / `ResultCompactor` 一类是本项目内部封装命名。
 >
 > **第三方口径**：文中 `Claude Code` / `Claude Developer Platform` / `Context Editing` / `Memory Tool` / `Message Threads` / `Mem0` / `Letta` / `Zep` / `Context-Folding` / `RE-TRAC` 等均为**市面第三方方案或研究成果，非本仓库已引入依赖**，引用仅为对照，不代表选型承诺。**`Snip` / `MicroCompact` / `Collapse` / `AutoCompact` 是特定版本与特性开关下的实现观察，不是对外 API 契约**（见 §8）。
